@@ -1,0 +1,40 @@
+id: P1
+name: Integrating developer
+evidence: archetype-unvalidated
+caveat: >
+  This persona is an archetype, not a researched individual. No DISCOVER wave ran
+  and no integrator has been interviewed. DoR Item 2 (persona with specific
+  characteristics) is therefore PARTIAL for P1. Replace with a real named
+  integrator before treating any P1 job as validated.
+
+role: >
+  Backend engineer building a product that must hold and move balances -- a
+  digital wallet, a freelance marketplace, a points or credit system.
+
+context:
+  - Needs balances but is not a payments specialist and does not want to become one.
+  - Default instinct is a `balance` column plus two UPDATE statements.
+  - Operates under retry-prone network conditions; timeouts are routine.
+  - Reaches for ledgerops via HTTP API, not by importing a library.
+
+goals:
+  - Move value between accounts without writing reconciliation logic.
+  - Retry a failed request without risking a double charge.
+  - Never ship a negative balance.
+
+frustrations:
+  - Partial writes destroy value silently and cannot be reconstructed afterwards.
+  - Read-then-write balance checks pass twice under concurrency.
+  - Retrofitting a real ledger onto already-wrong production data.
+
+mental_model: >
+  Thinks in requests and responses, not in journal entries. Expects a transfer to
+  be one API call that either succeeds or fails cleanly. Learns the two-leg model
+  only if the API forces it -- so the API should not force it.
+
+vocabulary:
+  - transfer: one API call moving value from one account to another
+  - leg / entry: one side of a transfer; usually invisible to this persona
+  - idempotency key: the token that makes a retry safe
+
+jobs: [J1, J2, J3]

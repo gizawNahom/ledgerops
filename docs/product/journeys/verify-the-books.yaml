@@ -1,0 +1,72 @@
+id: verify-the-books
+name: Verify the books
+persona: P2
+jobs: [J4, J5]
+depth: comprehensive
+
+mental_model: >
+  The operator asks one question first -- "does this add up?" -- and wants a yes
+  or no before any detail. Detail is what they need second, once the answer is no.
+  A console that leads with tables of numbers answers the wrong question.
+
+steps:
+  - id: S1
+    name: Open the console
+    action: GET /console
+    output: Trial balance figure, green when zero
+    emotion: seeking reassurance
+    confidence: 5
+  - id: S2
+    name: Read the verdict
+    action: none -- the page states it
+    output: "Books balance: YES | NO"
+    emotion: relief or alarm
+    confidence: 8 when green
+    note: >
+      This must be a sentence, not a table. The operator should not have to
+      compute the verdict from displayed figures.
+  - id: S3
+    name: Spot a drifted account
+    action: Console lists accounts whose stored balance disagrees with entries
+    output: "account_id, stored, computed, delta"
+    emotion: focused concern
+    confidence: 6
+  - id: S4
+    name: Trace to entries
+    action: GET /accounts/{id}/entries
+    output: Ordered entries with running balance
+    emotion: understanding
+    confidence: 9
+    note: The running balance column is what makes the break point visible.
+
+emotional_arc:
+  shape: dip-and-recover
+  trough: S3
+  peak: S4
+  rationale: >
+    Unlike the integrator journey, this one is allowed to dip. Discovering drift
+    should feel alarming -- that is the console working. Confidence recovers at
+    S4 because the operator can now explain the problem rather than only fear it.
+
+shared_artifacts:
+  - name: account_id
+    source: S3 drift listing
+    consumed_by: [S4]
+  - name: computed_balance
+    source: derived from entries at S3
+    consumed_by: [S4]
+    note: >
+      Single source of truth is the entry table. The stored balance is the thing
+      being checked, never the thing being trusted.
+
+error_paths:
+  - step: S2
+    failure: Trial balance non-zero
+    response: Console shows NO and lists offending accounts
+    recovery: Operator proceeds to S3. This is a feature, not an error.
+  - step: S1
+    failure: Console unreachable
+    response: n/a
+    recovery: >
+      Operator falls back to the API. The console must not be the only path to
+      the verdict -- GET /health/trial-balance returns the same answer.

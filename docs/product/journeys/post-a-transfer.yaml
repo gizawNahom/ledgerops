@@ -1,0 +1,103 @@
+id: post-a-transfer
+name: Post a transfer
+persona: P1
+jobs: [J1, J2, J3]
+depth: comprehensive
+
+mental_model: >
+  The integrator thinks in one API call, not two legs. They expect "move 50 from A
+  to B" to succeed or fail as a unit. The two-leg model is an implementation truth
+  they should be able to ignore until they need to explain a balance -- at which
+  point it should be discoverable, not surprising.
+
+steps:
+  - id: S1
+    name: Create accounts
+    action: POST /accounts
+    output: "{account_id, balance: 0.00}"
+    emotion: neutral
+    confidence: 3
+    note: Setup step. Should be boring and forgettable.
+
+  - id: S2
+    name: Fund an account
+    action: POST /transfers from the system account
+    output: "{transaction_id, status: posted}"
+    emotion: mild curiosity
+    confidence: 5
+    note: >
+      First real posting. Funding must itself be a transfer from a system account,
+      not a balance assignment -- otherwise value enters the ledger unaccounted
+      for and I1 is violated at the source.
+
+  - id: S3
+    name: Post a transfer
+    action: POST /transfers {from, to, amount, Idempotency-Key}
+    output: "{transaction_id, status: posted, legs: [-50.00, +50.00]}"
+    emotion: satisfaction
+    confidence: 7
+    note: The core moment. Response exposes both legs so the model is discoverable.
+
+  - id: S4
+    name: Read balances
+    action: GET /accounts/{id}
+    output: "{account_id, balance}"
+    emotion: confirmation
+    confidence: 8
+
+  - id: S5
+    name: Retry after a timeout
+    action: POST /transfers with the same Idempotency-Key
+    output: "identical {transaction_id}; no new entries"
+    emotion: relief
+    confidence: 9
+    note: The trust-forming step. Confidence peaks here, not at S3.
+
+emotional_arc:
+  shape: rising
+  trough: S2
+  peak: S5
+  rationale: >
+    Confidence should build monotonically and peak on the retry, not the happy
+    path. Anyone can make the happy path work; the integrator's anxiety
+    ("trusting money to unproven code") resolves when the system survives being
+    used badly.
+
+shared_artifacts:
+  - name: account_id
+    source: S1 response
+    consumed_by: [S2, S3, S4]
+  - name: transaction_id
+    source: S3 response
+    consumed_by: [S5]
+  - name: idempotency_key
+    source: caller-generated before S3
+    consumed_by: [S3, S5]
+    note: Caller owns this. The API must never generate it.
+
+error_paths:
+  - step: S3
+    failure: Insufficient funds
+    response: "422 {error: insufficient_funds, available, requested}"
+    recovery: Caller shows the shortfall; no state changed.
+  - step: S3
+    failure: Unknown account
+    response: "404 {error: account_not_found, account_id}"
+    recovery: Caller corrects the id; no state changed.
+  - step: S3
+    failure: Process dies mid-write
+    response: none (connection drops)
+    recovery: >
+      Caller retries with the same Idempotency-Key. Either the transaction
+      committed and the retry returns it, or it did not and the retry posts it.
+      Never both, never half.
+  - step: S3
+    failure: Concurrent transfers racing the same balance
+    response: One succeeds, others 422
+    recovery: Caller retries the rejected ones if still desired.
+  - step: S5
+    failure: Same key reused for a different payload
+    response: "409 {error: idempotency_key_conflict}"
+    recovery: >
+      Caller must not reuse keys across distinct transfers. Silently returning
+      the original would be worse than failing loudly.

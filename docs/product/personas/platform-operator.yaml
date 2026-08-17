@@ -1,0 +1,34 @@
+id: P2
+name: Platform operator
+evidence: real-project-owner
+real_identity: >
+  The ledgerops project owner, dogfooding as the sole operator. This is a real
+  person with real accountability, not an archetype.
+
+role: Runs the ledger service; accountable when the numbers are wrong.
+
+context:
+  - Single seeded operator account; no registration, no other users.
+  - Accesses the internal operations console, not a customer surface.
+  - Has direct database access, so can both corrupt and repair state by hand.
+
+goals:
+  - Know at a glance whether the books balance.
+  - Explain any balance from its underlying entries.
+  - Catch corruption before anyone else notices it.
+
+frustrations:
+  - A balance number alone is unfalsifiable; it cannot be argued with.
+  - Silent drift stays invisible until a customer complains.
+
+mental_model: >
+  Thinks in terms of "does this add up?" rather than in terms of debits and
+  credits. Wants the console to answer a yes/no question first and offer detail
+  second.
+
+vocabulary:
+  - books balance: total of all entries equals zero
+  - drift: stored balance disagrees with the sum of its entries
+  - trial balance: the summed check across all accounts
+
+jobs: [J4, J5]

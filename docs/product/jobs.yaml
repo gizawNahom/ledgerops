@@ -1,0 +1,132 @@
+# Validated jobs for ledgerops.
+#
+# EVIDENCE CAVEAT: these jobs, forces, and opportunity scores are founder-estimated.
+# No DISCOVER wave has run; no user interviews back them. They are a defensible
+# prioritisation heuristic, not evidence. Revisit after the first real integration.
+
+meta:
+  bootstrapped_by: ledger-core
+  wave: DISCUSS
+  date: 2026-08-17
+  evidence_basis: founder-estimated
+  approved_by_user: true
+
+personas:
+  - id: P1
+    name: Integrating developer
+    ref: personas/integrating-developer.yaml
+    evidence: archetype-unvalidated
+  - id: P2
+    name: Platform operator
+    ref: personas/platform-operator.yaml
+    evidence: real-project-owner
+
+jobs:
+  - id: J1
+    persona: P1
+    story: >
+      When I move value between users, I want it recorded so money can never be
+      created or destroyed by a failure mid-write, so I can trust every balance
+      without building my own reconciliation.
+    dimensions:
+      functional: Record a value movement as an indivisible unit.
+      emotional: Stop worrying that the numbers are quietly wrong.
+      social: Be the engineer who did not lose customer money.
+    forces:
+      push: Two UPDATE statements can half-apply; failures destroy value silently.
+      pull: A write that either lands completely or not at all.
+      anxiety: Trusting money to unproven code.
+      habit: A balance column updated in place, with no record of movement.
+    invariant: I1
+    importance: 10
+    satisfaction: 2
+    opportunity: 18
+    slice: "01"
+
+  - id: J2
+    persona: P1
+    story: >
+      When my client retries after a network timeout, I want the transfer to post
+      exactly once, so I never double-charge a user.
+    dimensions:
+      functional: Deduplicate a resubmitted request.
+      emotional: Retry without fear.
+      social: Never explain a double charge to a customer.
+    forces:
+      push: Timeouts are indistinguishable from failures; retries are unavoidable.
+      pull: Safe-to-retry writes.
+      anxiety: Trusting money to unproven code.
+      habit: Hoping it does not happen, or checking for a duplicate by hand.
+    invariant: I7
+    importance: 9
+    satisfaction: 1
+    opportunity: 17
+    slice: "03"
+
+  - id: J3
+    persona: P1
+    story: >
+      When a user tries to spend more than they hold, I want the transfer rejected
+      even under concurrent requests, so I never have to explain a negative balance.
+    dimensions:
+      functional: Enforce sufficient funds at the moment of posting.
+      emotional: Confidence that the rule cannot be raced.
+      social: Not the platform where people spend money they do not have.
+    forces:
+      push: Read-then-write checks pass twice under concurrency.
+      pull: A check that holds under contention.
+      anxiety: Trusting money to unproven code.
+      habit: Checking the balance in application code before writing.
+    invariant: I4
+    importance: 9
+    satisfaction: 2
+    opportunity: 16
+    slice: "02"
+
+  - id: J5
+    persona: P2
+    story: >
+      When a balance looks wrong, I want to trace it to the exact entries that
+      produced it, so I can explain what actually happened.
+    dimensions:
+      functional: Drill from a balance to its constituent entries.
+      emotional: Replace suspicion with an answer.
+      social: Give a straight account when someone asks where the money went.
+    forces:
+      push: A bare balance number cannot be argued with or corrected.
+      pull: Every balance is explainable from its history.
+      anxiety: Trusting money to unproven code.
+      habit: Querying the database by hand and reconstructing by eye.
+    invariant: null
+    importance: 8
+    satisfaction: 2
+    opportunity: 14
+    slice: "05"
+
+  - id: J4
+    persona: P2
+    story: >
+      When I am accountable for platform funds, I want to see that the books
+      balance, so I catch corruption before customers report it.
+    dimensions:
+      functional: Verify stored balances agree with recorded entries.
+      emotional: Sleep without wondering.
+      social: Detect problems before users do.
+    forces:
+      push: Silent drift is invisible until a customer complains.
+      pull: A single view that says the books are sound.
+      anxiety: Trusting money to unproven code.
+      habit: Assuming correctness because nothing has broken yet.
+    invariant: I3
+    importance: 7
+    satisfaction: 1
+    opportunity: 13
+    slice: "04"
+
+deferred:
+  - id: J6
+    title: Tenant isolation
+    reason: >
+      Dropped from ledger-core scope by user decision on 2026-08-17. The service is
+      single-tenant for now. Revisit before any third party's money is held.
+    invariant: I8
