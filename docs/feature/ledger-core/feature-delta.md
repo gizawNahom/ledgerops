@@ -218,6 +218,46 @@ DISCOVER pass to close items 2 and 3.
 
 ---
 
+## Wave: DISCUSS / [REF] DoR Waiver
+
+**Recorded 2026-08-18, retroactively.** DESIGN and DEVOPS both ran without this
+waiver in place. That is a process defect: the DoR section above stated its own
+condition for handoff and the condition was not met before handoff occurred.
+Recorded here rather than quietly closed, because the sequence is part of the
+record.
+
+**Item 2 — persona with specific characteristics (PARTIAL) → waived.**
+P2, the platform operator, is a real named person with real accountability, and
+P2 owns both operator-facing slices (04, 05). P1, the integrating developer, is
+declared an archetype in the persona file itself (`personas/integrating-developer.yaml`)
+rather than presented as researched. The risk this leaves open is concrete and
+bounded: P1's *ergonomic* preferences — error message shape, response envelope,
+key naming — are guesses. P1's *correctness* requirements are not guesses, because
+they are double-entry bookkeeping invariants that hold regardless of who is
+integrating. The waiver covers the first category only.
+
+**Item 3 — ≥3 domain examples with real data (FAIL) → waived.**
+D6 already decided this: no production data source exists pre-launch, and the
+compensating control is property-based tests generating adversarial amounts
+rather than hand-picked fixtures. That control is stronger than the requirement
+it replaces for this specific feature — three real transactions would exercise
+three points in the amount space, while the `rapid` suite over the pure `Post`
+function (DDD-14) explores it. The waiver is not "we have no data, proceed"; it
+is "generated adversarial data covers the invariants better than a small real
+sample would."
+
+**What the waiver does not cover.** Neither justification survives contact with
+a third-party integrator. D8 already draws that line for tenancy ("revisit before
+third-party money"), and the same trigger applies here: before ledgerops accepts
+a caller who is not the author, items 2 and 3 need a real DISCOVER pass, not a
+second waiver.
+
+**Residual risk accepted by**: the project owner (P2), who is also the sole
+consumer at this stage — which is the specific circumstance that makes the
+waiver defensible rather than merely convenient.
+
+---
+
 ## Wave: DISCUSS / [REF] Wave decisions summary
 
 **Primary jobs**: move value atomically (J1), retry safely (J2), never go
