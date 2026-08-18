@@ -62,7 +62,37 @@ graph TB
 
 Single Go binary plus a static asset bundle for the SPA, plus one PostgreSQL
 instance. `docker-compose` for local development so `make demo-01` runs on a
-clean clone. Deployment target is deferred to the DEVOPS wave.
+clean clone.
+
+Deployment target, settled by DEVOPS (OPS-1): **there is no hosted environment**.
+`clean` (developer machine) and `ci` (GitHub Actions, PostgreSQL 16 via
+Testcontainers) are the entire environment matrix until one is needed. All
+six outcome KPIs are CI assertions rather than production telemetry, so nothing
+is currently learned by running the service anywhere else. When a hosted
+environment appears, the recorded strategy is Recreate, with rollback by
+redeploying the previous image tag.
+
+Two database roles (OPS-10), not one:
+
+| Role | Privileges | Used by |
+|---|---|---|
+| `ledgerops_app` | `SELECT`, `INSERT` on entries; `UPDATE`/`DELETE` **revoked** | The running service, and every test |
+| `ledgerops_migrate` | DDL | `golang-migrate`, and the `corrupt-04` harness |
+
+The service never connects as the migrate role. This is what makes D7
+enforcement structural: a role that can `ALTER TABLE … DISABLE TRIGGER` can
+rewrite history, so the application must not be that role.
+
+Migrations are **expand-only**. No migration may `DELETE` from or drop the entry
+table, and every schema change must leave the previous binary able to run
+against the new schema — new columns nullable or defaulted, renames done as
+add-backfill-retire across two releases. Rolling back code is therefore always
+safe and never requires rolling back schema, which is the only rollback story
+compatible with a ledger that cannot forget.
+
+Infrastructure detail: `docs/feature/ledger-core/feature-delta.md` § Wave: DEVOPS.
+Environment matrix: `docs/feature/ledger-core/devops/environments.yaml`.
+KPI instrumentation: `docs/product/kpi-contracts.yaml`.
 
 ### Scaling escape hatches (documented, not built)
 
@@ -128,7 +158,8 @@ the kind. This keeps the idiomatic Go `(value, error)` shape, so violations
 travel through `errors.As` and map cleanly onto HTTP 422, while the closed set
 keeps the HTTP adapter from inventing its own error vocabulary. The cost is that
 exhaustiveness is not compiler-checked — a linter over the switch sites is the
-compensating control, and belongs to DEVOPS.
+compensating control, and belongs to DEVOPS. **Discharged**: `golangci-lint`
+runs the `exhaustive` linter in CI job 1, required on every push.
 
 **The posting rulebook is one pure function** (DDD-14). `Post` takes the transfer
 command, the already-locked account snapshots, the current time, and a
@@ -183,7 +214,7 @@ recorded here so it reads as a decision rather than an oversight.
 | I3 | Stored balance equals the sum of its entries | Not enforced — *verified* by slice 04. Deliberate: it is the cross-check |
 | I4 | No wallet account balance is negative | Domain core, under row locks held by the application layer |
 | I7 | The same request applied twice changes state once | Application layer, via a unique constraint on the idempotency key |
-| D7 | Entries are never updated or deleted | Database: revoked privileges plus a rule/trigger |
+| D7 | Entries are never updated or deleted | Database: `UPDATE`/`DELETE` revoked from `ledgerops_app` (OPS-10), plus a rule/trigger. CI asserts the composite refusal |
 
 Note on I3: it is the only invariant deliberately left unenforced. Enforcing it
 would mean deriving balances, which removes the independent check that makes
@@ -306,4 +337,46 @@ show.
 
 The concurrency tests for I4 and I7 must run against real PostgreSQL. A fake
 would model the very behaviour under test, which is why WS strategy C was
-selected in DISCUSS.
+selected in DISCUSS. PostgreSQL 16 is supplied per test package by
+Testcontainers (OPS-11), so local and CI runs take the same code path.
+
+---
+
+## For Acceptance Designer
+
+*Owner: nw-solution-architect · consumed by nw-acceptance-designer (DISTILL)*
+
+**Driving ports** — the table above under § Driving ports (inbound) is
+authoritative. Restated here because DISTILL's Prior Wave Reading looks for it
+under this heading:
+
+| Port | Surface | Slice |
+|---|---|---|
+| `POST /accounts` | HTTP | 01 |
+| `POST /transfers` | HTTP | 01 · 02 (422) · 03 (`Idempotency-Key`) |
+| `GET /accounts/{id}` | HTTP | 01 |
+| `GET /accounts/{id}/entries` | HTTP | 05 |
+| `GET /health/trial-balance` | HTTP | 04 |
+| Console SPA | Browser | 04 · 05 |
+
+All require the seeded operator API key.
+
+**Walking skeleton**: slice 01, per D2. SPIKE was skipped and no probe exists,
+so DISTILL authors the walking-skeleton scenario itself rather than promoting
+one — one `@walking_skeleton @driving_port` scenario over `POST /transfers`,
+real HTTP through the real domain to real PostgreSQL.
+
+**Test infrastructure per port class**:
+
+| Port class | Mechanism |
+|---|---|
+| HTTP driving adapter | Real server, real routes, real API-key middleware |
+| `TransactionRepository` · `AccountRepository` · `IdempotencyStore` | Real PostgreSQL 16 via Testcontainers (OPS-11) — never faked; WS strategy C |
+| `Clock` · `IDGenerator` | Fakes. Function types (DDD-13), so a fake is a one-line literal |
+
+The `Clock`/`IDGenerator` split is the only place fakes are permitted, and it
+exists so that assertions on entry timestamps and transaction ids are
+deterministic. Every other port is exercised for real.
+
+**Environment parametrization**: `docs/feature/ledger-core/devops/environments.yaml`
+— `clean`, `ci`, `populated`, `contended`, `corrupted`.

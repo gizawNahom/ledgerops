@@ -1,0 +1,113 @@
+# environments.yaml — ledger-core
+# Consumed by DISTILL for Mandate 4 (Environmental Realism) and by DELIVER
+# step "run acceptance tests against every environment".
+#
+# ledger-core is a service, not an installer. The default nWave environments
+# (with-pre-commit, with-stale-config) model install-time coexistence and do
+# not apply. The environments below model the conditions under which the
+# ledger's guarantees can actually break: an empty database, a populated
+# append-only history, and concurrent writers.
+#
+# WS strategy C (feature-delta.md:147) governs all of them — every environment
+# that touches an adapter runs real PostgreSQL 16. There is no in-memory
+# variant, deliberately: a fake would model the transactional behaviour under
+# test.
+
+schema_version: "0.1"
+feature_id: ledger-core
+
+target_environments:
+  - name: clean
+    description: "Fresh clone, empty database, migrations applied from zero"
+    platform: [linux, macos, wsl]
+    preconditions:
+      - "docker compose available"
+      - "no named volumes from a prior run"
+      - "PostgreSQL 16 reachable, schema at migration 0"
+    used_by: ["all slices", "make demo-01..05", "Time to first demo KPI"]
+
+  - name: ci
+    description: "GitHub Actions ubuntu-latest; PostgreSQL 16 supplied per test package by Testcontainers (OPS-11)"
+    platform: [linux]
+    preconditions:
+      - "Docker daemon available to the runner"
+      - "testcontainers-go pulls postgres:16 (pinned by digest)"
+      - "app role holds no UPDATE/DELETE on the entry table"
+      - "migration role holds DDL, applied before the app role connects"
+      - "PBT seed printed to the job log and archived on failure"
+    used_by: ["every push", "all outcome-KPI gates"]
+
+  - name: populated
+    description: "Database carrying prior transactions and entries; migrations applied over existing append-only history"
+    platform: [linux, macos, wsl]
+    preconditions:
+      - "at least one prior transaction with its entry pair present"
+      - "stored balances agree with entry sums at entry (trial balance zero)"
+      - "migrations are expand-only — no down-migration may delete entry rows"
+    used_by: ["slice 04 verification scan", "slice 05 entry traceability", "migration safety"]
+    rationale: >
+      D7 makes entries permanent, so every migration after slice 01 runs against
+      history it may not rewrite. A migration validated only against `clean`
+      proves nothing about the case that actually exists in operation.
+
+  - name: contended
+    description: "Real PostgreSQL with N concurrent clients issuing overlapping postings"
+    platform: [linux, macos, wsl]
+    preconditions:
+      - "direct pgx connection pool — no pgbouncer or external pooler in front"
+      - "single PostgreSQL instance (no read replica serving balance reads)"
+      - "pool size >= concurrency under test, so contention is on rows not connections"
+      - "fresh Testcontainers instance per package — no state inherited from a prior test"
+    used_by: ["make race-02 (I4)", "make race-03 (I7)"]
+    rationale: >
+      I4 and I7 are properties of lock acquisition under contention (DDD-6) and
+      of a unique constraint under concurrent insert (DDD-8). Both are invisible
+      in a single-client environment. Pool size is a precondition because a pool
+      smaller than the concurrency level silently serialises the test and turns
+      it green for the wrong reason.
+
+  - name: corrupted
+    description: "Ledger with a single entry or stored balance deliberately mutated out of band"
+    platform: [linux, macos, wsl]
+    preconditions:
+      - "populated environment reached first"
+      - "corruption applied via the migration role, bypassing the app role's revoked privileges"
+      - "exactly one account affected per injection, delta recorded by the harness"
+    used_by: ["make corrupt-04", "Corruption detection KPI"]
+    rationale: >
+      Slice 04's value is that a NO verdict means something. Proving that
+      requires producing a genuine disagreement between stored balances and
+      entry sums, which by D7 only a privileged role can create.
+
+coexistence_matrix:
+  - tool: "make demo-01 .. make demo-05"
+    must_not_break: true
+    note: "Cross-cutting AC — every slice's demo must still run on a clean clone after later slices land. Slice 05 breaking demo-01 is a CI failure, not a follow-up."
+  - tool: docker compose (local dev stack)
+    must_not_break: true
+    note: "brief.md:63 — the clean-clone path depends on it."
+  - tool: golang-migrate
+    must_not_break: true
+    note: "Migrations stay plain reviewable SQL; no ORM-generated schema may be introduced alongside."
+  - tool: pre-commit
+    must_not_break: true
+    note: "Not yet installed. Listed so that adding hooks later does not silently displace an existing core.hooksPath."
+
+platform_coverage:
+  Linux: ["Ubuntu 22.04", "Ubuntu 24.04"]
+  WSL: ["WSL2"]
+  macOS: ["13.x", "14.x"]
+  CI: ["GitHub Actions ubuntu-latest"]
+  PostgreSQL: ["16"]
+  Go: ["1.23", "1.24"]
+  Node: ["20 LTS", "22 LTS"]
+
+deployment_assumptions:
+  - "There is no hosted environment. `clean` and `ci` are the whole matrix until one exists."
+  - "`docker compose up` MUST be idempotent — safe to run against an already-running stack."
+  - "Migrations MUST be idempotent and expand-only. No down-migration may DELETE from the entry table (D7)."
+  - "The application database role MUST NOT hold UPDATE or DELETE on the entry table. Enforced at role level, not only by trigger."
+  - "The migration role is separate, holds DDL, and is never used by the running service."
+  - "Rollback is redeploy-previous-tag. Schema rollback is expand-contract only; the previous binary must tolerate the newer schema."
+  - "`make demo-NN` MUST succeed on a clean clone with no manual setup step beyond `docker compose up`."
+  - "Teardown MUST remove only ledgerops volumes and containers, never a developer's other PostgreSQL data."

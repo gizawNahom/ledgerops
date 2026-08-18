@@ -1,0 +1,177 @@
+# kpi-contracts.yaml — instrumentation SSOT
+#
+# One entry per outcome KPI. Source of the targets: the DISCUSS wave's
+# § Outcome KPIs table (docs/feature/ledger-core/feature-delta.md:183).
+# This file adds the DEVOPS layer: where the number comes from, what emits it,
+# and what makes the build fail.
+#
+# Character of this set: five of six KPIs are CI assertions, not production
+# telemetry. ledger-core has no hosted environment (DEVOPS D1), and its
+# outcomes are correctness properties rather than usage or performance. A KPI
+# here is therefore normally a gate, and its "dashboard" is the CI job summary.
+
+schema_version: "0.1"
+
+kpis:
+  - id: KPI-1
+    name: Trial balance integrity
+    feature: ledger-core
+    target: "100% of CI runs report zero imbalance on a healthy ledger"
+    class: gate
+    collected_by:
+      surface: "GET /health/trial-balance"
+      fields: ["imbalance_minor", "entry_count", "elapsed_ms"]
+      environment: [ci, populated]
+    assertion: "imbalance_minor == 0"
+    emitted_as:
+      ci_job: invariant-gates
+      summary_line: "trial_balance_imbalance_minor=<n> entry_count=<n> elapsed_ms=<n>"
+      runtime_metric: "ledgerops_trial_balance_imbalance_minor (gauge)"
+    fails_build: true
+    guardrail:
+      metric: elapsed_ms
+      threshold_ms: 2000
+      action: "warn only — D9 deferred checkpointing; this is the trigger to revisit, not a failure"
+
+  - id: KPI-2
+    name: Negative wallet balances
+    feature: ledger-core
+    target: "0 across a 1000-iteration concurrency test"
+    class: gate
+    collected_by:
+      surface: "make race-02"
+      fields: ["iterations", "negative_balance_observations", "rejections_422"]
+      environment: [contended]
+    assertion: "negative_balance_observations == 0 AND iterations >= 1000"
+    emitted_as:
+      ci_job: invariant-gates
+      summary_line: "race02_iterations=<n> negatives=<n> rejections=<n>"
+      runtime_metric: "ledgerops_insufficient_funds_rejections_total (counter)"
+    fails_build: true
+    note: >
+      iterations is asserted alongside the observation count. A harness that
+      silently ran 10 iterations would otherwise report zero negatives and pass.
+
+  - id: KPI-3
+    name: Idempotent posting
+    feature: ledger-core
+    target: "Exactly 1 transaction from 50 concurrent same-key submissions"
+    class: gate
+    collected_by:
+      surface: "make race-03"
+      fields: ["submissions", "distinct_transaction_ids", "entry_pairs_stored"]
+      environment: [contended]
+    assertion: "distinct_transaction_ids == 1 AND entry_pairs_stored == 1 AND submissions >= 50"
+    emitted_as:
+      ci_job: invariant-gates
+      summary_line: "race03_submissions=<n> distinct_txn=<n> entry_pairs=<n>"
+      runtime_metric: "ledgerops_idempotent_replays_total (counter)"
+    fails_build: true
+    note: >
+      Both distinct_transaction_ids and entry_pairs_stored are asserted. The
+      first catches a broken replay response, the second catches a double write
+      that happens to render the same id.
+
+  - id: KPI-4
+    name: Corruption detection
+    feature: ledger-core
+    target: "100% of injected single-entry corruptions caught"
+    class: gate
+    collected_by:
+      surface: "make corrupt-04"
+      fields: ["injections", "detected", "account_named_correctly", "delta_correct"]
+      environment: [corrupted]
+    assertion: "detected == injections AND account_named_correctly == injections AND delta_correct == injections"
+    emitted_as:
+      ci_job: invariant-gates
+      summary_line: "corrupt04_injected=<n> detected=<n> named=<n> delta_ok=<n>"
+      runtime_metric: "ledgerops_drift_accounts (gauge)"
+    fails_build: true
+    note: >
+      Detection alone is not the outcome. US-4's pitch promises the verdict
+      names the account and the delta, so both are asserted — a verdict of NO
+      with no attribution would pass a detection-only check and fail the user.
+
+  - id: KPI-5
+    name: Time to first demo
+    feature: ledger-core
+    target: "Clone to `make demo-01` green in under 5 minutes"
+    class: gate
+    collected_by:
+      surface: "CI demo job wall-clock, checkout to `make demo-01` exit 0"
+      fields: ["demo_first_green_seconds"]
+      environment: [clean, ci]
+    assertion: "demo_first_green_seconds < 300"
+    emitted_as:
+      ci_job: demo
+      summary_line: "demo_first_green_seconds=<n>"
+    fails_build: true
+    caveat: >
+      The CI runner is a warm-image proxy for a developer's clean machine, not
+      the same thing — image pulls may be cached. Treat a CI regression as real
+      and a CI pass as necessary-but-not-sufficient. The KPI's stated
+      measurement ("timed on a clean machine") stays a periodic manual check.
+
+  - id: KPI-6
+    name: Slice cycle time
+    feature: ledger-core
+    target: "Each slice shipped within 1 day"
+    class: observed
+    collected_by:
+      surface: "git metadata — first commit touching docs/feature/ledger-core/slices/slice-NN* to the slice-NN-shipped tag"
+      fields: ["slice_id", "elapsed_hours"]
+      environment: [ci]
+    assertion: "none — reported, not gated"
+    emitted_as:
+      ci_job: nightly
+      summary_line: "slice=<NN> elapsed_hours=<n>"
+    fails_build: false
+    note: >
+      A process metric, not a product one. Gating on it would create an
+      incentive to under-scope a slice rather than to work faster, so it is
+      reported and read by a human. Requires the `slice-NN-shipped` tag
+      convention to be honoured by DELIVER.
+
+runtime_instrumentation:
+  # Secondary tier. No hosted environment exists, so these exist to be correct
+  # and scrapeable rather than to be watched. They cost little now and cost a
+  # lot to retrofit once there is traffic.
+  logs:
+    format: "JSON via log/slog to stdout"
+    required_fields: [ts, level, msg, request_id, route, status, elapsed_ms]
+    conditional_fields:
+      posting: [transaction_id, account_ids, amount_minor, currency]
+      idempotency: [idempotency_key_hash, replayed]
+      violation: [violation_kind]
+    redaction:
+      - "idempotency_key is logged hashed, never raw — it is client-chosen and may carry caller-side identifiers"
+      - "API keys never logged, including in request-echo error paths"
+  metrics:
+    exposition: "Prometheus text format at GET /metrics"
+    scraped_by: "nothing yet — no Prometheus deployed (DEVOPS D5)"
+    series:
+      - "ledgerops_postings_total{result=posted|rejected|replayed} (counter)"
+      - "ledgerops_posting_duration_seconds (histogram)"
+      - "ledgerops_insufficient_funds_rejections_total (counter)"
+      - "ledgerops_idempotent_replays_total (counter)"
+      - "ledgerops_trial_balance_imbalance_minor (gauge)"
+      - "ledgerops_trial_balance_scan_duration_seconds (histogram)"
+      - "ledgerops_drift_accounts (gauge)"
+  traces:
+    status: "not implemented"
+    rationale: >
+      One process, one database, no network hops between components. A trace
+      would contain a single meaningful span that posting_duration_seconds
+      already reports. Revisit if a second service appears.
+
+alerting:
+  status: "none"
+  rationale: >
+    Alerting requires a running environment and someone on call. Neither
+    exists (DEVOPS D1, D7). DISCUSS placed alerting and scheduled checks
+    explicitly out of scope (feature-delta.md:140). The metrics above are the
+    substrate an alert would need; the alert itself is deferred.
+  first_alerts_when_hosted:
+    - "ledgerops_trial_balance_imbalance_minor != 0 — page immediately"
+    - "ledgerops_drift_accounts > 0 — page immediately"
+    - "posting error rate 5xx > 1% over 5m — warn"

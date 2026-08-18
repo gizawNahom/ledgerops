@@ -365,7 +365,7 @@ Deferred to DISTILL or DELIVER:
 - SPA framework selection (React / Vue / Svelte) — DELIVER
 - Idempotency key expiry and garbage collection — known gap, no owner yet
 - Currency scale handling once a second currency appears — column exists, logic does not
-- Deployment target and CI topology — DEVOPS
+- ~~Deployment target and CI topology — DEVOPS~~ **Closed** by OPS-1..OPS-3
 - Whether Go↔TypeScript type generation is worth introducing — revisit if the API surface grows
 
 ---
@@ -392,7 +392,312 @@ collisions (registry empty — first feature).
 
 ---
 
+## Wave: DEVOPS / [REF] OPS decisions
+
+| ID | Decision | Rationale |
+|---|---|---|
+| OPS-1 | No hosted environment yet — `clean` + `ci` are the entire matrix | All six outcome KPIs are CI assertions, not production telemetry. `brief.md:65` deferred the target here; the honest answer is that nothing needs hosting until money is real |
+| OPS-2 | Docker Compose, single Go binary + one PostgreSQL 16 | `brief.md:63` already assumes it for the clean-clone demo path. Kubernetes has nothing to orchestrate |
+| OPS-3 | GitHub Actions | A Docker-capable runner is all WS strategy C needs; PostgreSQL 16 comes from Testcontainers (OPS-11), so there is no infrastructure to run |
+| OPS-4 | Greenfield — no existing infra or CI to integrate | Verified: repo holds `.git`, `.gitignore`, `CLAUDE.md`, `docs/`, `.nwave/` and nothing else |
+| OPS-5 | Structured JSON logs (`log/slog`) + Prometheus exposition at `/metrics`, nothing scraping yet | Instruments cost little now and a lot to retrofit. A deployed metrics stack with no environment to observe would be furniture |
+| OPS-6 | Recreate deployment; rollback is redeploy-previous-tag | One binary, one database, one operator, no traffic to protect |
+| OPS-7 | No continuous-learning capability (A/B, flags, canary analysis) | Conditional on existing monitoring/alerting infrastructure. There is none — foundational only |
+| OPS-8 | Trunk-based development | DoD items 8 and 3 already demand a shipped, demoed slice per day. That is trunk cadence; the branching model should say so rather than contradict it |
+| OPS-9 | Nightly-delta mutation testing | Confirmed as-written in `CLAUDE.md`. Delivery is never blocked by mutation runtime, which protects the one-day slice budget |
+| OPS-10 | Two database roles: `ledgerops_app` (no `UPDATE`/`DELETE` on entries) and `ledgerops_migrate` (DDL) | D7 says append-only is enforced *at the database level*. A trigger alone is defeated by `ALTER TABLE … DISABLE TRIGGER`; revoked privileges on the role the service actually uses are not. **New constraint — see § Changed Assumptions** |
+| OPS-11 | Adapter tests get PostgreSQL 16 from Testcontainers, not a CI service container | One code path for `clean` and `ci` instead of two that drift. Fresh instance per package satisfies the `contended` and `corrupted` isolation preconditions structurally. Detail under § CI/CD pipeline outline |
+
+---
+
+## Wave: DEVOPS / [REF] Environment matrix
+
+Machine artifact: `docs/feature/ledger-core/devops/environments.yaml`. DISTILL
+parametrizes acceptance scenarios over these.
+
+| Environment | Platform | Preconditions | Exercises |
+|---|---|---|---|
+| `clean` | linux · macos · wsl | docker compose available · no prior volumes · schema at migration 0 | All demos; KPI-5 |
+| `ci` | GitHub Actions ubuntu-latest | Docker daemon available (Testcontainers, OPS-11) · app role lacks `UPDATE`/`DELETE` on entries · migrations applied by the migrate role first · PBT seed logged | Every push; all KPI gates |
+| `populated` | linux · macos · wsl | ≥1 prior transaction and entry pair · trial balance zero on entry · migrations expand-only | Slice 04 scan, slice 05 traceability, migration safety |
+| `contended` | linux · macos · wsl | direct `pgx` pool, **no pgbouncer** · single instance, no read replica · pool size ≥ concurrency under test | `make race-02` (I4), `make race-03` (I7) |
+| `corrupted` | linux · macos · wsl | reached from `populated` · corruption applied via the migrate role · one account per injection, delta recorded | `make corrupt-04`, KPI-4 |
+
+The nWave defaults (`with-pre-commit`, `with-stale-config`) model install-time
+coexistence and are dropped: ledger-core is a service, not an installer. The
+five above model where a ledger's guarantees actually break — empty database,
+existing immutable history, concurrent writers, and deliberate damage.
+
+Two preconditions are load-bearing and easy to lose. **Pool size ≥ concurrency**
+in `contended`: a pool smaller than the concurrency level serialises the test at
+the connection layer and turns I4 green without ever contending a row. **No
+external pooler**: transaction-scoped repositories (DDD-13) assume the lock
+acquired by `SELECT … FOR UPDATE` and the eventual `COMMIT` share one session.
+
+---
+
+## Wave: DEVOPS / [REF] CI/CD pipeline outline
+
+Two workflows. Trunk-based means the full gate suite runs on **every** push to
+every branch — not a reduced set on branches and the real thing on `main`. A
+gate that only runs post-merge is a gate that reports damage.
+
+`.github/workflows/ci.yml` — trigger: `push` (all branches) + `pull_request`
+
+| # | Job | Needs | PostgreSQL | Gate |
+|---|---|---|---|---|
+| 1 | `lint` | — | no | `gofmt -l` empty · `go vet` · `golangci-lint` incl. **exhaustive** over violation-kind switches (DDD-12) · `tsc --noEmit` · `eslint` |
+| 2 | `build` | — | no | `go build ./...` · SPA production bundle |
+| 3 | `unit` | — | no | `go test -race ./internal/domain/... ./internal/app/...` — no database reachable from this job, by design |
+| 4 | `property` | — | no | `rapid` suite, ≥1000 checks; seed printed to log and uploaded as an artifact on failure (DDD-14 determinism is worthless if the seed is lost) |
+| 5 | `integration` | 1,2 | Testcontainers | Migrations from zero, then adapter tests |
+| 6 | `append-only-proof` | 5 | Testcontainers | `UPDATE` and `DELETE` on entries as `ledgerops_app` are **refused** — asserts both the revoked privilege and the trigger (cross-cutting AC, D7) |
+| 7 | `invariant-gates` | 5 | Testcontainers | `make race-02` · `make race-03` · `make corrupt-04` · trial-balance zero. Emits KPI-1..4 to the job summary |
+| 8 | `demo` | 2 | docker compose | `make demo-01 .. demo-NN` from a clean checkout; wall-clock emitted as `demo_first_green_seconds` (KPI-5) |
+
+Jobs 1–4 need no database and run in parallel from the start; 5–8 fan out after
+the build. Branch protection on `main`: all eight required, linear history, no
+force-push.
+
+**OPS-11 — adapter tests obtain PostgreSQL 16 via Testcontainers**, not a
+GitHub Actions service container. The runner's Docker daemon is the only CI
+dependency. Rationale: a service container is declared in workflow YAML and has
+no local equivalent, so the `clean` and `ci` environments would be wired two
+different ways and drift silently — the failure mode being a test that passes
+locally against a developer's long-lived database and fails in CI, or worse, the
+reverse. Testcontainers makes both environments the same code path. It also
+satisfies the `contended` precondition structurally: a fresh instance per test
+package cannot have a pooler in front of it, and cannot inherit dirty state from
+a previous test, which matters most for `corrupt-04` where leftover drift would
+produce a false pass. Cost, accepted: Docker becomes mandatory for any adapter
+test, and cold start adds a few seconds per package. Job 8 keeps `docker compose`
+because the demos must exercise the same path a developer's clean clone does.
+
+`.github/workflows/nightly.yml` — trigger: `schedule` (daily) + `workflow_dispatch`
+
+| Job | Scope | Gate |
+|---|---|---|
+| `mutation-delta` | Go files changed in the last 24h (`go-mutesting` or equivalent) | Kill rate reported, **not** blocking (OPS-9) |
+| `slice-cycle-time` | git metadata → `slice-NN-shipped` tags | Reported (KPI-6) |
+| `demo-cold` | Docker layer cache disabled | Cold-start `demo_first_green_seconds`, the honest KPI-5 reading |
+
+No `deploy` job exists. There is nowhere to deploy (OPS-1), and a stub deploy
+job that no-ops is worse than its absence — it reads as coverage that is not
+there.
+
+---
+
+## Wave: DEVOPS / [REF] Monitoring contracts
+
+Full contract with field names and thresholds: `docs/product/kpi-contracts.yaml`.
+
+| KPI | Target | Instrument | Assertion | Blocks build |
+|---|---|---|---|---|
+| Trial balance integrity | 100% of runs zero | `GET /health/trial-balance` → `imbalance_minor`, `entry_count`, `elapsed_ms` | `imbalance_minor == 0` | yes |
+| Negative wallet balances | 0 over 1000 iterations | `make race-02` → `negative_balance_observations`, `iterations` | `negatives == 0 AND iterations >= 1000` | yes |
+| Idempotent posting | exactly 1 txn from 50 | `make race-03` → `distinct_transaction_ids`, `entry_pairs_stored` | both `== 1`, `submissions >= 50` | yes |
+| Corruption detection | 100% caught | `make corrupt-04` → `detected`, `account_named_correctly`, `delta_correct` | all `== injections` | yes |
+| Time to first demo | < 5 min | `demo` job wall-clock → `demo_first_green_seconds` | `< 300` | yes |
+| Slice cycle time | ≤ 1 day | git first-commit → `slice-NN-shipped` tag | none — reported | no |
+
+Three of these assert a *denominator* alongside the result. `iterations >= 1000`
+and `submissions >= 50` exist because a harness that quietly ran ten iterations
+reports zero negatives and passes. Likewise KPI-4 asserts attribution, not just
+detection: US-4 promises the verdict names the account and the delta, so a bare
+`NO` would satisfy a detection-only check and still fail the operator.
+
+KPI-6 is deliberately ungated. Gating cycle time rewards under-scoping a slice,
+not working faster.
+
+Guardrail: `elapsed_ms` on the trial-balance scan warns above 2000ms. That is
+the agreed trigger to revisit D9's deferred checkpointing — a signal, not a
+failure.
+
+---
+
+## Wave: DEVOPS / [REF] Deployment strategy
+
+**Recreate.** Stop the container, start the new one. One binary, one database,
+a single operator, and no traffic whose interruption anyone would notice.
+Blue-green and canary both presuppose a traffic router and a second stack; with
+one PostgreSQL holding append-only history, the database is the hard half of a
+blue-green swap and duplicating it is precisely what D7 forbids.
+
+**Rollback contract.** Rollback is redeploy of the previous image tag, and it is
+constrained by immutability. Migrations are **expand-only**: a migration may add
+tables, columns, and indexes, and may never `DELETE` from or drop the entry
+table. Consequently every schema change must leave the *previous* binary able to
+run against the *new* schema — new columns arrive nullable or defaulted, renames
+are add-then-backfill-then-stop-writing across two releases, never `ALTER …
+RENAME`. Rolling back code is therefore always safe and never requires rolling
+back schema, which is the only rollback story compatible with a ledger that
+cannot forget. Contracting migrations, when eventually needed, are a separate
+deliberate release after the old binary is retired.
+
+---
+
+## Wave: DEVOPS / [REF] Mutation testing strategy
+
+**nightly-delta** (OPS-9), unchanged from `CLAUDE.md` § Mutation Testing
+Strategy. CI runs mutation on files modified that day; it does not run during
+feature delivery and does not block a slice.
+
+Reconciliation, since the two config surfaces look contradictory:
+`.nwave/des-config.json` sets `rigor.mutation_enabled: false`, which governs
+whether the **DELIVER wave** runs mutation inline. Under nightly-delta it
+correctly stays false. The nightly CI job is the mutation surface. No file
+changes; the apparent conflict is the two settings describing different things.
+
+Primary mutation target is `internal/domain/` — the pure `Post` function
+(DDD-14) is where I1 and I4 are decided, and it is the one place where a
+surviving mutant means an invariant is untested rather than merely under-covered.
+
+---
+
+## Wave: DEVOPS / [REF] Observability stack
+
+| Signal | Choice | Status |
+|---|---|---|
+| Logs | `log/slog`, JSON to stdout | Implemented in DELIVER |
+| Metrics | `prometheus/client_golang`, exposition at `GET /metrics` | Exposed; **nothing scrapes it yet** (OPS-1) |
+| Traces | none | Declared out |
+| Alerting | none | Out of scope per DISCUSS (`feature-delta.md:140`) |
+
+Required log fields: `ts`, `level`, `msg`, `request_id`, `route`, `status`,
+`elapsed_ms`; plus `transaction_id`, `account_ids`, `amount_minor`, `currency`
+on postings, `idempotency_key_hash` and `replayed` on idempotency paths, and
+`violation_kind` on rejections. The idempotency key is logged **hashed** — it is
+client-chosen and may carry caller-side identifiers. API keys are never logged,
+including on request-echo error paths.
+
+Series: `ledgerops_postings_total{result}`, `ledgerops_posting_duration_seconds`,
+`ledgerops_insufficient_funds_rejections_total`,
+`ledgerops_idempotent_replays_total`,
+`ledgerops_trial_balance_imbalance_minor`,
+`ledgerops_trial_balance_scan_duration_seconds`, `ledgerops_drift_accounts`.
+
+Tracing is omitted on merit, not budget: one process, one database, no network
+hop between components. The single meaningful span is already reported by
+`posting_duration_seconds`. Revisit when a second service exists.
+
+---
+
+## Wave: DEVOPS / [REF] Branching strategy
+
+**Trunk-based development.** `main` is the only long-lived branch; work branches
+live under a day and merge behind the full eight-job gate. Tag `slice-NN-shipped`
+on the commit that completes each slice — KPI-6 is computed from those tags, so
+the convention is a DELIVER obligation, not decoration.
+
+Alignment with CI: because branches are short-lived and merge continuously, the
+identical suite runs on every push (see pipeline outline). Branch protection on
+`main` requires all eight jobs plus linear history. This is the CI cost
+trunk-based development trades for: the gate must be trustworthy on every commit,
+because there is no release branch in which to discover problems later.
+
+---
+
+## Wave: DEVOPS / [REF] Coexistence matrix
+
+| Tool | Must not break | Note |
+|---|---|---|
+| `make demo-01` … `demo-05` | yes | Cross-cutting AC. Slice 05 breaking slice 01's demo is a CI failure in the same build, not a follow-up ticket |
+| `docker compose` dev stack | yes | The clean-clone path depends on it (`brief.md:63`) |
+| `golang-migrate` | yes | Migrations stay plain reviewable SQL; no ORM-generated schema alongside |
+| `pre-commit` | yes | Not installed today. Listed so that adding hooks later does not silently displace an existing `core.hooksPath` |
+
+The first row is the one that bites. Every slice's demo target stays in the CI
+`demo` job permanently, so the demo suite grows monotonically and regression is
+caught by the build that causes it.
+
+---
+
+## Wave: DEVOPS / [REF] Pre-requisites
+
+DESIGN constraints the platform must satisfy:
+
+- **WS strategy C** — every environment touching an adapter runs real
+  PostgreSQL 16. No in-memory variant is offered anywhere in CI
+- **DDD-6 lock ordering** — direct `pgx` pool only; no pgbouncer or external
+  pooler may sit between the service and PostgreSQL in any environment where
+  `race-02`/`race-03` run
+- **D7 append-only** — enforced by *both* revoked role privileges (OPS-10) and a
+  rule/trigger, with job 6 asserting the composite refusal
+- **DDD-12 exhaustiveness** — `golangci-lint` runs the `exhaustive` linter over
+  violation-kind switch sites. This is the compensating control `brief.md:131`
+  explicitly assigned to DEVOPS, now discharged
+- **DDD-14 determinism** — PBT seeds printed to the CI log every run and
+  uploaded as an artifact on failure. A non-reproducible property failure in a
+  ledger is a bug you cannot chase
+- **D9 full-scan verification** — `elapsed_ms` surfaced on the health endpoint
+  and warned on at 2000ms, so degradation is measured rather than guessed
+- **Single-tenant (D8)** — no per-tenant labels on any metric or log field.
+  Adding them later is a schema change; inventing them now is speculative
+
+---
+
+## Wave: DEVOPS / [REF] Wave decisions summary
+
+**Deployment**: none hosted — Docker Compose locally, Recreate strategy recorded
+for when an environment exists, rollback by previous image tag under an
+expand-only migration rule.
+**CI/CD**: GitHub Actions, eight required jobs on every push, trunk-based.
+**Observability**: `slog` JSON logs + Prometheus exposition, no collector, no
+traces, no alerting.
+**Mutation testing**: nightly-delta, non-blocking, targeting `internal/domain/`.
+
+**Constraints established**: two database roles with `UPDATE`/`DELETE` on
+entries revoked from the application role (OPS-10) · no external connection
+pooler · migrations expand-only, never deleting entry rows · pool size ≥
+concurrency in contended tests · PBT seeds archived · every slice's demo target
+retained in CI permanently.
+
+**Open questions closed**: "Deployment target and CI topology — DEVOPS"
+(`feature-delta.md:328`) and `brief.md:65` are both resolved by OPS-1..OPS-3.
+
+**Upstream changes**: one — OPS-10 adds a database-role constraint DESIGN did
+not specify. Recorded below and propagated to `brief.md`. No architecture
+contradiction was found; no `upstream-changes.md` was required.
+
+---
+
 ## Changed Assumptions
+
+### OPS-10 — append-only enforcement needs a role split, not only a trigger (2026-08-18)
+
+**Original assumption** — `docs/product/architecture/brief.md:186`, Invariants
+table:
+
+> | D7 | Entries are never updated or deleted | Database: revoked privileges plus a rule/trigger |
+
+and `feature-delta.md:36`:
+
+> | D7 | **Entries are append-only, enforced at the database level** | … |
+
+**New assumption**: "revoked privileges" is made concrete as a **two-role
+split**. `ledgerops_app` — the role the running service and every test connect
+as — holds `SELECT` and `INSERT` on the entry table and has `UPDATE` and
+`DELETE` revoked. `ledgerops_migrate` holds DDL and is used only by
+`golang-migrate` and by the corruption harness. The service never connects as
+the migrate role.
+
+**Rationale**: DESIGN named revoked privileges and a trigger in the same breath
+without saying which role loses what, which is answerable only once there is a
+deployment and a test harness — that is this wave. The split matters for two
+concrete reasons. First, a trigger alone is not database-level enforcement in
+any meaningful sense: whatever role can `ALTER TABLE … DISABLE TRIGGER` can
+mutate history, and if that is the application's own role the guarantee is
+discipline wearing a database costume. Second, `make corrupt-04` must *create* a
+genuine drift to prove slice 04 detects it. Under a single role, either the
+harness cannot corrupt anything, or the application can — and exactly one of
+those is acceptable. The split resolves it: corruption is possible only for the
+privileged role the service never uses.
+
+**Downstream impact**: the postgres adapter takes two DSNs rather than one;
+`cmd/api/` wiring reads only the app DSN; migrations and the corruption harness
+read the migrate DSN. CI job 6 asserts the refusal as `ledgerops_app`.
+`brief.md` § Invariants and § Deployment shape updated. DISTILL and DELIVER have
+not run, so nothing already built is invalidated.
 
 ### DDD-10 reversed — paradigm OOP → functional (2026-08-18)
 
