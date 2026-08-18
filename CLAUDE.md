@@ -8,10 +8,12 @@ Feature narrative: `docs/feature/ledger-core/feature-delta.md`
 
 ## Development Paradigm
 
-This project follows the **object-oriented** paradigm. Use
-@nw-software-crafter for implementation.
+This project follows the **functional programming** paradigm. Use
+@nw-functional-software-crafter for implementation.
 
-Go routing decision; the idiom is procedural-with-interfaces (DDD-10).
+Hexagonal DDD with a functional domain: pure core, effect shell, immutable
+types (DDD-16, supersedes DDD-10). See
+`docs/product/architecture/adr-007-functional-domain-core.md`.
 
 ## Mutation Testing Strategy
 

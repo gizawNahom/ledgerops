@@ -249,8 +249,13 @@ mitigation (D6).
 | DDD-7 | Balances stored, updated in the posting transaction | Accepted — ADR-003 |
 | DDD-8 | Idempotency: key + fingerprint + transaction_id, replay re-renders | Accepted — ADR-005, supersedes slice-03 recommendation |
 | DDD-9 | Append-only entries enforced by the database | Accepted — ADR-004, implements D7 |
-| DDD-10 | Paradigm OOP → `@nw-software-crafter` | Accepted — Go routing; idiom is procedural-with-interfaces |
+| DDD-10 | ~~Paradigm OOP → `@nw-software-crafter`~~ | **Reversed 2026-08-18** — superseded by DDD-16. See § Changed Assumptions |
 | DDD-11 | One unit of work spans Transaction and Account aggregates | Accepted — deliberate DDD deviation, documented in brief.md |
+| DDD-12 | Invariant violations are a sealed taxonomy, not open errors | Accepted — Go lacks sum types; closed set via unexported interface, `(value, error)` shape retained |
+| DDD-13 | Driven ports hybrid by arity: function types for single-operation, interfaces for transaction-scoped | Accepted — follows effect structure, not paradigm purity |
+| DDD-14 | The posting rulebook is one pure `Post` function over locked snapshots | Accepted — I1 and I4 decided in one pure unit; primary PBT target |
+| DDD-15 | Strict immutability: unexported fields, smart constructors, no mutating methods | Accepted — invariants hold by construction |
+| DDD-16 | Paradigm functional → `@nw-functional-software-crafter` | Accepted — supersedes DDD-10; hexagonal DDD with a functional domain |
 
 ---
 
@@ -298,7 +303,8 @@ architecturally significant.
 
 ## Wave: DESIGN / [REF] Decisions table
 
-DDD-1 … DDD-11 above. Rationale lives in `docs/product/architecture/adr-00{1..6}.md`.
+DDD-1 … DDD-16 above. Rationale lives in `docs/product/architecture/adr-00{1..7}.md`.
+DDD-12 … DDD-16 are recorded in `adr-007-functional-domain-core.md`.
 
 ---
 
@@ -327,17 +333,69 @@ Deferred to DISTILL or DELIVER:
 ## Wave: DESIGN / [REF] Wave decisions summary
 
 **Pattern**: modular monolith with ports-and-adapters.
-**Paradigm**: OOP (agent routing); Go idiom is procedural-with-interfaces.
+**Paradigm**: functional — pure core, effect shell, immutable domain types (DDD-16).
 **Key components**: domain core · application · postgres adapter · http adapter · console SPA.
 **Stack**: Go 1.23+ · PostgreSQL 16 · TypeScript 5.x.
 
 **Constraints established**: entries append-only at database level (DDD-9) · lock
 ordering rule owned by `AccountRepository` (DDD-6) · no external calls inside a
 posting transaction · response rendering must be a pure function of the stored
-transaction (DDD-8).
+transaction (DDD-8) · the pure core performs no I/O, reads no clock, and
+generates no identifiers — every non-determinism is passed in as a value
+(DDD-14) · domain types are immutable with unexported fields (DDD-15).
 
 **Upstream changes**: slice-03 idempotency recommendation superseded — see
 `slices/slice-03-idempotent-retry.md` § Changed Assumptions.
 
 **Outcome collision check**: `nwave-ai outcomes check-delta` → exit 0, no
 collisions (registry empty — first feature).
+
+---
+
+## Changed Assumptions
+
+### DDD-10 reversed — paradigm OOP → functional (2026-08-18)
+
+**Original assumption** — `docs/feature/ledger-core/feature-delta.md`, DESIGN
+DDD list, as written on 2026-08-18:
+
+> | DDD-10 | Paradigm OOP → `@nw-software-crafter` | Accepted — Go routing; idiom is procedural-with-interfaces |
+
+and in `docs/product/architecture/brief.md:7`:
+
+> **Paradigm**: OOP (agent routing) — Go idiom is procedural-with-interfaces
+
+**New assumption** (DDD-16): the paradigm is **functional**. Implementation
+routes to `@nw-functional-software-crafter`. The domain is modelled as immutable
+value types with the posting rulebook expressed as one pure function; the
+application layer is an explicit effect shell.
+
+**Rationale**: DDD-10 was decided by language default — `/nw-design` step 4
+classifies Go as OOP-native and recommends OOP — rather than by the design's own
+shape. The shape already contradicted the label: DDD-1 specified a pure domain
+core with I/O at the edges, and `Clock` and `IDGenerator` were already ports so
+that the core would be deterministic. That is a functional architecture wearing
+an OOP routing token.
+
+Two things made the reversal worth the churn:
+
+1. **The knowledge is agent-bound.** The `nw-fp-hexagonal-architecture`,
+   `nw-fp-domain-modeling`, and `nw-fp-principles` skills are declared on
+   `@nw-functional-software-crafter` and are not loadable by
+   `@nw-software-crafter`. Under DDD-10 the crafter would have implemented a
+   pure-core design without access to the pure-core playbook.
+2. **Testability ranks second.** A pure `Post` over locked snapshots (DDD-14) is
+   directly property-testable with no database and no mocks, which is what the
+   I1/I4 invariant suite needs.
+
+**Known cost, accepted**: no `nw-fp-go` skill exists — the installed FP language
+skills are F#, Haskell, Scala, Clojure, and Kotlin. The crafter's language
+detection will find `*.go`, fail to load a Go-specific FP skill, and fall back to
+generic FP guidance. Go's missing sum types are the sharp edge, which is why
+DDD-12 settles violation representation explicitly at design time rather than
+leaving it to the crafter. Go remains the language: DDD-2 was decided on
+concurrency primitives for the I4/I7 race tests, and that reasoning is untouched.
+
+**Downstream impact**: none consumed yet. DEVOPS, DISTILL, and DELIVER have not
+run; no production code exists. `CLAUDE.md` § Development Paradigm updated to
+match, which is the file `/nw-deliver` step 1.5 actually reads.

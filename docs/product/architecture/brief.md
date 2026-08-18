@@ -4,7 +4,7 @@ SSOT for architecture. Each architect owns its section. Bootstrapped during the
 DESIGN wave for `ledger-core`, 2026-08-18.
 
 **Pattern**: modular monolith with ports-and-adapters
-**Paradigm**: OOP (agent routing) — Go idiom is procedural-with-interfaces
+**Paradigm**: functional — pure core, effect shell, immutable domain types
 **Stack**: Go · PostgreSQL · TypeScript SPA
 **Quality attributes, ranked**: correctness · auditability · testability
 
@@ -97,12 +97,63 @@ was deferred (D8), and there is no second context to integrate with.
 
 ### Aggregates
 
-**Transaction** *(aggregate root)* — owns its Entries. Enforces I1: entries sum
-to zero per currency. Immutable once written (D7). Entries have no identity
-outside their transaction.
+Aggregates are consistency boundaries, not objects with behaviour. Each is an
+immutable value type; the rules that govern it are pure functions in the same
+module, not methods that mutate it.
 
-**Account** *(aggregate root)* — owns `balance` and `type`. Enforces I4 for
-wallet accounts: balance may not go negative.
+**Transaction** *(aggregate root)* — owns its Entries. I1 (entries sum to zero
+per currency) is a predicate over the entry list, checked before the value is
+constructed. Immutable once written (D7), and immutable in memory besides.
+Entries have no identity outside their transaction.
+
+**Account** *(aggregate root)* — owns `balance` and `type`. Applying a debit
+yields a *new* Account value; the I4 check for wallet accounts happens on the way
+to constructing it, so an Account holding an illegal balance is never produced.
+
+### Functional modeling decisions
+
+**Immutability is strict** (DDD-15). Domain types keep their fields unexported
+and are built through smart constructors that validate on the way in. There are
+no mutating methods and no value receivers that pretend to mutate — applying a
+change returns a new value. The practical consequence: a zero-value Money or a
+negative wallet Account cannot be constructed outside the domain package, so
+invariants hold by construction rather than by discipline. The extra allocation
+is irrelevant at this scale, where postings are bounded by database round-trips.
+
+**Invariant violations are a sealed taxonomy** (DDD-12). Go has no sum types, so
+the closed set is built by hand: a single domain violation type carrying a kind
+discriminant — unbalanced (I1), insufficient funds (I4), unknown account — whose
+interface can only be satisfied inside the domain package. Callers switch over
+the kind. This keeps the idiomatic Go `(value, error)` shape, so violations
+travel through `errors.As` and map cleanly onto HTTP 422, while the closed set
+keeps the HTTP adapter from inventing its own error vocabulary. The cost is that
+exhaustiveness is not compiler-checked — a linter over the switch sites is the
+compensating control, and belongs to DEVOPS.
+
+**The posting rulebook is one pure function** (DDD-14). `Post` takes the transfer
+command, the already-locked account snapshots, the current time, and a
+pre-generated transaction id, and returns the complete intended change: the
+transaction, its entries, and the balance deltas to apply. It performs no I/O,
+reads no clock, and generates no identifiers — every non-determinism is passed
+in as a value. I1 and I4 are therefore decided in a single pure unit, which is
+the natural target for the property-based tests that testability-ranked-second
+demands. The application layer's remaining job is to lock, call it once, and
+persist what it returns.
+
+### Effect boundary
+
+The Read → Decide → Write sandwich is the hexagonal boundary in this design:
+
+| Step | Purity | Responsibility |
+|---|---|---|
+| Read | impure | Open the database transaction, lock the touched accounts in ascending id order (DDD-6), read the clock, generate the id |
+| Decide | **pure** | `Post` — validate the command, check I1 and I4, produce the transaction, entries, and balance deltas |
+| Write | impure | Persist the transaction, entries, balance deltas, and idempotency record; commit |
+
+The dependency rule: the shell may call the core, the core never calls the
+shell, and the core does not know the shell exists. Row locks are acquired
+before the pure step, not inside it — locking is an effect, and the ordering
+rule that makes it safe is the shell's responsibility.
 
 ### Deliberate deviation: one unit of work spans two aggregates
 
@@ -158,13 +209,20 @@ the edges**. This follows directly from testability ranking second: invariant
 tests and property-based tests run against the domain core with no database, and
 only the adapter tests need PostgreSQL.
 
+Under the functional paradigm the ports-and-adapters boundary and the
+purity boundary are the same line — a port is the type of an effect the core
+refuses to perform. The application layer is the effect shell: it sequences
+read, decide, and write, and holds every ordering rule that the pure core cannot
+express (lock acquisition order, transaction demarcation, idempotency-key
+insertion).
+
 ### Component decomposition
 
 | Component | Path | Responsibility | Change |
 |---|---|---|---|
-| Domain core | `internal/domain/` | Money, Account, Entry, Transaction, posting rules. Pure — no I/O, no clock, no randomness | CREATE NEW |
-| Application | `internal/app/` | Use cases: PostTransfer, CreateAccount, GetBalance, GetEntries, VerifyBooks | CREATE NEW |
-| Ports | `internal/app/ports/` | Interfaces the application depends on | CREATE NEW |
+| Domain core | `internal/domain/` | Money, Account, Entry, Transaction, the `Post` decide function, violation taxonomy. Pure — no I/O, no clock, no randomness. Immutable types with unexported fields | CREATE NEW |
+| Application | `internal/app/` | Effect shell. Use cases: PostTransfer, CreateAccount, GetBalance, GetEntries, VerifyBooks. Sequences read → decide → write | CREATE NEW |
+| Ports | `internal/app/ports/` | Effect types the shell depends on: function types for single-operation ports, interfaces for transaction-scoped repositories | CREATE NEW |
 | Postgres adapter | `internal/adapters/postgres/` | Repository implementations, migrations, row locking | CREATE NEW |
 | HTTP adapter | `internal/adapters/http/` | Handlers, routing, API-key auth, JSON encoding | CREATE NEW |
 | Entrypoint | `cmd/api/` | Wiring and configuration | CREATE NEW |
@@ -183,16 +241,28 @@ only the adapter tests need PostgreSQL.
 
 ### Driven ports (outbound) and adapters
 
-| Port | Adapter | Notes |
-|---|---|---|
-| `TransactionRepository` | `postgres` | Writes transaction + entries + balance updates in one SQL transaction |
-| `AccountRepository` | `postgres` | `SELECT … FOR UPDATE` in deterministic id order |
-| `IdempotencyStore` | `postgres` | Unique constraint on key; stores request fingerprint + transaction_id |
-| `Clock` | `system` / `fake` | Injected so entry timestamps are deterministic in tests |
-| `IDGenerator` | `uuid` / `fake` | Injected for the same reason |
+Ports are expressed **hybrid by arity** (DDD-13): a port with one operation is a
+function type; a port whose operations must share a transaction handle stays an
+interface.
 
-`Clock` and `IDGenerator` are ports purely for testability. That is the second
-quality attribute doing visible work.
+| Port | Form | Adapter | Notes |
+|---|---|---|---|
+| `TransactionRepository` | interface | `postgres` | Writes transaction + entries + balance updates in one SQL transaction |
+| `AccountRepository` | interface | `postgres` | `SELECT … FOR UPDATE` in deterministic id order; applies balance deltas |
+| `IdempotencyStore` | interface | `postgres` | Unique constraint on key; stores request fingerprint + transaction_id |
+| `Clock` | function type | `system` / `fake` | Injected so entry timestamps are deterministic in tests |
+| `IDGenerator` | function type | `uuid` / `fake` | Injected for the same reason |
+
+The split is not a compromise between paradigms — it follows the effect
+structure. `Clock` and `IDGenerator` are single, independent effects, so as
+function types their fakes are one-line literals and no test needs a stub type.
+The three repositories each expose several operations that must run inside the
+*same* database transaction; expressing them as loose function types would let a
+caller wire two of them to different transactions, and nothing in the type
+system would object. The interface keeps that cohesion visible.
+
+`Clock` and `IDGenerator` exist as ports purely for testability. That is the
+second quality attribute doing visible work.
 
 ### Technology choices
 
@@ -224,6 +294,15 @@ rather than duplicated.
 | Domain core | nothing | microseconds — property tests live here |
 | Application | fake ports | milliseconds |
 | Adapters | real PostgreSQL | seconds — WS strategy C, per DISTILL Mandate 5 |
+
+The pure `Post` function is the primary property-based-test target: I1 (entries
+sum to zero) and I4 (no negative wallet balance) are properties over generated
+commands and account snapshots, provable with no database and no mocks. Because
+time and identity are passed in as values, every such test is deterministic and
+reproducible by seed. What remains for the concurrency suite is narrower and
+sharper — not "are the rules right", which the property tests already answer,
+but "does the shell acquire locks correctly", which only real PostgreSQL can
+show.
 
 The concurrency tests for I4 and I7 must run against real PostgreSQL. A fake
 would model the very behaviour under test, which is why WS strategy C was
