@@ -6,8 +6,10 @@ here because writing the scenarios is what surfaced them. Recorded 2026-08-18.
 Three were resolved by user ruling before any scenario was written (DDR-1..3
 below); two more were raised while writing them (U-1, U-2). All five are now
 closed — each upstream edit was made only after the owning wave's reviewer
-confirmed the finding and directed the change. One further finding (R-1) came
-out of the review cycle itself and is recorded at the end.
+confirmed the finding and directed the change. Two further findings came out of
+the review cycle itself and are recorded at the end: R-1 (closed) and **R-2,
+which is OPEN** — a HIGH reviewer condition the user chose on 2026-08-19 to
+record and defer rather than implement before DELIVER.
 
 ---
 
@@ -127,7 +129,7 @@ it. **CLOSED.**
 
 ---
 
-## Review-cycle findings (added 2026-08-18)
+## Review-cycle findings (R-1 added 2026-08-18, R-2 added 2026-08-19)
 
 ### R-1 — DISTILL omitted the contract-shape mandate on first pass
 
@@ -151,3 +153,72 @@ per-scenario tags have an authoritative source to agree with, rather than being
 **Worth propagating**: the `nw-distill` skill's self-review checklist has 15
 items and none of them is the contract-shape tag. Adding it there would have
 caught this before review. That is a framework fix, not a project one.
+
+### R-2 — no HTTP status code is asserted anywhere in the suite
+
+**Raised by**: `@nw-acceptance-designer-reviewer` (CONDITIONALLY_APPROVED, one
+HIGH condition) against the three scenarios added when C2b and C6a closed.
+Verified suite-wide and **pre-existing** — not introduced by that pass.
+
+**Where**: `tests/acceptance/ledgercore/`. The `Answer` struct in
+`domain_types.go` has no status field; `ledger_assertions.go` makes zero
+assertions on status; none of the seven `.feature` files mentions a status code.
+The only `Status` in the suite is a JSON *body* field in `decodeAnswer`.
+`decodeAnswer` reads `response.StatusCode` solely to classify the outcome as
+`Refused` when it is `>= 400`, then discards it.
+
+**Why it matters**:
+
+- **DDD-17's status-follows-site rule has nothing testing it.** 400
+  not-a-command · 401 not-identified · 404 names-something-absent · 409
+  identifier-already-bound · 422 rules-refuse-it. Production could answer 422
+  for `malformed_request` and the suite stays green, because only the `error`
+  field in the body is checked.
+- **DDR-3 is untested.** The user personally ruled that a replay answers **200**
+  rather than 201, and ADR-005 records the reason as "the status makes the
+  `replayed` log field assertable end to end". Nothing asserts it. The
+  distinction the user chose is currently invisible to the suite.
+- The gap is not specific to the new scenarios. It covers `POST /accounts` 201,
+  replay 200, key conflict 409, insufficient funds 422 and the two 401 auth
+  scenarios equally. The C2b and C6a additions are simply the first whose
+  *entire point* is a status distinction — `malformed_request` 400 versus
+  `invalid_amount` 422 differ in nothing else observable — which is why it
+  surfaced there.
+
+**Reviewer's recommended fix**: add a `Status int` field to `Answer`, capture
+`response.StatusCode` in `decodeAnswer`, and assert it. Of three shapes offered
+the reviewer preferred folding status into the existing refusal assertions
+rather than adding a per-scenario status line, on the grounds that a status line
+in 62 scenarios is noise.
+
+**DISTILL's view on the shape, recorded alongside it**: agreed on folding, and
+for a stronger reason than noise. A status code in Gherkin is technical jargon
+and would violate business-language purity (Pillar 1) in every scenario it
+touched — the operator does not think in 422. But the fold should go one step
+further than the refusal path, because status is not only a refusal concern:
+201 create and 200 replay are the DDR-3 half of the gap. The shape to
+implement is
+
+- a `statusFor(RefusalKind) int` table in `domain_types.go`, transcribed from
+  ADR-008's status table and covering the sealed set — so a tenth member cannot
+  be added without deciding its status, and the `exhaustive` linter can cover
+  the switch exactly as it covers the wire mapping;
+- `ThenItIsRefusedAs` asserting `Answer.Status == statusFor(kind)` in addition
+  to the `error` field it already checks;
+- `ThenTheTransferIsAccepted` / `ThenTheAccountIsCreated` asserting 201 and
+  `ThenTheRepeatIsAnsweredAsAReplay` asserting 200, which closes DDR-3.
+
+Net cost: one struct field, one line in `decodeAnswer`, one table, four
+assertion lines. Zero new step decorators and zero `.feature` changes — the
+status becomes a property of the taxonomy rather than of each scenario, which is
+where it belongs, since ADR-008 decides it once per member and not once per
+scenario.
+
+**Status: OPEN — deferred by user decision, not dropped.** The user chose to
+move to DELIVER rather than run another authoring round, with the condition
+recorded here instead. Owned by DISTILL. **DELIVER should treat ADR-008's status
+table as the authority when implementing the HTTP adapter's status mapping, and
+should not expect the acceptance suite to catch a wrong status** — it will not.
+Closing this is the natural companion to DELIVER's existing obligation to add
+the `exhaustive` linter over the adapter's wire-mapping switch: both exist so
+the status table stays honest, and neither is discharged today.

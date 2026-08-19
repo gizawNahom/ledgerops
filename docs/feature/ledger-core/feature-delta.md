@@ -1291,30 +1291,34 @@ taxonomy (C1–C7) and its 15-item mechanical checklist, computed over the real
 been run: the mandate lives in the agent definition and this wave was executed
 skill-driven, the same miss class as R-1.
 
-**Verdict: ACCEPTABLE_WITH_DOCUMENTED_GAPS — 11 of 15 passing** (thresholds:
-<10 INCOMPLETE · 10–12 acceptable with listed gaps · ≥13 complete). 8 of 15 at
-first computation; six scenarios and one docstring closed C1b, C2a and C3.
+**Verdict: COMPLETE — 13 of 15 passing** (thresholds: <10 INCOMPLETE · 10–12
+acceptable with listed gaps · ≥13 complete). 8 of 15 at first computation; six
+scenarios and one docstring closed C1b, C2a and C3, reaching 11. C2b and C6a
+closed on 2026-08-19 once DESIGN answered them (DDD-18, DDD-19 / ADR-008) —
+see § Closing C2b and C6a below. Two documented gaps remain and are listed as
+such: C4a is owed by DELIVER, C7a is blocked on an environment DEVOPS has not
+built. A COMPLETE count is not a claim that nothing is outstanding.
 
 | Item | Verdict | Evidence / gap |
 |---|---|---|
 | C1a — empty / zero / minimum input | PASS | `A new account starts empty` · `The schema builds from nothing` · `the ledger holds no entries` · amount 0.00 refused |
 | C1b — each partition boundary | PASS *(closed)* | Sufficiency boundary had exact (10.00 accepted) and over (10.01 refused); the smallest **accepted** amount was absent. Added `The smallest amount the ledger can move is accepted` (0.01). int64 ceiling stays at layer 1 — it is already in § PBT obligations, which is where Mandate 9 puts it |
 | C2a — state machine documented | PASS *(closed)* | Store / account / key state machines written out in `ledger_world.go`. Writing them is what surfaced C2b |
-| C2b — illegal event from each state | **GAP** | Every state has an illegal-event scenario except `account: open`, whose illegal event is *open again*. Unspecified upstream — see routing below. Not invented |
+| C2b — illegal event from each state | PASS *(closed 2026-08-19)* | Every state has an illegal-event scenario except `account: open`, whose illegal event is *open again* — unspecified upstream, so it was routed rather than invented. DDD-18 answered it (`account_already_exists` / 409, naming the account, deliberately not replayed as idempotent success). Added `Opening an account somebody already opened is refused and their account is untouched` |
 | C3 — cardinality 0 / 1 / many | PASS *(closed)* | Trace had many (5) and 2, but neither 0 nor 1; the drift list had 0 and 1 but not many; no scenario asked the verdict of an empty ledger. Added `An account nothing has happened to traces to an empty history`, `An account with a single movement traces to a single row`, `A ledger holding nothing balances, and says so`, `Two damaged accounts are both named` |
-| C4a — apply-twice per mutating op | **GAP** | Posting is covered exhaustively (5 replay/conflict scenarios). Opening an account twice is the C2b gap. Re-running the migration set — required idempotent by `environments.yaml § deployment_assumptions` — has no scenario, and one written today would pass vacuously against the empty `MigrationStatements()`, so it is raised for DELIVER rather than authored now |
+| C4a — apply-twice per mutating op | **GAP** *(narrowed)* | Posting is covered exhaustively (5 replay/conflict scenarios); opening an account twice is covered since C2b closed. What remains is one operation only. Re-running the migration set — required idempotent by `environments.yaml § deployment_assumptions` — has no scenario, and one written today would pass vacuously against the empty `MigrationStatements()`, so it is raised for DELIVER rather than authored now |
 | C4b — inverse op without prerequisite | PASS *(N/A by design, documented)* | The SUT has no destructive inverse: entries are append-only (D7) and reversals are out of scope. The analogue — acting on an absent prerequisite — is covered three times (transfer in, transfer out, trace, all against an account nobody opened), and the four `@append-only` scenarios assert that attempting the inverse is refused. No reversal scenario was invented for a capability DISCUSS excluded |
 | C5a — mode-flag combinations | PASS | No `dry_run`/`force`/`verbose` exists. The decision-table axes that do — account kind × direction × sufficiency, key present/absent/reused-same/reused-different, surface console/health, credentials app/privileged, operator key absent/wrong/valid — are each exercised across their materially-distinct combinations |
 | C5b — flag orthogonality | PASS | `The console and the health check give the operator the same answer` (surface changes presentation, never the answer) · `The same request written differently is still the same request` (representation changes nothing about identity) |
-| C6a — malformed value per input param | **GAP** | Amounts are covered for zero and negative; account names for unknown; the key for absent. Nothing submits a syntactically malformed body, a non-numeric or over-scale amount, or a currency mismatch. The sealed refusal taxonomy (DDD-12) does not say what any of those answer, so they are routed, not written |
+| C6a — malformed value per input param | PASS *(closed 2026-08-19)* | Amounts were covered for zero and negative, account names for unknown, the key for absent; nothing submitted a malformed body, a non-numeric or over-scale amount, or a currency mismatch, and the taxonomy did not say what any of those answer. DDD-19 split them at the purity boundary. Added two outlines: seven unreadable-request shapes (`malformed_request` / 400) and two unholdable amounts (`invalid_amount` / 422). `currency_mismatch` is deliberately unscenarioed — see below |
 | C6b — each declared error triggered | PASS | All five journey `error_paths` plus both auth refusals have a scenario that triggers exactly that refusal: insufficient funds · unknown account · key conflict · invalid amount · missing key · unidentified caller |
 | C6c — closed error set asserted | PASS | The contended scenarios account for every outcome with no residue — `exactly 1 accepted` + `exactly 19 refused for insufficient funds` over 20 attempts, and `every attempt is answered` + `no attempt is answered with a deadlock`. A third outcome would fail them |
-| C7a — degraded resource | **GAP** | No scenario runs with the store unreachable, the pool exhausted, or the disk full. The environment matrix has no degraded environment and nothing declares what the ledger answers when Postgres is gone. Routed to DEVOPS + DESIGN |
+| C7a — degraded resource | **GAP** *(still blocked)* | No scenario runs with the store unreachable, the pool exhausted, or the disk full. DESIGN has since declared the answer (DDD-20 / ADR-009: unavailability is an outcome, not a refusal, so `service_unavailable` is **not** a `RefusalKind` member — admitting it would turn `@error` from a refusal taxonomy into an outcome taxonomy). The scenarios remain unwritable: they need a `degraded` environment — store reachable at the first `Given` and stopped mid-scenario, pool sized below the concurrency under test — and DEVOPS has not built one. Owed by DEVOPS, not by DISTILL |
 | C7b — interruption mid-operation | PASS | `A transfer interrupted halfway leaves no half-applied movement` (kill mid-write, restart, assert both legs or neither). Expected to be thin and was not — but it left slice-03's reworded AC uncovered, closed below |
 | C7c — concurrent actors | PASS | Four contended scenarios: 20 racers on one balance · 1000 contended spends · 50 same-key submissions · 100 opposing-direction movements for lock ordering |
 
 **Six scenarios added, all `@pending`, all `@contract-shape:`-tagged against
-DESIGN § Contract shape per component, zero undefined steps.** The set is now
+DESIGN § Contract shape per component, zero undefined steps.** The set was then
 **59 scenario blocks / 60 executed** across the same 7 files; 318 Gherkin step
 lines over 93 decorators (step-reuse **3.42×**, informational). Three new
 bindings (`no entries are returned`, `exactly N entries are returned`, and a
@@ -1345,10 +1349,126 @@ owning wave, not DISTILL).
 
 | Gap | Kind | Owner | Severity | What is owed |
 |---|---|---|---|---|
-| C2b — opening an account that is already open | SPECIFICATION_AMBIGUITY | DESIGN (+DISCUSS) | HIGH | The sealed violation taxonomy (DDD-12) has no member for it and the journey's `error_paths` do not list it. Idempotent create? 409? Silent success? Whichever, `POST /accounts` needs it before slice 01 is done |
-| C6a — malformed body, non-numeric or over-scale amount, currency mismatch | SPECIFICATION_AMBIGUITY | DESIGN | HIGH | § Driving adapter coverage already claims `POST /transfers` answers 400, but no declared refusal produces one for a malformed payload. Currency mismatch is the sharper half: slice 01 says "same currency" and nothing says what happens when it is not |
-| C7a — store unreachable / pool exhausted / disk full | SPECIFICATION_AMBIGUITY | DEVOPS (+DESIGN) | MEDIUM | `environments.yaml` has no degraded environment, and no declared answer exists for a ledger whose store is gone. `verify-the-books` already assumes a fallback path when the console is unreachable and never states the API's own failure answer |
+| C2b — opening an account that is already open | SPECIFICATION_AMBIGUITY | DESIGN (+DISCUSS) | HIGH | The sealed violation taxonomy (DDD-12) has no member for it and the journey's `error_paths` do not list it. Idempotent create? 409? Silent success? Whichever, `POST /accounts` needs it before slice 01 is done. **Answered 2026-08-19** — DDD-18 / ADR-008: refused `account_already_exists` / 409, naming the account, explicitly not idempotent success |
+| C6a — malformed body, non-numeric or over-scale amount, currency mismatch | SPECIFICATION_AMBIGUITY | DESIGN | HIGH | § Driving adapter coverage already claims `POST /transfers` answers 400, but no declared refusal produces one for a malformed payload. Currency mismatch is the sharper half: slice 01 says "same currency" and nothing says what happens when it is not. **Answered 2026-08-19** — DDD-19 / ADR-008: split at the purity boundary, `malformed_request` / 400 at the adapter and `invalid_amount` / `currency_mismatch` / 422 in the core |
+| C7a — store unreachable / pool exhausted / disk full | SPECIFICATION_AMBIGUITY | DEVOPS (+DESIGN) | MEDIUM | `environments.yaml` has no degraded environment, and no declared answer exists for a ledger whose store is gone. `verify-the-books` already assumes a fallback path when the console is unreachable and never states the API's own failure answer. **Half-answered 2026-08-19** — DDD-20 / ADR-009 declares the answer; the `degraded` environment that would let a scenario reach it is still owed by DEVOPS |
 | C4a — migration set applied twice | AT_GAP_IN_DELIVERY_SCOPE | DELIVER | LOW | `deployment_assumptions` requires idempotent, expand-only migrations. Deliberately not authored here: with `MigrationStatements()` returning an empty map it would pass vacuously, and this wave already carries one vacuous pass it has told DELIVER not to count |
+
+### Closing C2b and C6a (2026-08-19)
+
+DESIGN answered both gaps (DDD-18, DDD-19, recorded in
+`adr-008-refusal-taxonomy-boundary.md`; reviewed CONDITIONALLY_APPROVED, all
+conditions applied). Three scenario blocks were authored against those answers.
+All three are `@pending`, all three carry a `@contract-shape:` tag classified by
+the shape of their **When**, and zero undefined steps remain.
+
+| Added scenario | File | Tags | Shape | Closes |
+|---|---|---|---|---|
+| Opening an account somebody already opened is refused and their account is untouched | milestone-01 | `@pending @error` | `unbounded-preservation` | C2b · C4a (open twice) |
+| An amount the ledger cannot hold exactly is refused and nothing moves | milestone-01 | `@pending @error` | `unbounded-preservation` | C6a (over-scale · beyond int64) |
+| A request the ledger cannot read as a command is refused and nothing moves | milestone-01 | `@pending @error @driving_adapter` | `unbounded-preservation` | C6a (unreadable body · missing field · unknown field · non-numeric, empty and bare-number amounts) |
+
+All three are `unbounded-preservation` and each asserts it: the balances stand
+and the entry count is unchanged. That is the point of the C2b one in
+particular — a refused second open must leave the *first* caller's account
+exactly as it was, which is the failure DDD-18 refuses to risk by guessing
+"retry".
+
+**`currency_mismatch` gets no scenario, deliberately.** It is declared in
+`RefusalKind` and unreachable through the driving ports: every account is opened
+in the ledger's single configured currency and `POST /accounts` takes no
+currency field. That unreachability is how "multi-currency transactions, out of
+scope" is *enforced* rather than merely asserted, so reaching it would mean
+adding the API surface DISCUSS excluded. Its coverage sits at layer 1, on the
+existing § PBT obligations entry "relax the same-currency assumption" over
+`domain.Post`. The `ParseRefusalKind` row carries a comment saying so, in the
+same terms DESIGN asked of the production constant.
+
+**Latent wire-value contradiction fixed.** `domain_types.go` declared
+`UnknownAccount RefusalKind = "unknown_account"` while
+`internal/domain/violation.go` and `journeys/post-a-transfer.yaml` both declared
+`account_not_found`. DESIGN settled the wire value as `account_not_found` (two
+authoritative sources against one, and the two are the journey the behaviour was
+promised in and the site where it is decided) and flagged rather than edited the
+mirror. The string literal is corrected; the Go identifier `UnknownAccount`
+stays. Nothing else depended on it — the `ParseRefusalKind` row keys off the
+Gherkin phrasing "an unknown account", not the wire value, so it needed no
+change. This was a real latent failure, not a cosmetic one: two scenarios
+asserted a wire value the implementation would never emit, and the RED gate
+could not catch it because both die in their `Given` long before the assertion.
+It would have surfaced as a mystery red during DELIVER GREEN, against correct
+production code.
+
+**The no-new-decorators expectation held on the Then side and did not on the
+When side.** DESIGN expected none, on the grounds that one refusal step covers
+the whole sealed taxonomy. That is exactly right for the answer: all three new
+members are asserted through the existing refusal step, and the only change to
+it was widening its subject alternation by one noun (`the account`, alongside
+`the transfer`, `the trace`, `the second request`, `the caller`) so that
+`Then the account is refused as already open` reads as English — a widened
+regex, not a new decorator. The taxonomy itself cost nothing but three constants
+and three `ParseRefusalKind` rows, as the type was designed to.
+
+It could not hold on the question. Two new `When` decorators were unavoidable,
+and the reason is structural rather than an oversight: **every existing `When`
+is typed, and a typed `When` cannot express an input the type system refuses to
+hold.** `SubmitTransfer` marshals a `Transfer` through `encoding/json`, so a
+body it produces is by construction a body the ledger can parse — it can never
+ask what happens to one that is not. `ParseMoney` rejects three decimal places
+and anything past int64, correctly, so no existing step can put `50.001` to the
+ledger. The two additions are the narrowest that fix this, and both are
+parameterised over a domain type rather than written per literal, per Mandate-12:
+
+- `the integrator submits a transfer request <malformation>` over the new
+  `MalformedPayload` type — one decorator, seven shapes, adding an eighth adds a
+  member and a row.
+- `the integrator moves an amount written as "<amount>" from … to … under key …`
+  over the new `AmountLiteral` type — the amount exactly as the caller wrote it,
+  which is the only honest way to ask about an amount the suite itself could not
+  hold.
+
+**Counts after this pass** (stated here, not propagated — a separate
+reconciliation pass owns the other `[REF]` sections): **62 scenario blocks / 70
+executed** across the same 7 files; 24 `bounded-change` and 38
+`unbounded-preservation` tags against 62 blocks, so the tag invariant still
+holds; 337 Gherkin step lines over 95 decorators (step-reuse **3.55×**,
+informational, up from 3.42×); error coverage 34 of 70 = **49%** under the
+existing counting rule, since all three additions are refusals and every one of
+the ten executed rows carries `@error`.
+
+**Undefined steps verified, not assumed.** The suite cannot be dry-run — godog
+0.14.1 exposes no dry-run mode and this suite's `TestMain` starts a container on
+the first `Given` — so the check was done mechanically instead: extract every
+registered regex from `steps_ledger_test.go`, compile every `.feature` into
+pickles the way godog does (Background prepended, `Scenario Outline` expanded
+against its `Examples`, `And`/`But` inheriting the preceding keyword), and match
+each step against the registry under godog's own keyword rule
+(`suite.go:keywordMatches` — a `Given` decorator never answers a `When` step).
+Result: 532 step invocations across 70 pickles, **0 undefined**. Each of the new
+steps was then checked for first-match binding and its captured token fed
+through the real `ParseRefusalKind` / `ParseMalformedPayload`, since a step that
+binds and then panics in its parser is undefined in every way that matters.
+`go build ./...`, `go vet ./...` and `gofmt -l` are clean.
+
+**One HIGH reviewer condition on this pass was deferred, not dropped.**
+`@nw-acceptance-designer-reviewer` returned CONDITIONALLY_APPROVED on the C2b /
+C6a work with one condition: **no HTTP status code is asserted anywhere in the
+suite**. It is suite-wide and pre-existing rather than introduced here, but the
+three new scenarios are the first whose entire point is a status distinction —
+`malformed_request` 400 versus `invalid_amount` 422 differ in nothing else
+observable — which is why it surfaced now. DDD-17's status-follows-site rule and
+DDR-3's replay-answers-200 ruling both currently have nothing testing them. The
+user decided on 2026-08-19 to record it and move to DELIVER rather than run
+another authoring round. Full entry, reasoning and the recommended fix shape:
+`distill/upstream-issues.md` § R-2 (**OPEN**, owned by DISTILL). **DELIVER
+should treat ADR-008's status table as the authority when implementing the
+status mapping — the suite will not catch a wrong status.**
+
+**One unrelated fix came along.** `ledger_world.go` was already unformatted at
+`516d535` — the `CaptureUniverse` snapshot literal's keys were misaligned — and
+CI job 1 gates on `gofmt -l` being empty, so it was a red build waiting for the
+first push. `gofmt -w` on the file I was editing anyway; it accounts for the
+four-line alignment change in that snapshot literal, which is not mine.
 
 Falsifier-gate telemetry (§7), 3-month window: `(ledger-core, C1, 1, MEDIUM)`
 `(ledger-core, C2, 2, HIGH)` `(ledger-core, C3, 4, MEDIUM)`

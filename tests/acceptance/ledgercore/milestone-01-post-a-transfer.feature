@@ -20,6 +20,15 @@ Feature: Post a transfer
     Then the account is created
     And the balance of "alice" reads 0.00
 
+  @pending @error @contract-shape:unbounded-preservation
+  Scenario: Opening an account somebody already opened is refused and their account is untouched
+    Given a wallet account "alice" funded with 100.00
+    When the integrator opens a wallet account "alice"
+    Then the account is refused as already open
+    And the refusal names the account "alice"
+    And the balance of "alice" reads 100.00
+    And the ledger holds 2 entries whose amounts sum to zero
+
   @pending @contract-shape:bounded-change
   Scenario: Value enters the ledger only as a movement from the system account
     Given a wallet account "alice" exists
@@ -88,6 +97,40 @@ Feature: Post a transfer
       | amount |
       | 0.00   |
       | -1.00  |
+
+  @pending @error @contract-shape:unbounded-preservation
+  Scenario Outline: An amount the ledger cannot hold exactly is refused and nothing moves
+    Given a wallet account "alice" funded with 100.00
+    And a wallet account "bob" exists
+    When the integrator moves an amount written as "<amount>" from "alice" to "bob" under key "t-1"
+    Then the transfer is refused as an invalid amount
+    And the balance of "alice" reads 100.00
+    And the ledger holds 2 entries whose amounts sum to zero
+
+    Examples:
+      | amount               |
+      | 50.001               |
+      | 92233720368547758.08 |
+
+  @pending @error @driving_adapter @contract-shape:unbounded-preservation
+  Scenario Outline: A request the ledger cannot read as a command is refused and nothing moves
+    Given a wallet account "alice" funded with 100.00
+    And a wallet account "bob" exists
+    When the integrator submits a transfer request <malformation>
+    Then the transfer is refused as a request that cannot be read
+    And the balance of "alice" reads 100.00
+    And the balance of "bob" reads 0.00
+    And the ledger holds 2 entries whose amounts sum to zero
+
+    Examples:
+      | malformation                                                  |
+      | that is not a request at all                                  |
+      | that leaves out the amount                                    |
+      | that leaves out the account it moves from                     |
+      | that names a field the ledger does not know                   |
+      | whose amount is not a number                                  |
+      | whose amount is left empty                                    |
+      | whose amount is sent as a bare number rather than written out |
 
   @pending @error @contract-shape:unbounded-preservation
   Scenario: An unidentified caller is refused before anything is read or written

@@ -81,21 +81,30 @@ func (m Money) String() string {
 	return fmt.Sprintf("%s%d.%02d", sign, units/100, units%100)
 }
 
-// RefusalKind is the sealed set of ways the ledger says no. It mirrors the
-// domain's violation taxonomy (DDD-12) plus the two boundary refusals the
-// adapter owns — a caller it cannot identify, and a request with no key.
+// RefusalKind is the sealed set of ways the ledger says no — the whole wire
+// vocabulary, across all three decision sites (DDD-17, ADR-008): the HTTP
+// adapter, the application shell, and the pure core. DDD-12 sealed the core's
+// own taxonomy; it never governed the boundary refusals the adapter owns.
 //
-// One step decorator covers every refusal because of this type. Adding a sixth
+// One step decorator covers every refusal because of this type. Adding a tenth
 // refusal adds a constant here and a row in ParseRefusalKind, not a new step.
+//
+// Availability is deliberately absent. A store the ledger cannot reach is an
+// outcome, not a refusal (DDD-20, ADR-009): admitting `service_unavailable`
+// here would turn a taxonomy of things the rules say no to into a taxonomy of
+// everything that can go wrong, and the sealed set would stop meaning anything.
 type RefusalKind string
 
 const (
-	UnknownAccount    RefusalKind = "unknown_account"
-	InsufficientFunds RefusalKind = "insufficient_funds"
-	InvalidAmount     RefusalKind = "invalid_amount"
-	KeyConflict       RefusalKind = "idempotency_key_conflict"
-	MissingKey        RefusalKind = "missing_idempotency_key"
-	Unidentified      RefusalKind = "unidentified_caller"
+	MalformedRequest     RefusalKind = "malformed_request"
+	MissingKey           RefusalKind = "missing_idempotency_key"
+	Unidentified         RefusalKind = "unidentified_caller"
+	UnknownAccount       RefusalKind = "account_not_found"
+	AccountAlreadyExists RefusalKind = "account_already_exists"
+	KeyConflict          RefusalKind = "idempotency_key_conflict"
+	InvalidAmount        RefusalKind = "invalid_amount"
+	InsufficientFunds    RefusalKind = "insufficient_funds"
+	CurrencyMismatch     RefusalKind = "currency_mismatch"
 )
 
 // ParseRefusalKind coerces the Gherkin phrasing of a refusal into the taxonomy.
@@ -103,22 +112,90 @@ const (
 // vocabulary the adapter emits.
 func ParseRefusalKind(text string) RefusalKind {
 	switch strings.TrimSpace(strings.ToLower(text)) {
-	case "an unknown account":
-		return UnknownAccount
-	case "insufficient funds":
-		return InsufficientFunds
-	case "an invalid amount":
-		return InvalidAmount
-	case "a key conflict":
-		return KeyConflict
+	case "a request that cannot be read":
+		return MalformedRequest
 	case "missing a key":
 		return MissingKey
 	case "unidentified":
 		return Unidentified
+	case "an unknown account":
+		return UnknownAccount
+	case "already open":
+		return AccountAlreadyExists
+	case "a key conflict":
+		return KeyConflict
+	case "an invalid amount":
+		return InvalidAmount
+	case "insufficient funds":
+		return InsufficientFunds
+	case "a currency mismatch":
+		// Declared, and unreachable through the driving ports today: every
+		// account is opened in the ledger's single configured currency and
+		// nothing lets a caller ask for another one. That unreachability is
+		// how "multi-currency, out of scope" is enforced rather than merely
+		// asserted, so no scenario claims this phrasing. Its coverage sits at
+		// layer 1 (§ PBT obligations, "relax the same-currency assumption").
+		// The row exists so the day the API grows a currency field, the
+		// scenario that needs it needs no new step. Do not delete for being
+		// unused.
+		return CurrencyMismatch
 	default:
 		panic(fmt.Sprintf("unknown refusal %q — see RefusalKind in domain_types.go", text))
 	}
 }
+
+// MalformedPayload is the shape of a request the ledger cannot read as a
+// command at all. Every member is decided at the HTTP adapter and answered
+// `malformed_request` / 400 (DDD-19): the adapter parses only the *lexical*
+// form of a request, so anything below never reaches the rules.
+//
+// It is a type rather than a literal per scenario for the usual Mandate-12
+// reason — one step covers the whole shape space, and adding a shape adds a
+// member and a row, not a decorator.
+type MalformedPayload string
+
+const (
+	NotARequest      MalformedPayload = "not_a_request"
+	AmountLeftOut    MalformedPayload = "amount_left_out"
+	SourceLeftOut    MalformedPayload = "source_left_out"
+	FieldNotKnown    MalformedPayload = "field_not_known"
+	AmountNotANumber MalformedPayload = "amount_not_a_number"
+	AmountLeftEmpty  MalformedPayload = "amount_left_empty"
+	AmountBareNumber MalformedPayload = "amount_bare_number"
+)
+
+// ParseMalformedPayload coerces the Gherkin phrasing of a broken request.
+func ParseMalformedPayload(text string) MalformedPayload {
+	switch strings.TrimSpace(strings.ToLower(text)) {
+	case "that is not a request at all":
+		return NotARequest
+	case "that leaves out the amount":
+		return AmountLeftOut
+	case "that leaves out the account it moves from":
+		return SourceLeftOut
+	case "that names a field the ledger does not know":
+		return FieldNotKnown
+	case "whose amount is not a number":
+		return AmountNotANumber
+	case "whose amount is left empty":
+		return AmountLeftEmpty
+	case "whose amount is sent as a bare number rather than written out":
+		return AmountBareNumber
+	default:
+		panic(fmt.Sprintf("unknown malformation %q — see MalformedPayload in domain_types.go", text))
+	}
+}
+
+// AmountLiteral is an amount exactly as the caller wrote it, unparsed.
+//
+// Money cannot carry these: an over-scale amount (50.001) or one beyond int64
+// minor units is not representable by the type whose whole point is that it is
+// exact, and ParseMoney rightly refuses to build one. The literal is how a
+// scenario puts an amount to the ledger that the suite itself could not hold —
+// which is the only honest way to ask what the ledger does with it (DDD-19:
+// scale is a property of the currency, so legality is NewMoney's to decide,
+// answered `invalid_amount` / 422 by the core rather than 400 by the adapter).
+type AmountLiteral string
 
 // Outcome is how a submitted transfer was answered.
 type Outcome string

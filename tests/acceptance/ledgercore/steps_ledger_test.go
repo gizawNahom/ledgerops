@@ -121,6 +121,16 @@ func RegisterSteps(ctx *godog.ScenarioContext, l *Ledger) {
 			})
 		})
 
+	ctx.When(`^the integrator moves an amount written as "([^"]*)" from "([^"]*)" to "([^"]*)" under key "([^"]*)"$`,
+		func(c context.Context, amount, from, to, key string) error {
+			return l.SubmitTransferWithAmountLiteral(c,
+				AmountLiteral(amount), AccountName(from), AccountName(to), IdempotencyKey(key))
+		})
+
+	ctx.When(`^the integrator submits a transfer request (.+)$`, func(c context.Context, shape string) error {
+		return l.SubmitMalformedTransfer(c, ParseMalformedPayload(shape))
+	})
+
 	ctx.When(`^the integrator repeats the same request under key "([^"]*)"$`, func(c context.Context, key string) error {
 		return l.RepeatLastRequest(c, IdempotencyKey(key))
 	})
@@ -228,7 +238,7 @@ func RegisterSteps(ctx *godog.ScenarioContext, l *Ledger) {
 		return l.ThenTheAccountIsCreated()
 	})
 
-	ctx.Then(`^(?:the transfer|the trace|the second request|the caller) is refused (?:as|for) (.+)$`,
+	ctx.Then(`^(?:the transfer|the trace|the second request|the caller|the account) is refused (?:as|for) (.+)$`,
 		func(reason string) error {
 			return l.ThenItIsRefusedAs(ParseRefusalKind(reason))
 		})

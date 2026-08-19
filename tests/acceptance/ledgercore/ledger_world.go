@@ -30,7 +30,8 @@ import (
 // added 2026-08-19). Recorded here because a state model nobody wrote down is a
 // state model nobody covered — writing it out is what surfaced the one illegal
 // event with no scenario against it (opening an account that is already open),
-// which is upstream-unspecified and is raised rather than invented.
+// which was raised upstream rather than invented and came back settled as
+// DDD-18 / ADR-008. Every state now has an illegal-event scenario.
 //
 //	STORE       no schema --migrate--> migrated --post--> populated
 //	                                       ^                  |
@@ -41,7 +42,8 @@ import (
 //
 //	ACCOUNT     unopened --open--> open
 //	            illegal from unopened: transfer in, transfer out, trace  (refused)
-//	            illegal from open:     open again                        (UNSPECIFIED)
+//	            illegal from open:     open again                        (refused,
+//	                                   account_already_exists / 409 — DDD-18)
 //
 //	KEY         unused --post accepted--> committed
 //	            unused --post refused---> unused        (a refusal consumes nothing)
@@ -51,7 +53,7 @@ import (
 //	            absent key: refused outright (optional idempotency is unused idempotency)
 //
 // Every transition above has at least one scenario, and every state has at
-// least one illegal-event scenario, except where marked UNSPECIFIED.
+// least one illegal-event scenario.
 
 type Ledger struct {
 	server *httptest.Server
@@ -174,10 +176,10 @@ func (l *Ledger) CaptureUniverse(ctx context.Context, accounts ...AccountName) (
 		return nil, err
 	}
 	snapshot := statedelta.Snapshot{
-		"ledger.entry_count":      report.EntryCount,
-		"ledger.trial_balance":    report.TrialBalance,
+		"ledger.entry_count":       report.EntryCount,
+		"ledger.trial_balance":     report.TrialBalance,
 		"ledger.transaction_count": report.EntryCount / 2,
-		"ledger.drifted_accounts": len(report.Drifted),
+		"ledger.drifted_accounts":  len(report.Drifted),
 	}
 	for _, account := range accounts {
 		balance, err := l.readBalance(ctx, account)
@@ -217,6 +219,61 @@ func (l *Ledger) SubmitTransfer(ctx context.Context, transfer Transfer) error {
 	answer, err := l.call(ctx, http.MethodPost, "/transfers", body, transfer.Key)
 	l.lastAnswer = answer
 	return err
+}
+
+// SubmitTransferWithAmountLiteral sends the amount exactly as the caller wrote
+// it. Every other When goes through Money, which by construction cannot carry
+// an over-scale or out-of-range amount — so without this the suite could only
+// ask the ledger about amounts it had already agreed were legal.
+//
+// It does not record lastRequest: an amount the ledger refuses is not a request
+// there is any sense in repeating.
+func (l *Ledger) SubmitTransferWithAmountLiteral(
+	ctx context.Context, literal AmountLiteral, from, to AccountName, key IdempotencyKey,
+) error {
+	l.priorAnswer = l.lastAnswer
+	body := map[string]any{
+		"from":   string(from),
+		"to":     string(to),
+		"amount": string(literal),
+	}
+	answer, err := l.call(ctx, http.MethodPost, "/transfers", body, key)
+	l.lastAnswer = answer
+	return err
+}
+
+// SubmitMalformedTransfer sends a body of the given broken shape. It goes out
+// raw, unmarshalled, because a body that round-trips through encoding/json is
+// by definition a body the ledger can read — which is the opposite of what
+// these scenarios ask.
+func (l *Ledger) SubmitMalformedTransfer(ctx context.Context, shape MalformedPayload) error {
+	l.priorAnswer = l.lastAnswer
+	answer, err := l.callRaw(ctx, http.MethodPost, "/transfers", malformedBody(shape), "malformed-1")
+	l.lastAnswer = answer
+	return err
+}
+
+// malformedBody is the one place the broken shapes are written down. It is a
+// table of literals, not a rule: the ledger's answer to each is the rule, and
+// that lives in production code.
+func malformedBody(shape MalformedPayload) []byte {
+	switch shape {
+	case NotARequest:
+		return []byte("this is not a request")
+	case AmountLeftOut:
+		return []byte(`{"from":"alice","to":"bob"}`)
+	case SourceLeftOut:
+		return []byte(`{"to":"bob","amount":"10.00"}`)
+	case FieldNotKnown:
+		return []byte(`{"from":"alice","to":"bob","amount":"10.00","memo":"lunch"}`)
+	case AmountNotANumber:
+		return []byte(`{"from":"alice","to":"bob","amount":"abc"}`)
+	case AmountLeftEmpty:
+		return []byte(`{"from":"alice","to":"bob","amount":null}`)
+	case AmountBareNumber:
+		return []byte(`{"from":"alice","to":"bob","amount":10.00}`)
+	}
+	panic(fmt.Sprintf("no body written for malformation %q — see malformedBody in ledger_world.go", shape))
 }
 
 // RepeatLastRequest resubmits the previous transfer verbatim under the given
