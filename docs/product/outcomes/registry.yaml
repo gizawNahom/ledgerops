@@ -1,2 +1,209 @@
-schema_version: "0.1"
-outcomes: []
+# Outcomes registry — SSOT for "what we promise the system does".
+# Per-typed-contract grain (outcomes-registry DISCUSS#D-5). Populated by
+# DISTILL of ledger-core, 2026-08-18. Later features consult this before
+# introducing a contract, to detect outcome collisions.
+#
+# Written directly rather than via `nwave-ai outcomes register`: that command
+# fails in this install with FileNotFoundError on its own packaged
+# docs/product/outcomes/schema.json. Shape matches
+# nwave_ai/outcomes/domain/serialization.py:outcome_to_dict exactly.
+
+schema_version: '0.1'
+outcomes:
+- id: OUT-1
+  kind: operation
+  summary: Record a balanced two-leg movement between two accounts, atomically and at most once per key.
+  feature: ledger-core
+  inputs:
+  - shape: 'POST /transfers {from: AccountID, to: AccountID, amount: Decimal} + Idempotency-Key: string'
+  output:
+    shape: '201 {transaction_id, status: posted, legs: [{account, amount} x2]} | 200 replay | 422 {error:
+      insufficient_funds|invalid_amount, available, requested} | 409 idempotency_key_conflict | 404 account_not_found
+      | 400 missing_idempotency_key'
+  keywords:
+  - transfer
+  - posting
+  - atomicity
+  - idempotency
+  - double-entry
+  artifact: internal/app/usecases.go:Ledger.PostTransfer
+  related:
+  - OUT-6
+  - OUT-7
+  - OUT-8
+  - OUT-9
+  superseded_by: null
+- id: OUT-2
+  kind: operation
+  summary: Open an account of a declared kind with a zero balance; value may only arrive afterwards as
+    a movement.
+  feature: ledger-core
+  inputs:
+  - shape: 'POST /accounts {account_id: AccountID, type: wallet|system}'
+  output:
+    shape: '201 {account_id, balance: 0.00, type} | 409 account_exists'
+  keywords:
+  - account
+  - open
+  - wallet
+  - system
+  artifact: internal/app/usecases.go:Ledger.CreateAccount
+  related:
+  - OUT-1
+  superseded_by: null
+- id: OUT-3
+  kind: operation
+  summary: Report one account's stored balance.
+  feature: ledger-core
+  inputs:
+  - shape: GET /accounts/{id}
+  output:
+    shape: '200 {account_id, balance: Decimal, type} | 404 account_not_found'
+  keywords:
+  - balance
+  - account
+  - read
+  artifact: internal/app/usecases.go:Ledger.GetBalance
+  related:
+  - OUT-10
+  superseded_by: null
+- id: OUT-4
+  kind: operation
+  summary: Report one account's entries in a settled order with a cumulative running balance and named
+    counterparty.
+  feature: ledger-core
+  inputs:
+  - shape: GET /accounts/{id}/entries
+  output:
+    shape: '200 {entries: [{transaction_id, counterparty, amount, recorded_at, running_balance}]} | 404
+      account_not_found'
+  keywords:
+  - entries
+  - trace
+  - running-balance
+  - ordering
+  - auditability
+  artifact: internal/app/usecases.go:Ledger.GetEntries
+  related:
+  - OUT-5
+  - OUT-10
+  superseded_by: null
+- id: OUT-5
+  kind: operation
+  summary: Answer whether the books balance, by full scan, stating the verdict in words with per-account
+    drift attribution.
+  feature: ledger-core
+  inputs:
+  - shape: GET /health/trial-balance
+  - shape: GET /console/verdict
+  output:
+    shape: '200 {verdict: ''Books balance: YES''|''Books balance: NO'', imbalance_minor, entry_count,
+      elapsed_ms, drifted: [{account_id, stored, computed, delta}]}'
+  keywords:
+  - trial-balance
+  - verification
+  - drift
+  - verdict
+  - reconciliation
+  artifact: internal/app/usecases.go:Ledger.VerifyBooks
+  related:
+  - OUT-4
+  - OUT-10
+  superseded_by: null
+- id: OUT-6
+  kind: specification
+  summary: 'The posting rulebook: one pure decision over locked account snapshots producing the transaction,
+    its entries, and the balance deltas.'
+  feature: ledger-core
+  inputs:
+  - shape: 'Post(cmd: TransferCommand, snapshots: []Account, now: Time, transactionID: string)'
+  output:
+    shape: (Posting{transaction, entries, deltas}, nil) | (zero, Violation{kind, account, available, requested})
+  keywords:
+  - pure
+  - posting
+  - decide
+  - rulebook
+  - property-testing
+  artifact: internal/domain/post.go:Post
+  related:
+  - OUT-7
+  - OUT-8
+  superseded_by: null
+- id: OUT-7
+  kind: invariant
+  summary: "I1 \u2014 the entries of any recorded transaction sum to zero, per currency."
+  feature: ledger-core
+  inputs:
+  - shape: any recorded transaction's entry list
+  output:
+    shape: sum(entries.amount) per currency == 0, always
+  keywords:
+  - I1
+  - balanced
+  - double-entry
+  - invariant
+  artifact: internal/domain/post.go:EntriesSumToZero
+  related:
+  - OUT-6
+  superseded_by: null
+- id: OUT-8
+  kind: invariant
+  summary: "I4 \u2014 no wallet account balance is ever below zero, including under concurrent spending;\
+    \ a system account may be, by design."
+  feature: ledger-core
+  inputs:
+  - shape: any wallet account balance at any observable moment
+  output:
+    shape: wallet.balance >= 0, always; system.balance unconstrained
+  keywords:
+  - I4
+  - insufficient-funds
+  - concurrency
+  - row-locks
+  - invariant
+  artifact: internal/domain/account.go:Account.Apply
+  related:
+  - OUT-6
+  - OUT-1
+  superseded_by: null
+- id: OUT-9
+  kind: invariant
+  summary: "I7 \u2014 the same transfer request applied any number of times changes state exactly once,\
+    \ and answers identically each time."
+  feature: ledger-core
+  inputs:
+  - shape: repeated POST /transfers with one Idempotency-Key and one request fingerprint
+  output:
+    shape: exactly 1 transaction and 1 entry pair recorded; every answer names the same transaction_id
+  keywords:
+  - I7
+  - idempotency
+  - replay
+  - retry
+  - invariant
+  artifact: internal/app/ports/ports.go:IdempotencyStore
+  related:
+  - OUT-1
+  superseded_by: null
+- id: OUT-10
+  kind: invariant
+  summary: "D7 \u2014 recorded entries are never updated or deleted; the application role is structurally\
+    \ incapable of rewriting history."
+  feature: ledger-core
+  inputs:
+  - shape: any UPDATE or DELETE against the entry table as ledgerops_app
+  output:
+    shape: refused by the store (revoked privilege and rule/trigger); corrections are compensating entries
+      only
+  keywords:
+  - D7
+  - append-only
+  - immutability
+  - tamper-evidence
+  - invariant
+  artifact: internal/adapters/postgres/store.go
+  related:
+  - OUT-4
+  - OUT-5
+  superseded_by: null

@@ -21,7 +21,7 @@ kpis:
     collected_by:
       surface: "GET /health/trial-balance"
       fields: ["imbalance_minor", "entry_count", "elapsed_ms"]
-      environment: [ci, populated]
+      environment: [ci, populated, corrupted]
     assertion: "imbalance_minor == 0"
     emitted_as:
       ci_job: invariant-gates
@@ -32,6 +32,13 @@ kpis:
       metric: elapsed_ms
       threshold_ms: 2000
       action: "warn only — D9 deferred checkpointing; this is the trigger to revisit, not a failure"
+      note: >
+        `corrupted` added 2026-08-18 (DISTILL finding U-2, confirmed by DEVOPS
+        review). The corrupted environment is reached from populated and runs
+        the most expensive scan of the three — the one that must attribute
+        drift across every account. Omitting it left the guardrail blind to the
+        case whose cost grows fastest as history accumulates, which is exactly
+        the case D9's deferral was betting against.
 
   - id: KPI-2
     name: Negative wallet balances

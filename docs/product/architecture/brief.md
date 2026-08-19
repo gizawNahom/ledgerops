@@ -158,8 +158,35 @@ the kind. This keeps the idiomatic Go `(value, error)` shape, so violations
 travel through `errors.As` and map cleanly onto HTTP 422, while the closed set
 keeps the HTTP adapter from inventing its own error vocabulary. The cost is that
 exhaustiveness is not compiler-checked — a linter over the switch sites is the
-compensating control, and belongs to DEVOPS. **Discharged**: `golangci-lint`
-runs the `exhaustive` linter in CI job 1, required on every push.
+compensating control, and belongs to DEVOPS.
+
+**Status: OUTSTANDING, not discharged.** This sentence previously read
+"**Discharged**: `golangci-lint` runs the `exhaustive` linter in CI job 1,
+required on every push." That was and is false. CI job 1 is a DEVOPS *design*
+(`feature-delta.md` § CI/CD pipeline outline); no `.github/workflows/` and no
+`.golangci.*` exist in this repository, verified 2026-08-19. Nothing runs. The
+claim is corrected here rather than left standing because DDD-12's sealing has
+no compiler enforcement behind it — this linter is the entire mechanism, and a
+compensating control believed to be in place is worse than one known to be
+missing.
+
+**The obligation, stated so DEVOPS inherits a requirement rather than a
+discovery.** `golangci-lint` must run the `exhaustive` linter over **two**
+semantically distinct switch surfaces, and covering one does not cover the
+other:
+
+1. `switch` over `domain.ViolationKind` in `internal/domain/` — keeps the core's
+   sealed set closed.
+2. The **wire-mapping** `switch` in `internal/adapters/http/` that turns a
+   violation into a status and an error name — keeps
+   `feature-delta.md` § Refusal taxonomy and status mapping honest. DDD-17
+   created this surface; before it, there was only one.
+
+Surface 2 is the one that will be missed, because it is a mapping rather than a
+rulebook and reads like adapter plumbing. A member added to the core with no
+mapping added at the wire is precisely the defect the sealed set exists to make
+impossible, and only surface 2 catches it. Owner: DEVOPS. Until both are wired
+and required on every push, DDD-12 and DDD-17 rest on review discipline alone.
 
 **The posting rulebook is one pure function** (DDD-14). `Post` takes the transfer
 command, the already-locked account snapshots, the current time, and a
@@ -215,6 +242,15 @@ recorded here so it reads as a decision rather than an oversight.
 | I4 | No wallet account balance is negative | Domain core, under row locks held by the application layer |
 | I7 | The same request applied twice changes state once | Application layer, via a unique constraint on the idempotency key |
 | D7 | Entries are never updated or deleted | Database: `UPDATE`/`DELETE` revoked from `ledgerops_app` (OPS-10), plus a rule/trigger. CI asserts the composite refusal |
+| DDD-18 | An account name identifies exactly one account | Domain core (pure `OpenAccount` over the read snapshot), plus a unique constraint on the account name created **with** the table — migrations are expand-only, so adding it later against history containing duplicates would fail |
+
+The DDD-18 row was added 2026-08-19 by `nw-solution-architect`, a cross-section
+edit into `nw-ddd-architect`'s territory. It records a decision already taken in
+`adr-008-refusal-taxonomy-boundary.md` rather than making a new domain-modelling
+one, and it is the enforcement half of a refusal that would otherwise have no
+declared enforcement site. The narrower rule DESIGN is holding itself to: an
+architect may record its own decisions and correct false claims in another's
+section, with the edit annotated; it may not decide domain model there.
 
 Note on I3: it is the only invariant deliberately left unenforced. Enforcing it
 would mean deriving balances, which removes the independent check that makes
@@ -294,6 +330,74 @@ system would object. The interface keeps that cohesion visible.
 
 `Clock` and `IDGenerator` exist as ports purely for testability. That is the
 second quality attribute doing visible work.
+
+### Refusal taxonomy: three decision sites, one wire vocabulary
+
+DDD-12 sealed the set of ways the ledger says no. It sealed it at one site — the
+pure core — and read as though it sealed all three: `unidentified_caller`,
+`missing_idempotency_key` and `idempotency_key_conflict` were always decided
+outside the core. DDD-17 states the whole set and names each member's site, so a
+question landing between sites has somewhere to be answered. Rationale and
+rejected alternatives: `adr-008-refusal-taxonomy-boundary.md`.
+
+| Member | Decided at | Status |
+|---|---|---|
+| `malformed_request` | HTTP adapter | 400 |
+| `missing_idempotency_key` | HTTP adapter | 400 |
+| `unidentified_caller` | HTTP adapter (auth middleware) | 401 |
+| `account_not_found` | Domain core — `Post` | 404 |
+| `account_already_exists` | Domain core — `OpenAccount` | 409 |
+| `idempotency_key_conflict` | Application shell | 409 |
+| `invalid_amount` | Domain core — `NewMoney` / `Post` | 422 |
+| `insufficient_funds` | Domain core — `Post` | 422 |
+| `currency_mismatch` | Domain core — `Post` | 422 |
+
+**Status follows the decision site**: 400 the request was not a command · 401
+the caller was not identified · 404 the command named something absent · 409 the
+identifier is already bound to something else · 422 the rules refuse it.
+
+`unbalanced` stays a `domain.ViolationKind` member and is not a wire member — it
+guards the Transaction smart constructor against a defect in the rulebook, and
+no caller input reaches it. If it escapes, that is a bug, answered 500.
+
+Two consequences for the boundary. `malformed_request` must **not** enter
+`domain.ViolationKind`: a pure function over a typed command cannot represent
+"the bytes were not JSON", and admitting it would put a transport concern inside
+the purity boundary. And the `exhaustive` linter now covers two switch surfaces
+rather than one — the core's kinds, and the adapter's wire mapping. The
+adapter's switch is what keeps the status table honest.
+
+`currency_mismatch` is a domain refusal because I1 is per-currency: two legs in
+different currencies cannot sum to zero per currency for any amount. It is
+declared and currently unreachable through the driving ports, since every
+account is opened in the ledger's single configured currency — and that
+unreachability is how "multi-currency transactions, out of scope" is enforced
+rather than asserted.
+
+### Unavailability is outside the sealed set
+
+A refusal is a decision, and every refusal here carries the implicit assertion
+that nothing moved. A connection lost after `COMMIT` was sent and before the
+acknowledgement arrived may have mutated everything, so an unreachable store
+cannot be a refusal without attaching a guarantee the system cannot make. It
+answers **503 `service_unavailable`** with `Retry-After`, in the same error
+envelope but in neither sealed set. Pool exhaustion answers 503 rather than 429 —
+capacity is a property of the service, not the caller's rate.
+
+`GET /health/trial-balance` against an unreachable store answers 503, never
+`Books balance: NO`. `NO` means "I looked, and the books do not balance"; saying
+it because the database is down is a false accusation of corruption and destroys
+the KPI-4 signal slice 04 exists to produce. The 503 body is exactly
+`{"error":"service_unavailable"}` — the `verdict` field is **omitted, not
+`null`**, and so is the rest of the verdict envelope. On 200 `verdict` is always
+present and never null, so its absence proves the ledger was not read; the
+console branches on the status code, never on the field. Rationale:
+`adr-009-unavailability-is-not-a-refusal.md`.
+
+The composition root wires, then **probes**, then serves: `cmd/api/` refuses to
+start unless the app-role connection can open a transaction *and* `UPDATE` on
+the entry table is refused (OPS-10). CI job 6 proves the migration set is right;
+it proves nothing about the database this binary is pointed at.
 
 ### Technology choices
 
@@ -379,4 +483,20 @@ exists so that assertions on entry timestamps and transaction ids are
 deterministic. Every other port is exercised for real.
 
 **Environment parametrization**: `docs/feature/ledger-core/devops/environments.yaml`
-— `clean`, `ci`, `populated`, `contended`, `corrupted`.
+— `clean`, `ci`, `populated`, `contended`, `corrupted`. A `degraded` environment
+is required by DDD-20 and does not exist yet; owner DEVOPS, preconditions named
+in `feature-delta.md` § Store unavailability.
+
+**Refusals**: § Refusal taxonomy above is authoritative for what a refusal is
+called, where it is decided, and what status it answers. Every member is
+reachable through a driving port except `currency_mismatch`, whose coverage
+belongs at layer 1 with the `rapid` suite over `domain.Post`. `service_unavailable`
+is **not** a refusal and must not enter `RefusalKind` — a scenario asserting it
+asserts an availability outcome, which is what keeps `@error` a refusal taxonomy
+rather than an outcome taxonomy.
+
+**For nw-ddd-architect**: § Invariants and where they are enforced now carries
+the account-name uniqueness rule DDD-18 depends on. The row was added by
+`nw-solution-architect` and annotated as a cross-section edit; review it, and
+renumber it if that table should use an `I`-series identifier rather than the
+decision id.

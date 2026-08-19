@@ -21,12 +21,19 @@ than served from a cached body.
 
 Behaviour:
 
-| Situation | Response |
-|---|---|
-| New key | Post, store key + fingerprint + transaction_id, return 201 |
-| Same key, same fingerprint | Re-render from transaction_id, return the original result |
-| Same key, different fingerprint | 409 `idempotency_key_conflict` |
-| Missing key | 400 — the header is required, not optional |
+| Situation | Status | Response |
+|---|---|---|
+| New key | **201** | Post, store key + fingerprint + transaction_id |
+| Same key, same fingerprint | **200** | Re-render from transaction_id; body identical to the original |
+| Same key, different fingerprint | **409** | `idempotency_key_conflict` |
+| Missing key | **400** | The header is required, not optional |
+
+The replay status was left unstated when this ADR was first written and is fixed
+here at **200** (DISTILL finding DDR-3, 2026-08-18). 201 means created and a
+replay creates nothing. The body is byte-identical either way, so a caller that
+lost its first response can ignore the distinction entirely — but the status
+makes the `replayed` log field assertable end to end, which a caller-invisible
+201 would not.
 
 ## Alternatives considered
 

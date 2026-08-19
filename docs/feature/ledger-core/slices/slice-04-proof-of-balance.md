@@ -76,8 +76,12 @@ are not required.
 
 ## Effort
 
-≤1 day. Reference class: one aggregate query plus a minimal server-rendered page.
-Resist building a dashboard framework; this is one page with one verdict.
+≤1 day. Reference class: one aggregate query plus one page in the TypeScript SPA
+(DDD-4 / ADR-006 — the console is a separate SPA, not server-rendered; wording
+corrected 2026-08-18, DISTILL finding DDR-2). Resist building a dashboard
+framework; this is one page with one verdict. ADR-006 already flags that the
+second toolchain puts this slice's one-day ceiling at risk — that risk is the
+reason to keep the page this small.
 
 ## Note
 

@@ -6,6 +6,14 @@ Modular monolith, ports-and-adapters, pure domain core.
 Architecture SSOT: `docs/product/architecture/brief.md`
 Feature narrative: `docs/feature/ledger-core/feature-delta.md`
 
+## nWave Wave Work
+
+Wave skills (`nw-discuss`, `nw-design`, `nw-devops`, `nw-distill`,
+`nw-deliver`) are domain knowledge for their agent, not instructions for the
+session. Dispatch the owning agent — never author or edit wave artifacts
+directly, including amendments to finished waves. Agent definitions carry
+mandates the skills omit. Ask before making any exception.
+
 ## Development Paradigm
 
 This project follows the **functional programming** paradigm. Use

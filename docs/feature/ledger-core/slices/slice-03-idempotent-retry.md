@@ -35,8 +35,13 @@ Discovering that now is cheap; discovering it after five more slices is not.
 - [ ] Same key submitted twice posts exactly one transaction (I7)
 - [ ] Second submission returns the same `transaction_id` as the first
 - [ ] Same key with a different payload returns 409 `idempotency_key_conflict`
-- [ ] Key and transaction commit atomically — killing the process between them is
-      not possible because they are one write
+- [ ] After any interruption, a key exists if and only if its transaction exists
+      — observable by retrying with the same key. (Reworded 2026-08-18, DISTILL
+      finding U-1: the previous phrasing, "killing the process between them is
+      not possible because they are one write", stated a reason rather than an
+      outcome, so no scenario could be written against it. That it is one write
+      remains true and is enforced by DDD-8; it is verified by review, while the
+      criterion above is verified by test)
 - [ ] 50 concurrent submissions of one key yield exactly one transaction
 - [ ] Missing key on `POST /transfers` is rejected, not silently permitted —
       optional idempotency is idempotency nobody uses

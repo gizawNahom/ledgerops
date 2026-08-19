@@ -54,7 +54,7 @@ landed completely or not at all.
 
 **Elevator Pitch**
 Before: I have no way to move value between accounts with any guarantee it landed completely.
-After: run `curl -X POST /transfers -d '{"from":"a","to":"b","amount":"50.00"}'` → sees `{"transaction_id":"txn_1","status":"posted","legs":[{"account":"a","amount":"-50.00"},{"account":"b","amount":"50.00"}]}`
+After: run `curl -X POST /transfers -H 'Idempotency-Key: <caller-generated>' -d '{"from":"a","to":"b","amount":"50.00"}'` → sees `{"transaction_id":"txn_1","status":"posted","legs":[{"account":"a","amount":"-50.00"},{"account":"b","amount":"50.00"}]}`
 Decision enabled: whether to tell my user the transfer succeeded.
 
 ### US-2 — Reject insufficient funds
@@ -296,6 +296,11 @@ mitigation (D6).
 | DDD-14 | The posting rulebook is one pure `Post` function over locked snapshots | Accepted — I1 and I4 decided in one pure unit; primary PBT target |
 | DDD-15 | Strict immutability: unexported fields, smart constructors, no mutating methods | Accepted — invariants hold by construction |
 | DDD-16 | Paradigm functional → `@nw-functional-software-crafter` | Accepted — supersedes DDD-10; hexagonal DDD with a functional domain |
+| DDD-17 | The sealed refusal set is one wire vocabulary with three declared decision sites; status follows the site | Accepted — ADR-008; extends DDD-12, which sealed one site and read as though it sealed all three |
+| DDD-18 | Opening an account that is already open is refused `account_already_exists` / 409, never replayed | Accepted — ADR-008; no caller-supplied key exists, so retry and name collision are indistinguishable and guessing is unsafe |
+| DDD-19 | Malformed payloads split at the purity boundary: unreadable → 400 `malformed_request`, illegal → 422; currency mismatch is a domain refusal | Accepted — ADR-008; gives the already-declared 400 a reachable cause |
+| DDD-20 | An unreachable or exhausted store is outside the sealed set — 503 `service_unavailable`, no in-request retry, no circuit breaker | Accepted — ADR-009; a refusal asserts nothing moved, and a lost connection cannot assert that |
+| DDD-21 | On an unreachable store the trial-balance verdict is **absent**, never `Books balance: NO` | Accepted — ADR-009; `NO` means "I looked", and accusing the ledger of corruption because the database is down destroys the KPI-4 signal |
 
 ---
 
@@ -356,6 +361,223 @@ DDD-12 … DDD-16 are recorded in `adr-007-functional-domain-core.md`.
 
 Trivially satisfied for slice 01; non-trivial from slice 02 onward.
 
+### Contract shape per component (Effect Isolation 12 / 6(a))
+
+Declared at design time so the crafter does not have to infer the assertion
+mechanism — and so DISTILL's per-scenario `@contract-shape:` tags have something
+authoritative to agree with. Recorded 2026-08-18 following DESIGN review.
+
+| Component | Contract shape | Universe | Assertion mechanism |
+|---|---|---|---|
+| `internal/domain/` — `Post`, `Money`, `Account`, `Entry`, violations | **pure-function** | return value only | Return-only equality plus `rapid` properties over I1/I4. No effect assertion needed: the type signature takes time and identity as values, so a write is non-representable |
+| `internal/app/` — `PostTransfer`, `CreateAccount` | **bounded-change** | the touched accounts' balances, the new transaction and its entries, the idempotency record | `assert_state_delta` over port-exposed names; everything in the universe not named in `expected` must be unchanged |
+| `internal/app/` — `GetBalance`, `GetEntries`, `VerifyBooks` | **unbounded-preservation** | the entire ledger | These read and must mutate nothing. `VerifyBooks` is the sharp one: a verification that repaired what it found would destroy the cross-check that gives slice 04 its value |
+| `internal/adapters/postgres/` — entry writes | **unbounded-preservation** on existing rows, bounded-change on append | all previously recorded entries | D7: `INSERT` only. The store enforces it (OPS-10), so the shape is structural rather than asserted — but CI job 6 asserts the refusal anyway, because a guarantee nobody checks is a guarantee nobody has |
+| `internal/adapters/postgres/` — balance writes | **bounded-change** | the stored balances of the touched accounts | Deltas returned by the pure core, applied under the locks the shell took (DDD-6) |
+| `internal/adapters/http/` — `POST` routes | **bounded-change** | delegated — the adapter adds no mutation of its own | Encoding and status mapping only |
+| `internal/adapters/http/` — `GET` routes | **unbounded-preservation** | delegated | A read route that writes is the bug class this classification exists to make non-representable. The read ports expose no write method, per the split-driving-ports rule |
+| `ports.Clock` · `ports.IDGenerator` | **pure-function** from the core's view | n/a | Injected as values; the core reads no clock and generates no id (DDD-14) |
+
+The one place the shapes are load-bearing rather than descriptive:
+`VerifyBooks` and every `GET` route are unbounded-preservation, which is what
+forbids a future "verify and repair" convenience from being added to the read
+path. Repair is out of scope by DISCUSS, but scope decisions erode and type
+shapes do not.
+
+---
+
+## Wave: DESIGN / [REF] Refusal taxonomy and status mapping
+
+Authoritative. Rationale: `adr-008-refusal-taxonomy-boundary.md`. Added
+2026-08-19 to close AT-completeness gaps C2b and C6a, which were routed here as
+`SPECIFICATION_AMBIGUITY`.
+
+DDD-12 sealed the set of ways the ledger says no. It sealed it at one site — the
+pure core — and was read as though it sealed all three. The domain's
+`ViolationKind` holds four members; the wire vocabulary the caller sees holds
+nine, because `unidentified_caller`, `missing_idempotency_key` and
+`idempotency_key_conflict` were always decided outside the core. DDD-17 states
+the whole set and names each member's site, so a question that lands between
+sites has somewhere to be answered.
+
+| Member | Decided at | Status | Body carries | Status |
+|---|---|---|---|---|
+| `malformed_request` | HTTP adapter | 400 | `field`, `detail` | **NEW** |
+| `missing_idempotency_key` | HTTP adapter | 400 | — | existing |
+| `unidentified_caller` | HTTP adapter (auth middleware) | 401 | — | existing |
+| `account_not_found` | Domain core — `Post` | 404 | `account_id` | existing, **name settled** |
+| `account_already_exists` | Domain core — `OpenAccount` | 409 | `account_id` | **NEW** |
+| `idempotency_key_conflict` | Application shell | 409 | — | existing |
+| `invalid_amount` | Domain core — `NewMoney` / `Post` | 422 | `amount` | existing |
+| `insufficient_funds` | Domain core — `Post` | 422 | `available`, `requested` | existing |
+| `currency_mismatch` | Domain core — `Post` | 422 | `from_currency`, `to_currency` | **NEW** |
+
+`unbalanced` remains a `domain.ViolationKind` member and is deliberately **not**
+a wire member: it guards the Transaction smart constructor against a defect in
+the rulebook, and no caller input can reach it. If it escapes, that is a bug in
+`Post`, answered 500.
+
+**One existing member disagreed with itself and is settled here, not changed.**
+The wire value for the unknown-account refusal is `account_not_found`:
+`post-a-transfer.yaml` § error_paths and `internal/domain/violation.go` both say
+so, and the acceptance suite's mirror (`domain_types.go:93`) says
+`unknown_account`. Two artifacts against one, and the two are the journey the
+behaviour was promised in and the scaffold it is decided in. The Go identifier
+stays `UnknownAccount` everywhere; only the string on the wire is settled. The
+mirror needs a one-line correction — flagged to whoever owns the suite, not
+edited by DESIGN.
+
+**Status follows the decision site**, so the next member needs no debate:
+
+- **400** — the request could not be understood as a command
+- **401** — the caller could not be identified
+- **404** — the command named something that does not exist
+- **409** — the identifier supplied is already bound to something else
+- **422** — the command was understood and the rules refuse it
+
+**C2b — opening an account that is already open** (DDD-18). Refused
+`account_already_exists` / 409, naming the account. Decided in the pure core;
+a unique constraint on the account name makes the answer hold under concurrent
+opens, exactly as the unique key constraint does for I7. Not idempotent success:
+`POST /accounts` carries no caller-supplied key, so the service cannot tell a
+retry from a name collision between two independent callers, and guessing
+"retry" hands the second caller an account somebody else created.
+
+**C6a — malformed payloads** (DDD-19), split at the purity boundary:
+
+| Sub-case | Answer |
+|---|---|
+| Invalid JSON · missing required field · unknown field | `malformed_request` · 400 |
+| Non-numeric amount (`"abc"`, `null`, wrong JSON type) | `malformed_request` · 400 |
+| Over-scale amount (`50.001`) or beyond int64 minor units | `invalid_amount` · 422 |
+| Two accounts in different currencies | `currency_mismatch` · 422 |
+
+The adapter parses the *lexical* form of an amount and hands it to `NewMoney`,
+which decides legality — scale is a property of the currency, and the currency
+is domain knowledge. `currency_mismatch` is a domain refusal because I1 is
+per-currency: two legs in different currencies cannot sum to zero per currency
+for any amount, so it is unsatisfiable by the invariant rather than disallowed
+by policy.
+
+`currency_mismatch` is **declared and currently unreachable through the driving
+ports** — every account is opened in the ledger's single configured currency and
+`POST /accounts` takes no currency field. That unreachability is how
+"multi-currency transactions, out of scope" is enforced rather than asserted.
+Its coverage sits at layer 1: § PBT obligations already declares "relax the
+same-currency assumption" over `domain.Post`, and this member is what that
+obligation now asserts against.
+
+**New constraint**: the account table carries a unique constraint on the account
+name, created with the table. Adding it later against history containing
+duplicates would fail, and migrations are expand-only.
+
+**New constraint**: the `exhaustive` linter must cover two switch surfaces —
+`domain.ViolationKind` in the core, and the wire mapping in the HTTP adapter.
+The adapter's switch is the one that keeps the status table honest. See
+§ Pre-requisites: this control is **outstanding**, not discharged.
+
+**Obligation for DELIVER — the unreachable member must defend itself in place.**
+`currency_mismatch` is the only member with no path to it through a driving
+port, which makes it the only member a future maintainer will find, fail to
+reach, and reasonably propose deleting. Deleting it silently re-opens C6a and
+un-enforces "multi-currency transactions, out of scope". When the constant is
+added to `internal/domain/violation.go` — it does not exist today; the file
+holds four members — it must carry a comment saying, in substance:
+
+> Unreachable through the driving ports today: every account is opened in the
+> ledger's single configured currency, so `Post` never sees two. That is
+> deliberate — this member is *how* "multi-currency transactions, out of scope"
+> is enforced rather than merely asserted, and I1 being per-currency is why it
+> is a domain refusal rather than validation. Reachable at layer 1 now (§ PBT
+> obligations, "relax the same-currency assumption"), and at layer 3 the day
+> `POST /accounts` accepts a currency. Do not delete for being uncovered.
+
+DESIGN does not write production code; the text and its location are recorded
+here so the obligation survives to whoever does.
+
+---
+
+## Wave: DESIGN / [REF] Store unavailability
+
+Authoritative. Rationale: `adr-009-unavailability-is-not-a-refusal.md`. Added
+2026-08-19 to close the DESIGN half of AT-completeness gap C7a.
+
+**An unreachable store is not a refusal** (DDD-20). A refusal is a decision —
+the ledger read the world, applied its rules, and declined — and every refusal
+in this feature carries the implicit assertion that nothing moved, which the
+acceptance suite makes explicit as `@contract-shape:unbounded-preservation`. A
+connection lost after `COMMIT` was sent and before the acknowledgement arrived
+may have mutated everything. The answer is therefore not "refused" but "I do not
+know — retry", which ADR-005 already makes safe.
+
+| Condition | Status | Body | Header |
+|---|---|---|---|
+| Store unreachable · connection refused · statement or lock timeout | 503 | `{"error":"service_unavailable"}` | `Retry-After: 1` |
+| Connection pool exhausted | 503 | same | `Retry-After: 1` |
+| Write fails on a full or read-only volume | 503 | same | `Retry-After: 1` |
+
+`service_unavailable` is not a member of either sealed set. It is an
+availability outcome carried in the same envelope so callers parse one shape,
+and there is no switch over it, so DDD-12's `exhaustive` obligation does not
+extend to it. Pool exhaustion answers 503 rather than 429: an exhausted pool is
+a property of the service's capacity, not the caller's rate, and no rate policy
+exists.
+
+**The verdict withholds; it never accuses** (DDD-21). `GET
+/health/trial-balance` against an unreachable store answers 503 and never
+`Books balance: NO`. `NO` means "I looked, and the books do not balance".
+`verify-the-books` already declares the fallback when the console is
+unreachable; this declares the answer when the ledger is.
+
+**Encoding — "absent" means the field is omitted, and the whole verdict envelope
+with it.** Not `"verdict": null`. The two are different claims: `null` is a
+value, and it says "I have a verdict and it is nothing", which is the exact
+ambiguity DDD-21 exists to remove. A 503 body is not a trial-balance answer with
+a hole in it; it is a different kind of answer.
+
+| Status | Body |
+|---|---|
+| 200 | `{"verdict": "Books balance: YES" \| "Books balance: NO", "imbalance_minor": …, "entry_count": …, "elapsed_ms": …, "drifted_accounts": […]}` |
+| 503 | `{"error": "service_unavailable"}` — and nothing else |
+
+So on 503 there is no `verdict`, no `imbalance_minor`, no `entry_count`, no
+`elapsed_ms`. On 200 `verdict` is **always present and never null**; a client
+may treat its absence as conclusive proof the ledger was not read. That is the
+property worth having, and `null` would destroy it.
+
+The console's third state follows from the status code and the `error` member,
+never from inspecting a verdict field: 200 → render YES or NO; 503 → render
+*cannot reach the ledger*. A console that branched on the verdict field would
+have to decide what a missing verdict means, which is how `NO` gets rendered by
+accident — the failure ADR-009 calls the most likely to be implemented without
+anyone choosing it.
+
+**No in-request retry, no circuit breaker.** A retry inside the request is a
+fresh transaction and a fresh lock acquisition under DDD-6, lengthening the
+window the race suite exists to characterise; the caller already holds the
+correct retry primitive. A circuit breaker has one dependency and nothing
+downstream to protect from cascade. Both rejected on merit, recorded so the
+absence reads as a decision.
+
+**Wire, then probe, then use.** `cmd/api/` probes the store before the server
+accepts a connection and refuses to start on failure, emitting
+`health.startup.refused`. The probe asserts two things: that the app-role
+connection can open a transaction and read, and that `UPDATE` on the entry table
+as `ledgerops_app` is refused (OPS-10). CI job 6 proves the *migration set* is
+right; it proves nothing about the database the binary is pointed at. A
+re-granted privilege, a DSN aimed at the migrate role, or a snapshot predating
+the role split each yields a service whose append-only guarantee is discipline
+in a database costume, invisible until the day it matters.
+
+**Owed to DEVOPS** (raised here, not decided): `environments.yaml` has no
+degraded environment. The DESIGN-side preconditions a `degraded` environment
+must satisfy are — the store reachable at first `Given` and stopped mid-scenario
+rather than absent from the start (so the scenario proves the answer, not the
+boot path); a pool sized below the concurrency under test, which is the exact
+inverse of `contended`'s precondition and must not be confused with it; and the
+observability contract distinguishing a 503 from a refusal, so a spike in
+unavailability is never counted as a spike in rejections.
+
 ---
 
 ## Wave: DESIGN / [REF] Open questions
@@ -365,6 +587,21 @@ Deferred to DISTILL or DELIVER:
 - SPA framework selection (React / Vue / Svelte) — DELIVER
 - Idempotency key expiry and garbage collection — known gap, no owner yet
 - Currency scale handling once a second currency appears — column exists, logic does not
+- **A `currency` field on `POST /accounts`** — the one change that would make
+  `currency_mismatch` (DDD-19) reachable at layer 3 rather than only at layer 1.
+  Not taken here: it is an API surface expansion and DISCUSS excluded
+  multi-currency. Owner: DISCUSS, when a second currency is wanted
+- **503 vs 429, revisit trigger** — DDD-20 answers pool exhaustion with 503 on
+  the grounds that capacity is a property of the service and no rate policy
+  exists. **The day a rate limit, quota, or throttle is introduced, 429 becomes
+  correct for that and 503 stays correct for this**, and the two must be split
+  rather than one silently absorbing the other. Recorded because the reasoning
+  is conditional on an absence, and absences are the thing nobody re-checks.
+  Trigger: the first rate-limiting decision. Owner: DESIGN at that point
+- **A transfer whose `from` and `to` name the same account** — noticed while
+  closing C6a and deliberately left open. I1 holds trivially and the balance is
+  unchanged, so it is neither obviously a refusal nor obviously a legal no-op.
+  Adjacent to the audited gaps, not one of them. Owner: DESIGN, next pass
 - ~~Deployment target and CI topology — DEVOPS~~ **Closed** by OPS-1..OPS-3
 - Whether Go↔TypeScript type generation is worth introducing — revisit if the API surface grows
 
@@ -382,7 +619,19 @@ ordering rule owned by `AccountRepository` (DDD-6) · no external calls inside a
 posting transaction · response rendering must be a pure function of the stored
 transaction (DDD-8) · the pure core performs no I/O, reads no clock, and
 generates no identifiers — every non-determinism is passed in as a value
-(DDD-14) · domain types are immutable with unexported fields (DDD-15).
+(DDD-14) · domain types are immutable with unexported fields (DDD-15) · the
+account table carries a unique constraint on the account name, created with the
+table (DDD-18) · the `exhaustive` linter covers two switch surfaces, the core's
+`ViolationKind` and the adapter's wire mapping (DDD-17) · the composition root
+probes the store before serving and refuses to start on failure (DDD-20).
+
+**Reopened and closed 2026-08-19** — three `SPECIFICATION_AMBIGUITY` gaps routed
+back from DISTILL's AT completeness audit (C2b, C6a, C7a). Settled by DDD-17..21
+in § Refusal taxonomy and status mapping and § Store unavailability, recorded in
+`adr-008-refusal-taxonomy-boundary.md` and
+`adr-009-unavailability-is-not-a-refusal.md`. Three wire members added, one
+availability outcome declared outside the sealed set. No previously declared
+behaviour was changed.
 
 **Upstream changes**: slice-03 idempotency recommendation superseded — see
 `slices/slice-03-idempotent-retry.md` § Changed Assumptions.
@@ -623,9 +872,17 @@ DESIGN constraints the platform must satisfy:
   `race-02`/`race-03` run
 - **D7 append-only** — enforced by *both* revoked role privileges (OPS-10) and a
   rule/trigger, with job 6 asserting the composite refusal
-- **DDD-12 exhaustiveness** — `golangci-lint` runs the `exhaustive` linter over
-  violation-kind switch sites. This is the compensating control `brief.md:131`
-  explicitly assigned to DEVOPS, now discharged
+- **DDD-12 / DDD-17 exhaustiveness** — `golangci-lint` must run the `exhaustive`
+  linter over **two** switch surfaces: `domain.ViolationKind` in the core, and
+  the wire-mapping switch in `internal/adapters/http/` that turns a violation
+  into a status and an error name. Covering one does not cover the other — a
+  member added to the core with no mapping at the wire is exactly the defect the
+  sealed set exists to prevent, and only the second surface catches it.
+  **Corrected 2026-08-19 by DESIGN: this was written as "now discharged" and is
+  not.** CI job 1 is a design; no `.github/workflows/` and no `.golangci.*`
+  exist in the repository. The second surface did not exist when the original
+  claim was written (DDD-17 created it), but the first was never wired either.
+  Still owned by DEVOPS, still outstanding
 - **DDD-14 determinism** — PBT seeds printed to the CI log every run and
   uploaded as an artifact on failure. A non-reproducible property failure in a
   ledger is a bug you cannot chase
@@ -744,3 +1001,505 @@ concurrency primitives for the I4/I7 race tests, and that reasoning is untouched
 **Downstream impact**: none consumed yet. DEVOPS, DISTILL, and DELIVER have not
 run; no production code exists. `CLAUDE.md` § Development Paradigm updated to
 match, which is the file `/nw-deliver` step 1.5 actually reads.
+
+---
+
+## Wave: DISTILL / [REF] Inherited commitments
+
+| Origin | Commitment | DDR | Impact |
+|--------|------------|-----|--------|
+| DISCUSS#D2 | Walking skeleton is slice 01, authored by DISTILL since SPIKE was skipped | n/a | One `@walking_skeleton @driving_port @driving_adapter @real-io` scenario written; it is the only scenario not tagged `@pending`, so DELIVER makes it green first and nothing else is worth reading until it is |
+| DISCUSS#D6 | Synthetic data, mitigated by property-based generation of adversarial amounts | n/a | Acceptance scenarios stay example-based (Mandate 9 — they run at layer 3); the generated-adversarial obligation is declared as a PBT table DELIVER owns, so the mitigation is tracked rather than assumed |
+| DISCUSS#D7 | Entries append-only, enforced at the database level | n/a | Four `@append-only` scenarios assert refusal as the application role, including an attempt to disable the protection itself — a trigger alone would pass a weaker test |
+| DISCUSS#WS-C | Strategy C, real local resources, no in-memory doubles | n/a | Every driven repository runs against real PostgreSQL 16; Tier B in-memory state-machine PBT is deliberately NOT emitted (see § Two-tier decision) |
+| DESIGN#DDD-8 | Idempotency replays re-render from the stored transaction | DDR-3 | A scenario compares the replayed legs against the entries actually recorded, which a cached response body would fail; replay status fixed at 200 |
+| DESIGN#DDD-13 | Ports hybrid by arity — function types for `Clock`/`IDGenerator` | n/a | Those two are the only fakes in the suite, and the infrastructure policy records what they cannot model |
+| DESIGN#DDD-14 | The posting rulebook is one pure `Post` function | n/a | Declared as the primary PBT target for DELIVER; the acceptance layer asserts its consequences at the port, never calls it directly |
+| DESIGN#DDD-4 | Console is a separate TypeScript SPA (ADR-006) | DDR-2 | Console scenarios drive the verdict contract over HTTP, not a browser; the SPA rendering is a recorded untested seam |
+| DEVOPS#OPS-10 | Two database roles, `UPDATE`/`DELETE` revoked from the app role | n/a | The suite holds two DSNs; corruption is reachable only through the privileged one, which is what makes the slice-04 verdict honest |
+| DEVOPS#OPS-11 | PostgreSQL 16 per test package via Testcontainers | n/a | One code path for `clean` and `ci`; a fresh instance per scenario, so `corrupted` cannot pass on leftover drift |
+| ADR-005 | `Idempotency-Key` is required, not optional | DDR-1 | Every `POST /transfers` scenario carries a key from slice 01 onward, so slice 03 tightens behaviour without rewriting a single earlier scenario |
+
+---
+
+## Wave: DISTILL / [REF] Scenario list with tags
+
+SSOT for scenarios is the `.feature` files. 7 files · **60 scenarios** (59
+blocks; the one `Scenario Outline` expands to 2 examples) · 445 step
+invocations. Counts reconciled 2026-08-19 after § AT completeness audit added
+six scenarios; the `Scenarios` column below counts executed scenarios, as it
+always has. Every scenario except the walking skeleton carries `@pending`
+(ADR-025 one-at-a-time; DELIVER unskips, it does not re-author), and every
+scenario carries a `@contract-shape:` tag (see § Contract shape classification).
+
+| File | Scenarios | Tags |
+|---|---|---|
+| `walking-skeleton.feature` | 1 | `@walking_skeleton @driving_port @driving_adapter @real-io @slice-01 @us-1 @env-clean` |
+| `milestone-01-post-a-transfer.feature` | 12 | `@us-1 @slice-01` · 6 `@error` · 1 `@chaos @driving_adapter` |
+| `milestone-02-sufficient-funds.feature` | 8 | `@us-2 @slice-02` · 4 `@error` · 2 `@env-contended @kpi-2` |
+| `milestone-03-idempotent-retry.feature` | 9 | `@us-3 @slice-03` · 4 `@error` · 1 `@chaos` · 1 `@env-contended @kpi-3` |
+| `milestone-04-proof-of-balance.feature` | 11 | `@us-4 @slice-04` · 5 `@error` · 5 `@env-corrupted` · 4 `@kpi-4` |
+| `milestone-05-entry-traceability.feature` | 10 | `@us-5 @slice-05` · 3 `@error` · 2 `@env-corrupted` |
+| `integration-checkpoints.feature` | 9 | `@real-io @adapter-integration` · 4 `@append-only` · 1 `@env-contended` |
+
+**Error coverage: 24 of 60 = 40%** (target ≥40%), under the same counting rule
+as before — `@error` plus the two `@env-corrupted` scenarios that exercise
+deliberate damage without carrying the tag. Two corrections come with the
+recount: the earlier 22 undercounted `@error` in milestone-03 by one (the file
+has always held four, the table said three, so the true figure was 23 of 54 =
+43%), and the rule was stated as "assert a NO verdict", which never described
+one of the two scenarios it counted.
+
+The ratio fell from 43% to 40% because five of the six scenarios added by the
+audit are boundary, cardinality and interruption edges — smallest accepted
+amount, a key surviving an interruption, an empty ledger's verdict, an empty
+trace, a single-row trace — and not one of them is a refusal, so none carries
+`@error`. **`@error` is a refusal taxonomy, not an edge taxonomy**, and
+reading it as the latter is what makes the drop look like a regression. Counted
+as error *and* edge, which is what the ≥40% target is actually about, the figure
+is 29 of 60 = 48% and rose.
+
+Story coverage: US-1 → 13 scenarios, US-2 → 8, US-3 → 9, US-4 → 11, US-5 → 10.
+Every story has at least one scenario asserting its Elevator Pitch "After" line
+end to end.
+
+---
+
+## Wave: DISTILL / [REF] WS strategy
+
+**Strategy C — real local resources**, inherited from DISCUSS unchanged, now
+expressed through the Architecture of Reference rather than renegotiated: port
+CLASS implies port TREATMENT, and the project policy at
+`docs/architecture/atdd-infrastructure-policy.md` records the MECHANISM per port.
+
+One walking-skeleton scenario. Stakeholder litmus test, stated in the feature
+file so it survives: *"an integrator creates two accounts, funds one, moves
+fifty from it to the other, and both balances say so."* Real HTTP, real domain,
+real PostgreSQL, real balances read back.
+
+---
+
+## Wave: DISTILL / [REF] Two-tier decision (Mandate 10)
+
+**Tier A only. Tier B is deliberately NOT emitted**, and this is a judgement
+call worth recording rather than a default.
+
+Both Tier B trigger conditions are met on their face — the post-a-transfer
+journey chains five scenarios, and the input space (amounts, account pairs,
+repeat counts) is domain-rich. Tier B is skipped anyway because it requires an
+`InMemoryComposition` standing in for the repositories, and the guarantees this
+feature exists to prove — atomicity, isolation under contention, append-only
+enforcement — are properties of the real store's transactional behaviour. An
+in-memory double would model the very behaviour under test. That is the exact
+reasoning DISCUSS used to select strategy C, and it does not stop applying
+because the tier changed.
+
+The property surface is not lost, it is relocated: DDD-14 puts it at the pure
+`Post` function, where it needs no doubles at all. See the PBT obligations table
+below.
+
+---
+
+## Wave: DISTILL / [REF] Adapter coverage table (Mandate 6)
+
+| Adapter | `@real-io` scenario | Covered by |
+|---|---|---|
+| `TransactionRepository` (postgres) | YES | WS · `integration-checkpoints` append-only ×4 · migration-over-history |
+| `AccountRepository` (postgres) | YES | WS · `milestone-02` contended ×2 · `integration-checkpoints` opposing-direction deadlock |
+| `IdempotencyStore` (postgres) | YES | `milestone-03` ×9, including 50-way concurrent same-key and one key surviving an interruption |
+| `Clock` (fake) | N/A — fake by policy | `integration-checkpoints` "timestamps come from the injected clock" asserts the injection itself, so a clock read from the store would fail |
+| `IDGenerator` (fake) | N/A — fake by policy | `integration-checkpoints` "identifiers come from the injected generator", same reasoning |
+| HTTP driving adapter | YES | Every scenario; WS via real socket, real routes, real API-key middleware |
+
+Zero `NO — MISSING` rows. The two fakes are the only ports not exercised for
+real, they are permitted by the Architecture of Reference (driven external /
+non-deterministic), and each has a scenario proving the injection seam is real
+rather than decorative.
+
+---
+
+## Wave: DISTILL / [REF] Driving adapter coverage
+
+DESIGN entry points scanned; every one has at least one scenario reaching it
+over its own protocol, not by calling a service function.
+
+| Entry point | Exercised by | Verifies |
+|---|---|---|
+| `POST /accounts` | WS · `milestone-01` | status (201/400/401/409), body, argument handling |
+| `POST /transfers` | WS · milestones 01–03 · both contended runs | status (201/200/400/401/404/409/422), body, headers |
+| `GET /accounts/{id}` | WS · every balance assertion | status, body |
+| `GET /accounts/{id}/entries` | `milestone-05` ×10 | status, body, ordering, empty listing |
+| `GET /health/trial-balance` | `milestone-04` ×11 | status, body, `entry_count`, `elapsed_ms` |
+| Console verdict surface | `milestone-04` "both surfaces agree" | contract parity with the health surface (DDR-2 — not driven in a browser) |
+| `cmd/api` binary | `milestone-01` chaos scenario (subprocess, killed mid-write) | wiring, restart against the same store |
+
+The API-key middleware is implemented for real rather than scaffolded, so the
+three unauthenticated-caller scenarios may pass on first run. That is intended:
+authentication gates everything else and is not waiting on DELIVER.
+
+**Status lists reconciled 2026-08-19 by DESIGN** (count-only edit to this table;
+no verdict, rule or obligation in this section was touched). The declared 400 on
+`POST /transfers` previously had no reachable cause, because the only declared
+400 was a missing idempotency key. DDD-19 gives it one — `malformed_request`.
+Two further corrections: 401 was exercised by the unauthenticated-caller
+scenarios without ever being written down, and `POST /accounts` was listed as
+though it had no refusal path, which DDD-18 changes. **503 is deliberately
+absent from both rows**: DDD-20 declares it, no scenario asserts it, and a
+`degraded` environment does not yet exist. Adding it to this table before a
+scenario reaches it would claim coverage that is not there.
+
+---
+
+## Wave: DISTILL / [REF] Scaffolds
+
+Mandate 7 — 9 files, all carrying `SCAFFOLD: true`. `grep -rl "SCAFFOLD" internal cmd`
+must return zero once DELIVER completes.
+
+| File | Shape |
+|---|---|
+| `internal/domain/money.go` | `Money`, smart constructor, `Add`/`Negate`/`IsPositive` — panics |
+| `internal/domain/account.go` | `Account`, `AccountKind`, `Apply` — panics |
+| `internal/domain/violation.go` | Sealed taxonomy (DDD-12), unexported interface — panics |
+| `internal/domain/post.go` | `Post`, `Transaction`, `Entry`, `BalanceDelta`, `EntriesSumToZero` — panics |
+| `internal/app/ports/ports.go` | Port declarations only — nothing to panic; `UnitOfWork` keeps the three repositories on one transaction |
+| `internal/app/usecases.go` | Five use cases — panics |
+| `internal/adapters/http/router.go` | **Real routes, real auth middleware; handlers answer `501 __SCAFFOLD__`** |
+| `internal/adapters/postgres/store.go` | `Migrate`/`Open` no-op; everything an assertion depends on panics |
+| `cmd/api/main.go` | Real wiring, app DSN only |
+
+The two deviations from "everything panics" are deliberate and are what make the
+RED classification honest — a panicking HTTP handler drops the connection and a
+panicking `Migrate` fails the `Given`, and both classify BROKEN rather than RED.
+Full reasoning: `distill/red-classification.md`.
+
+---
+
+## Wave: DISTILL / [REF] PBT obligations for DELIVER
+
+Acceptance scenarios are example-based because they run at layer 3 (real
+adapters), per Mandate 9, and sad paths stay enumerated per Mandate 11. The
+property surface DISCUSS#D6 and the slice ACs demand lives in DELIVER's unit
+tests over the pure core, with `rapid`. Declared here so it is tracked, not
+assumed.
+
+| Property | Over | Slice AC it discharges |
+|---|---|---|
+| For any generated transfer, the returned entries sum to zero per currency | `domain.Post` | slice-01 "PBT generates adversarial amounts and asserts I1" |
+| No generated sequence of transfers drives a wallet account negative | `domain.Post` + `Account.Apply` | slice-02 "no generated sequence drives a wallet negative" |
+| For any request and any repeat count ≥1, final state equals the state after exactly one application | `PostTransfer` over fakes, plus the real store for I7 | slice-03 "any repeat count" |
+| Adversarial amounts — zero, one minor unit, max int64, exact balance, off-by-one-cent | `domain.Money`, `domain.Post` | slice-01 and slice-02 boundary coverage |
+| Negative testing (Hebert ch.6): relax the same-currency assumption and the non-empty-snapshot assumption | `domain.Post` | none — surfaces under-specification before a second currency exists |
+
+**Seeds must be printed every run and archived on failure** (DEVOPS
+pre-requisites). A non-reproducible property failure in a ledger is a bug you
+cannot chase.
+
+---
+
+## Wave: DISTILL / [REF] Test placement
+
+`tests/acceptance/ledgercore/` — Go convention places a suite that needs real
+infrastructure outside `internal/`, and the package cannot live under `internal/`
+anyway without becoming importable only by the module itself. No precedent
+existed to follow: greenfield, verified by filesystem search.
+
+```
+tests/common/statedelta/state_delta.go   # polyglot bootstrap, project-wide, once
+tests/acceptance/ledgercore/
+  *.feature                              # scenario SSOT — 7 files
+  domain_types.go                        # Mandate-12 typed nouns
+  ledger_world.go                        # composition root: lifecycle, universe, transport
+  ledger_observations.go                 # containers, reads, contended runners
+  ledger_seeding.go                      # Given-side helpers, all through the driving ports
+  ledger_assertions.go                   # Then-side vocabulary
+  steps_ledger_test.go                   # godog bindings — one delegating statement each
+  suite_test.go                          # runner; default tag filter ~@pending
+```
+
+**Runner choice — godog.** DESIGN listed `rapid` for property testing but named
+no Gherkin runner, and the polyglot matrix's Go row presumes none. godog was
+chosen so the `.feature` files stay executable rather than decaying into prose
+that drifts from the tests beside them, and it runs under plain `go test`, so
+the eight-job CI pipeline is unchanged. Cost, accepted: one test-only dependency
+DESIGN did not name. A test runner is not architecturally significant, which is
+the same standard by which DESIGN deferred the SPA framework.
+
+**State-delta port** bootstrapped at `tests/common/statedelta/` (apply-if-absent,
+first DISTILL in this project). All eight predicates implemented with the
+canonical fail-closed semantics.
+
+---
+
+## Wave: DISTILL / [REF] Mandate-12 compliance
+
+Mechanical criteria, not a ratio:
+
+| # | Criterion | Verdict | Evidence |
+|---|---|---|---|
+| 1 | Domain types module exists | PASS | `domain_types.go` — 8 typed enums (`AccountKind`, `RefusalKind`, `Outcome`, `Verdict`, `Surface`, `Credentials`, `TamperAction`, plus `Money`/`AccountName`/`IdempotencyKey` newtypes) and 7 observable structs |
+| 2 | Composition methods consume typed parameters | PASS | No composition-root method takes a raw `string` where a domain type exists; coercion happens in argument position via `Parse*` |
+| 3 | No business logic in step bodies | PASS | 93 step bodies, every one a single delegating statement; `grep -E '^\s+(if\|for\|while\|switch\|select) '` over `steps_ledger_test.go` returns nothing |
+| 4 | Step-reuse ratio reported | **3.42×** (318 Gherkin step lines / 93 decorators) | Informational per the refined mandate — this is the natural ceiling for this feature shape, not a miss |
+
+---
+
+## Wave: DISTILL / [REF] Contract shape classification
+
+Designer principle 14 (2026-05-15, identity-essential). Every scenario carries a
+`@contract-shape:` tag; the tag is machine-parseable and drives the crafter's
+choice of universe mechanism in DELIVER. Added 2026-08-18 following review —
+the tags were missing from the first pass and Sentinel blocked on it.
+
+| Shape | Scenarios | What the tag commits the crafter to |
+|---|---|---|
+| `bounded-change` | 24 | A declared, aggregate-bounded mutation set. `assert_state_delta` over the port-exposed universe; anything declared but not expected must be unchanged |
+| `unbounded-preservation` | 35 | The action must mutate **nothing**. Every refusal, every read, every verdict |
+| `pure-function` | 0 | Correctly zero at this layer — the pure surface is `domain.Post`, and it belongs to DELIVER's `rapid` suite, not to a scenario that crosses a socket |
+
+59 scenario blocks tagged (godog counts 60 by expanding the one
+`Scenario Outline` into its two examples). Mechanical check — the two figures
+must be equal, which is the invariant, not the number:
+
+```bash
+grep -hE '^\s*Scenario( Outline)?:' tests/acceptance/ledgercore/*.feature | wc -l   # 59
+grep -ohE '@contract-shape:[a-z-]+' tests/acceptance/ledgercore/*.feature | wc -l    # 59
+```
+
+The classification is by the shape of each scenario's **When**, not its Given.
+The corruption scenarios are the case that makes this worth stating: their
+`Given` mutates an entry out of band, but the `When` only asks for the verdict,
+and asking must change nothing — so they are `unbounded-preservation`. Tagging
+them `bounded-change` because damage appears somewhere in the scenario would
+license the verifier to write, which is precisely what must never happen.
+
+Authoritative source for the shapes: DESIGN § Contract shape per component,
+added in the same review cycle. The two agree by construction.
+
+The typing is what keeps the decorator count at 90 rather than ~130: one
+decorator covers the whole sealed refusal taxonomy (`(?:as|for) (.+)` →
+`ParseRefusalKind`), one covers both account kinds, one covers every
+credentials × tamper-action pair. Collapsing further would mean merging steps
+that read differently to a stakeholder, which Pillar 1 outranks.
+
+---
+
+## Wave: DISTILL / [REF] AT completeness audit
+
+Designer Phase 2.5 / DoD item 21 — the `nw-at-completeness-check` 7-category
+taxonomy (C1–C7) and its 15-item mechanical checklist, computed over the real
+`.feature` set rather than inferred from titles. Run 2026-08-19. It had never
+been run: the mandate lives in the agent definition and this wave was executed
+skill-driven, the same miss class as R-1.
+
+**Verdict: ACCEPTABLE_WITH_DOCUMENTED_GAPS — 11 of 15 passing** (thresholds:
+<10 INCOMPLETE · 10–12 acceptable with listed gaps · ≥13 complete). 8 of 15 at
+first computation; six scenarios and one docstring closed C1b, C2a and C3.
+
+| Item | Verdict | Evidence / gap |
+|---|---|---|
+| C1a — empty / zero / minimum input | PASS | `A new account starts empty` · `The schema builds from nothing` · `the ledger holds no entries` · amount 0.00 refused |
+| C1b — each partition boundary | PASS *(closed)* | Sufficiency boundary had exact (10.00 accepted) and over (10.01 refused); the smallest **accepted** amount was absent. Added `The smallest amount the ledger can move is accepted` (0.01). int64 ceiling stays at layer 1 — it is already in § PBT obligations, which is where Mandate 9 puts it |
+| C2a — state machine documented | PASS *(closed)* | Store / account / key state machines written out in `ledger_world.go`. Writing them is what surfaced C2b |
+| C2b — illegal event from each state | **GAP** | Every state has an illegal-event scenario except `account: open`, whose illegal event is *open again*. Unspecified upstream — see routing below. Not invented |
+| C3 — cardinality 0 / 1 / many | PASS *(closed)* | Trace had many (5) and 2, but neither 0 nor 1; the drift list had 0 and 1 but not many; no scenario asked the verdict of an empty ledger. Added `An account nothing has happened to traces to an empty history`, `An account with a single movement traces to a single row`, `A ledger holding nothing balances, and says so`, `Two damaged accounts are both named` |
+| C4a — apply-twice per mutating op | **GAP** | Posting is covered exhaustively (5 replay/conflict scenarios). Opening an account twice is the C2b gap. Re-running the migration set — required idempotent by `environments.yaml § deployment_assumptions` — has no scenario, and one written today would pass vacuously against the empty `MigrationStatements()`, so it is raised for DELIVER rather than authored now |
+| C4b — inverse op without prerequisite | PASS *(N/A by design, documented)* | The SUT has no destructive inverse: entries are append-only (D7) and reversals are out of scope. The analogue — acting on an absent prerequisite — is covered three times (transfer in, transfer out, trace, all against an account nobody opened), and the four `@append-only` scenarios assert that attempting the inverse is refused. No reversal scenario was invented for a capability DISCUSS excluded |
+| C5a — mode-flag combinations | PASS | No `dry_run`/`force`/`verbose` exists. The decision-table axes that do — account kind × direction × sufficiency, key present/absent/reused-same/reused-different, surface console/health, credentials app/privileged, operator key absent/wrong/valid — are each exercised across their materially-distinct combinations |
+| C5b — flag orthogonality | PASS | `The console and the health check give the operator the same answer` (surface changes presentation, never the answer) · `The same request written differently is still the same request` (representation changes nothing about identity) |
+| C6a — malformed value per input param | **GAP** | Amounts are covered for zero and negative; account names for unknown; the key for absent. Nothing submits a syntactically malformed body, a non-numeric or over-scale amount, or a currency mismatch. The sealed refusal taxonomy (DDD-12) does not say what any of those answer, so they are routed, not written |
+| C6b — each declared error triggered | PASS | All five journey `error_paths` plus both auth refusals have a scenario that triggers exactly that refusal: insufficient funds · unknown account · key conflict · invalid amount · missing key · unidentified caller |
+| C6c — closed error set asserted | PASS | The contended scenarios account for every outcome with no residue — `exactly 1 accepted` + `exactly 19 refused for insufficient funds` over 20 attempts, and `every attempt is answered` + `no attempt is answered with a deadlock`. A third outcome would fail them |
+| C7a — degraded resource | **GAP** | No scenario runs with the store unreachable, the pool exhausted, or the disk full. The environment matrix has no degraded environment and nothing declares what the ledger answers when Postgres is gone. Routed to DEVOPS + DESIGN |
+| C7b — interruption mid-operation | PASS | `A transfer interrupted halfway leaves no half-applied movement` (kill mid-write, restart, assert both legs or neither). Expected to be thin and was not — but it left slice-03's reworded AC uncovered, closed below |
+| C7c — concurrent actors | PASS | Four contended scenarios: 20 racers on one balance · 1000 contended spends · 50 same-key submissions · 100 opposing-direction movements for lock ordering |
+
+**Six scenarios added, all `@pending`, all `@contract-shape:`-tagged against
+DESIGN § Contract shape per component, zero undefined steps.** The set is now
+**59 scenario blocks / 60 executed** across the same 7 files; 318 Gherkin step
+lines over 93 decorators (step-reuse **3.42×**, informational). Three new
+bindings (`no entries are returned`, `exactly N entries are returned`, and a
+keyed variant of the kill step), one new assertion method, and one scaffold
+signature change (`InterruptPostingMidWrite` now carries the key). `go build
+./...` and `go vet ./...` pass.
+
+| Added scenario | File | Shape | Closes |
+|---|---|---|---|
+| The smallest amount the ledger can move is accepted | milestone-01 | bounded-change | C1b |
+| A key and the movement it guards survive an interruption together or not at all | milestone-03 | bounded-change | slice-03 AC (see below) |
+| A ledger holding nothing balances, and says so | milestone-04 | unbounded-preservation | C3 (0 entries) |
+| Two damaged accounts are both named, not just the first one found | milestone-04 | unbounded-preservation | C3 (many drifted) |
+| An account nothing has happened to traces to an empty history | milestone-05 | unbounded-preservation | C3 (0 rows) |
+| An account with a single movement traces to a single row | milestone-05 | unbounded-preservation | C3 (1 row) |
+
+The idempotency one is the find worth naming. Slice 03's AC was **reworded by
+this wave's own U-1 finding** — from "killing the process between them is not
+possible because they are one write" to "after any interruption, a key exists if
+and only if its transaction exists, observable by retrying with the same key" —
+specifically so a scenario could be written against it, and then no scenario
+was. The chaos coverage sat in milestone-01, where the interrupted transfer
+carries no key and therefore cannot observe the property. Now it does.
+
+**Gap classification and routing** (per the skill's §5 rule: C2/C5/C6/C7 gaps
+whose upstream artefact is absent are `SPECIFICATION_AMBIGUITY` and re-enter the
+owning wave, not DISTILL).
+
+| Gap | Kind | Owner | Severity | What is owed |
+|---|---|---|---|---|
+| C2b — opening an account that is already open | SPECIFICATION_AMBIGUITY | DESIGN (+DISCUSS) | HIGH | The sealed violation taxonomy (DDD-12) has no member for it and the journey's `error_paths` do not list it. Idempotent create? 409? Silent success? Whichever, `POST /accounts` needs it before slice 01 is done |
+| C6a — malformed body, non-numeric or over-scale amount, currency mismatch | SPECIFICATION_AMBIGUITY | DESIGN | HIGH | § Driving adapter coverage already claims `POST /transfers` answers 400, but no declared refusal produces one for a malformed payload. Currency mismatch is the sharper half: slice 01 says "same currency" and nothing says what happens when it is not |
+| C7a — store unreachable / pool exhausted / disk full | SPECIFICATION_AMBIGUITY | DEVOPS (+DESIGN) | MEDIUM | `environments.yaml` has no degraded environment, and no declared answer exists for a ledger whose store is gone. `verify-the-books` already assumes a fallback path when the console is unreachable and never states the API's own failure answer |
+| C4a — migration set applied twice | AT_GAP_IN_DELIVERY_SCOPE | DELIVER | LOW | `deployment_assumptions` requires idempotent, expand-only migrations. Deliberately not authored here: with `MigrationStatements()` returning an empty map it would pass vacuously, and this wave already carries one vacuous pass it has told DELIVER not to count |
+
+Falsifier-gate telemetry (§7), 3-month window: `(ledger-core, C1, 1, MEDIUM)`
+`(ledger-core, C2, 2, HIGH)` `(ledger-core, C3, 4, MEDIUM)`
+`(ledger-core, C4, 2, LOW)` `(ledger-core, C5, 0, —)` `(ledger-core, C6, 1, HIGH)`
+`(ledger-core, C7, 1, MEDIUM)`. C5 is the only zero-finding category on this
+feature — one of the three consecutive zeroes a prune would need.
+
+**Two consequences this audit created.** Both were raised rather than fixed in
+the audit pass and were reconciled straight after, on the same day, under a
+count-only mandate — no verdict, rule, obligation or reasoning was touched in
+any reviewed document.
+
+1. **The counts were stale everywhere the suite is described.** Reconciled
+   2026-08-19: § Scenario list with tags, § Adapter coverage, § Driving adapter
+   coverage, § Mandate-12 compliance, § Contract shape classification and
+   § Wave decisions summary now read 59 blocks / 60 executed, and
+   `distill/red-classification.md` states its 53/54 as the counts *as executed*
+   and names the six unexecuted additions. The RED gate verdict is untouched and
+   remains an unhedged PASS — nothing added can turn a `MISSING_FUNCTIONALITY`
+   into a `SETUP_FAILURE`, because none of the six has ever run. Classifying
+   them falls to the second gate run DELIVER already owes as obligation 1.
+   Figures that are historical rather than stale were deliberately left alone:
+   the gate's 53 `MISSING_FUNCTIONALITY`, its 54 container lifecycles, its "5 of
+   53 reach their `Then`", and R-1's "all 53 scenario blocks then existing were
+   authored untagged". Each records what happened on a date, not what the suite
+   holds now.
+2. **The headline error ratio is arithmetic, not coverage.** `@error` plus the
+   damage-asserting `@env-corrupted` scenarios is 24 of 60 = 40%, still on the
+   line. Five of the six additions are boundary and cardinality edges carrying no
+   `@error` tag; counted as error/edge the figure is 29 of 60 = 48%. The `@error`
+   tag was never a taxonomy of edges and should not be read as one.
+
+---
+
+## Wave: DISTILL / [REF] Registered outcomes
+
+10 rows in `docs/product/outcomes/registry.yaml`, per-typed-contract grain
+(D-5). Registry was empty — first feature, no collision check needed.
+
+| ID | Kind | Contract |
+|---|---|---|
+| OUT-1 | operation | Post a transfer — atomic, at most once per key |
+| OUT-2 | operation | Open an account of a declared kind |
+| OUT-3 | operation | Report a stored balance |
+| OUT-4 | operation | Report ordered entries with a running balance |
+| OUT-5 | operation | Answer whether the books balance, with drift attribution |
+| OUT-6 | specification | The posting rulebook, as one pure decision |
+| OUT-7 | invariant | I1 — entries sum to zero per currency |
+| OUT-8 | invariant | I4 — no negative wallet balance |
+| OUT-9 | invariant | I7 — repeated application changes state once |
+| OUT-10 | invariant | D7 — entries are never updated or deleted |
+
+Written directly rather than via `nwave-ai outcomes register`: that command
+fails in this install with `FileNotFoundError` on its own packaged
+`docs/product/outcomes/schema.json`. The rows match
+`nwave_ai/outcomes/domain/serialization.py:outcome_to_dict` exactly. **The CLI
+defect is a tooling bug worth reporting upstream** — it is not a project issue
+and nothing here depends on it.
+
+---
+
+## Wave: DISTILL / [REF] Pre-requisites
+
+Environment and upstream artefacts the scenarios depend on. What DELIVER must
+have in place before it starts. (Obligations DELIVER must *discharge* are not
+pre-requisites and are not listed here — see § Wave decisions summary.)
+
+- **A Docker daemon.** Every scenario reaches for PostgreSQL 16 via
+  Testcontainers on its first `Given`, one container per scenario. Verified
+  available and sufficient on 2026-08-19: Docker 29.7.2, testcontainers-go
+  v0.33.0, `postgres:16`, 54 container lifecycles, no leaks. Gate result and its
+  caveats: `distill/red-classification.md`.
+- **Two database roles** (`ledgerops_app`, `ledgerops_migrate`) created by the
+  migration set. The suite already connects as the app role and reaches for the
+  migrate role only to corrupt; neither exists until DELIVER writes migration 0.
+- **`golang-migrate` migration set**, expand-only. `MigrationStatements()` is
+  scaffolded to return an empty map, so the "no migration erases an entry"
+  scenario passes vacuously until real migrations exist. **DELIVER must not
+  treat that green as coverage.**
+- **`docker-compose.yml` plus `make demo-01..05`, `chaos-01`, `race-02`,
+  `race-03`, `corrupt-04`, `trace-05`** — named in the DoD and in every KPI
+  contract, not yet written. The KPI harnesses must emit the denominators
+  (`iterations`, `submissions`, `injections`), which the scenarios already
+  assert.
+- **`golangci-lint` with the `exhaustive` linter** over switches on
+  `domain.ViolationKind` — the compensating control DESIGN assigned to DEVOPS
+  for the hand-built sealed taxonomy.
+
+---
+
+## Wave: DISTILL / [REF] Wave decisions summary
+
+**Scenarios**: 60 across 7 files (59 blocks, one `Scenario Outline` expanding
+to 2), 40% `@error` and 48% error-or-edge, one walking skeleton, all but the
+skeleton `@pending` for one-at-a-time delivery. Six of the sixty were added by
+§ AT completeness audit after this summary was first written; the counts here
+are reconciled to the suite on disk, nothing else in this section changed.
+
+**Reconciliation**: passed after three user rulings — DDR-1 (key carried from
+slice 01), DDR-2 (console asserted over HTTP, browser E2E deferred), DDR-3
+(replay answers 200). All three are recorded in `distill/upstream-issues.md`
+with the upstream edits each still owes.
+
+**Tiering**: Tier A only; Tier B skipped because an in-memory composition would
+model the transactional behaviour under test, which is the reasoning that
+selected strategy C in the first place.
+
+**Constraints established**: `.feature` files are the scenario SSOT and execute
+under godog · the suite holds two DSNs and never connects as the migrate role
+except to corrupt · the only fakes are `Clock` and `IDGenerator` · every
+precondition is established through a driving port, never by writing to the
+store · every contended assertion carries its denominator.
+
+**Upstream changes**: six findings raised, **all closed** — DDR-1/2/3 by user
+ruling, U-1 (slice-03's untestable "killing the process is not possible"
+criterion, owner DISCUSS) and U-2 (KPI-1's `elapsed_ms` guardrail missing the
+`corrupted` environment, owner DEVOPS) by their owning wave's reviewer. Each
+upstream edit was made only after that reviewer confirmed the finding. The
+sixth, R-1, came out of the review cycle itself: all 53 scenario blocks then
+existing were
+authored without the mandatory `@contract-shape:` tag (principle 14), Sentinel
+rejected the wave on it, and all 53 were tagged against an authoritative
+DESIGN § Contract shape per component. Detail in `distill/upstream-issues.md`.
+
+**RED gate**: executed 2026-08-19 and **PASSED** — 53 `MISSING_FUNCTIONALITY`,
+0 `SETUP_FAILURE`, 0 `BROKEN`, 0 undefined steps, 1 vacuous pass. The gate's
+verdict is binary (block on any category-2/3 failure, otherwise pass) and
+nothing classified there, so handoff to DELIVER is not blocked. Scenarios were
+classified by the *cause* of failure, not the depth reached — which is what
+Mandate 7 requires, since scaffolds raise assertion failures precisely so the
+snapshot classifies by error type. Under a depth-based rule this gate would read
+PARTIAL; that reading and why it is rejected are both stated in
+`distill/red-classification.md`.
+
+**Two obligations carried into DELIVER.** These are additional work assigned on
+the strength of the PASS, not conditions on it.
+
+1. **A second gate run.** Only 5 of the 53 correct failures reach their `Then`
+   today; the other 48 stop in a `Given`, because seeding funds accounts through
+   the real `POST /transfers` rather than a back door — Mandate 1 working, not a
+   defect, and self-clearing once slice 01 lands. Until then those 48 assertion
+   bodies have never executed and a logic error inside one would not have
+   surfaced. After slice 01 goes green, re-run the full suite with the tag filter
+   disabled and verify the failures have moved from `Given` clauses to `Then`
+   clauses. Any scenario still failing in a `Given` at that point is a test
+   defect and blocks the slice.
+2. **Do not count the vacuous pass.** `The schema builds from nothing` passes
+   only because `MigrationStatements()` returns an empty map. It is not coverage
+   and must not enter KPI accounting until migration 0 exists.
+
+Also unproven by this run and deferred to DELIVER: every SQL path, the OPS-10
+two-role split, row-lock ordering, privilege revocation, and the API-key
+middleware — no pgx connection was opened, and all 3 auth scenarios died in
+their `Given`.
