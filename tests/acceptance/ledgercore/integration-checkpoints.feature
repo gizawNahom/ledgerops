@@ -16,6 +16,7 @@ Feature: The store keeps the promises the application layer cannot
   Background:
     Given the store is a real PostgreSQL 16 instance with the schema migrated from zero
     And the service holds only the application credentials
+    And a system account "treasury" exists
 
   @append-only @contract-shape:unbounded-preservation
   Scenario: The service cannot rewrite a recorded entry
