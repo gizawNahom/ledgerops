@@ -114,7 +114,7 @@ func entriesToWire(entries []domain.Entry) []map[string]any {
 			"transaction_id": entry.TransactionID(),
 			"counterparty":   entry.Counterparty(),
 			"amount":         formatMoney(entry.Amount()),
-			"recorded_at":    entry.RecordedAt(),
+			"recorded_at":    entry.RecordedAt().UTC(),
 		})
 	}
 	return wire

@@ -74,12 +74,13 @@ Feature: The store keeps the promises the application layer cannot
     And a wallet account "alice" funded with 100.00
     And a wallet account "bob" exists
     When the integrator moves 50.00 from "alice" to "bob" under key "t-1"
+    And the operator traces "alice"
     Then every entry of that transaction is stamped "2026-08-18T09:00:00Z"
 
   @env-clean @contract-shape:bounded-change
   Scenario: Transaction identifiers come from the injected generator, not from the store
-    Given the next generated identifier is "txn_0001"
-    And a wallet account "alice" funded with 100.00
+    Given a wallet account "alice" funded with 100.00
     And a wallet account "bob" exists
+    And the next generated identifier is "txn_0001"
     When the integrator moves 50.00 from "alice" to "bob" under key "t-1"
     Then the answer names the transaction "txn_0001"

@@ -124,8 +124,15 @@ func (l *Ledger) serve(ctx context.Context) error {
 	handler := apphttp.NewRouter(apphttp.Deps{
 		Store:       store,
 		OperatorKey: l.operatorKey,
-		Clock:       l.clock,
-		IDGenerator: l.nextID,
+		// Wrapped in forwarding closures, not passed directly: l.clock/l.nextID
+		// are func() values, so passing them by value here would snapshot
+		// whatever they ARE at serve() time — before Background's
+		// FixClockAt/FixNextIdentifier reassignment runs. The forwarding
+		// closure calls through to whatever l.clock/l.nextID currently ARE at
+		// invocation time, so a later fixture override on the Ledger struct
+		// takes effect on the already-running server.
+		Clock:       func() time.Time { return l.clock() },
+		IDGenerator: func() string { return l.nextID() },
 	})
 	l.server = httptest.NewServer(handler)
 	l.client = l.server.Client()
