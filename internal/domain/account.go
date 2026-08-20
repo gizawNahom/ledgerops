@@ -1,4 +1,3 @@
-// SCAFFOLD: true — created by DISTILL for Mandate 7 RED-readiness.
 package domain
 
 // AccountKind is the taxonomy from the ubiquitous language. A wallet may never
@@ -24,27 +23,39 @@ type Account struct {
 // NewAccount is the smart constructor. It refuses a wallet opened with a
 // negative balance, so I4 holds from the first moment the value exists.
 func NewAccount(id string, kind AccountKind, balance Money) (Account, error) {
-	panic("NewAccount not yet implemented -- RED scaffold")
+	if kind == Wallet && balance.MinorUnits() < 0 {
+		zero, _ := NewMoney(0, balance.Currency())
+		return Account{}, NewInsufficientFunds(id, zero, balance.Negate())
+	}
+	return Account{id: id, kind: kind, balance: balance}, nil
 }
 
 // ID exposes the account identifier.
 func (a Account) ID() string {
-	panic("Account.ID not yet implemented -- RED scaffold")
+	return a.id
 }
 
 // Kind exposes the taxonomy, which is what decides whether I4 applies.
 func (a Account) Kind() AccountKind {
-	panic("Account.Kind not yet implemented -- RED scaffold")
+	return a.kind
 }
 
 // Balance exposes the stored balance.
 func (a Account) Balance() Money {
-	panic("Account.Balance not yet implemented -- RED scaffold")
+	return a.balance
 }
 
 // Apply returns a new Account with the delta applied, or a violation when the
-// result would take a wallet below zero. The I4 check happens on the way to
-// constructing the value, never after.
+// result would take a wallet below zero, or when the delta's currency does not
+// match the account's own. The I4 check happens on the way to constructing the
+// value, never after.
 func (a Account) Apply(delta Money) (Account, error) {
-	panic("Account.Apply not yet implemented -- RED scaffold")
+	newBalance, err := a.balance.Add(delta)
+	if err != nil {
+		return Account{}, err
+	}
+	if a.kind == Wallet && newBalance.MinorUnits() < 0 {
+		return Account{}, NewInsufficientFunds(a.id, a.balance, delta.Negate())
+	}
+	return Account{id: a.id, kind: a.kind, balance: newBalance}, nil
 }

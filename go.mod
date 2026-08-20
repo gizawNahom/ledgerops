@@ -61,4 +61,5 @@ require (
 	go.opentelemetry.io/otel/trace v1.24.0 // indirect
 	golang.org/x/crypto v0.24.0 // indirect
 	golang.org/x/sys v0.21.0 // indirect
+	pgregory.net/rapid v1.3.0 // indirect
 )

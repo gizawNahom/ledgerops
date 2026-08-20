@@ -1,0 +1,337 @@
+// Package domain_test exercises the pure core through its driving ports —
+// the exported functions of package domain — per the port-to-port testing
+// discipline (nw-tdd-methodology): a pure function's public signature IS its
+// driving port, so calling domain.Post / domain.NewMoney / domain.NewAccount
+// directly is port-to-port, not white-box.
+//
+// Property-based by default (pgregory.net/rapid), per step 01-01's mandated
+// TEST PARADIGM. Single-example tests are used only where a property genuinely
+// does not fit, and are marked `// bypass:`.
+package domain_test
+
+import (
+	"errors"
+	"fmt"
+	"math"
+	"testing"
+	"time"
+
+	"ledgerops/internal/domain"
+	"pgregory.net/rapid"
+)
+
+var knownCurrencies = []string{"USD", "EUR", "GBP", "JPY"}
+
+func genCurrency(t *rapid.T, label string) string {
+	return rapid.SampledFrom(knownCurrencies).Draw(t, label)
+}
+
+// TestProperty_PostEntriesSumToZeroPerCurrency covers the PBT obligation "For
+// any generated transfer, the returned entries sum to zero per currency" (I1).
+func TestProperty_PostEntriesSumToZeroPerCurrency(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		currency := genCurrency(t, "currency")
+
+		fromKind := rapid.SampledFrom([]domain.AccountKind{domain.Wallet, domain.System}).Draw(t, "fromKind")
+		fromBalanceMinor := rapid.Int64Range(0, 1_000_000_000).Draw(t, "fromBalance")
+		fromBalance, err := domain.NewMoney(fromBalanceMinor, currency)
+		if err != nil {
+			t.Fatalf("NewMoney rejected a known currency: %v", err)
+		}
+		fromAccount, err := domain.NewAccount("from", fromKind, fromBalance)
+		if err != nil {
+			t.Fatalf("NewAccount rejected a non-negative balance: %v", err)
+		}
+
+		toBalanceMinor := rapid.Int64Range(0, 1_000_000_000).Draw(t, "toBalance")
+		toBalance, err := domain.NewMoney(toBalanceMinor, currency)
+		if err != nil {
+			t.Fatalf("NewMoney rejected a known currency: %v", err)
+		}
+		toAccount, err := domain.NewAccount("to", domain.System, toBalance)
+		if err != nil {
+			t.Fatalf("NewAccount rejected a non-negative balance: %v", err)
+		}
+
+		amountMinor := rapid.Int64Range(1, 1_000_000_000).Draw(t, "amount")
+		amount, err := domain.NewMoney(amountMinor, currency)
+		if err != nil {
+			t.Fatalf("NewMoney rejected a known currency: %v", err)
+		}
+
+		cmd := domain.TransferCommand{From: "from", To: "to", Amount: amount}
+		posting, err := domain.Post(cmd, []domain.Account{fromAccount, toAccount}, time.Now(), "tx-i1")
+		if err != nil {
+			// A refusal (e.g. insufficient funds on a wallet source) is not a
+			// violation of I1 -- I1 only binds a *successful* posting.
+			return
+		}
+
+		if !domain.EntriesSumToZero(posting.Entries) {
+			t.Fatalf("Post returned entries that do not sum to zero per currency: %+v", posting.Entries)
+		}
+	})
+}
+
+// TestProperty_NoSequenceOfTransfersDrivesWalletNegative covers the PBT
+// obligation "No generated sequence of transfers drives a wallet account
+// negative" (I4), exercising domain.Post + Account.Apply together the way the
+// application shell would: Post decides, the shell (here, the test) applies
+// the returned deltas to its own copy of account state.
+func TestProperty_NoSequenceOfTransfersDrivesWalletNegative(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		currency := genCurrency(t, "currency")
+
+		walletCount := rapid.IntRange(1, 4).Draw(t, "walletCount")
+		accounts := make(map[string]domain.Account, walletCount+1)
+		ids := make([]string, 0, walletCount+1)
+
+		systemBalance, err := domain.NewMoney(0, currency)
+		if err != nil {
+			t.Fatalf("NewMoney rejected a known currency: %v", err)
+		}
+		systemAccount, err := domain.NewAccount("system", domain.System, systemBalance)
+		if err != nil {
+			t.Fatalf("NewAccount rejected a non-negative balance: %v", err)
+		}
+		accounts["system"] = systemAccount
+		ids = append(ids, "system")
+
+		for i := 0; i < walletCount; i++ {
+			id := fmt.Sprintf("wallet-%d", i)
+			startMinor := rapid.Int64Range(0, 10_000).Draw(t, "start-"+id)
+			balance, err := domain.NewMoney(startMinor, currency)
+			if err != nil {
+				t.Fatalf("NewMoney rejected a known currency: %v", err)
+			}
+			account, err := domain.NewAccount(id, domain.Wallet, balance)
+			if err != nil {
+				t.Fatalf("NewAccount rejected a non-negative balance: %v", err)
+			}
+			accounts[id] = account
+			ids = append(ids, id)
+		}
+
+		steps := rapid.IntRange(0, 20).Draw(t, "steps")
+		for i := 0; i < steps; i++ {
+			fromID := rapid.SampledFrom(ids).Draw(t, fmt.Sprintf("from-%d", i))
+			toID := rapid.SampledFrom(ids).Draw(t, fmt.Sprintf("to-%d", i))
+			if fromID == toID {
+				continue
+			}
+			amountMinor := rapid.Int64Range(1, 20_000).Draw(t, fmt.Sprintf("amount-%d", i))
+			amount, err := domain.NewMoney(amountMinor, currency)
+			if err != nil {
+				t.Fatalf("NewMoney rejected a known currency: %v", err)
+			}
+
+			snapshots := make([]domain.Account, 0, len(ids))
+			for _, id := range ids {
+				snapshots = append(snapshots, accounts[id])
+			}
+
+			cmd := domain.TransferCommand{From: fromID, To: toID, Amount: amount}
+			posting, err := domain.Post(cmd, snapshots, time.Now(), fmt.Sprintf("tx-%d", i))
+			if err != nil {
+				// Refused movement (e.g. insufficient funds): state unchanged.
+				continue
+			}
+
+			for _, delta := range posting.Deltas {
+				updated, applyErr := accounts[delta.AccountID].Apply(delta.Delta)
+				if applyErr != nil {
+					t.Fatalf("a delta Post already validated could not be re-applied: %v", applyErr)
+				}
+				accounts[delta.AccountID] = updated
+			}
+		}
+
+		for id, account := range accounts {
+			if account.Kind() == domain.Wallet && account.Balance().MinorUnits() < 0 {
+				t.Fatalf("wallet %s went negative: %d", id, account.Balance().MinorUnits())
+			}
+		}
+	})
+}
+
+// TestProperty_PostToleratesMixedCurrenciesAndMissingAccounts covers the PBT
+// obligation "Negative testing: relax the same-currency assumption and the
+// non-empty-snapshot assumption over domain.Post". No particular outcome is
+// demanded by the acceptance-designer's obligation ("no assertion demanded
+// yet") — only that Post answers with a value rather than panicking, and that
+// any success still honours I1.
+func TestProperty_PostToleratesMixedCurrenciesAndMissingAccounts(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		fromCurrency := genCurrency(t, "fromCurrency")
+		toCurrency := genCurrency(t, "toCurrency")
+		amountCurrency := genCurrency(t, "amountCurrency")
+
+		includeFrom := rapid.Bool().Draw(t, "includeFrom")
+		includeTo := rapid.Bool().Draw(t, "includeTo")
+
+		snapshots := []domain.Account{}
+
+		fromBalance, err := domain.NewMoney(1_000, fromCurrency)
+		if err != nil {
+			t.Fatalf("NewMoney rejected a known currency: %v", err)
+		}
+		fromAccount, err := domain.NewAccount("from", domain.Wallet, fromBalance)
+		if err != nil {
+			t.Fatalf("NewAccount rejected a non-negative balance: %v", err)
+		}
+		if includeFrom {
+			snapshots = append(snapshots, fromAccount)
+		}
+
+		toBalance, err := domain.NewMoney(0, toCurrency)
+		if err != nil {
+			t.Fatalf("NewMoney rejected a known currency: %v", err)
+		}
+		toAccount, err := domain.NewAccount("to", domain.System, toBalance)
+		if err != nil {
+			t.Fatalf("NewAccount rejected a non-negative balance: %v", err)
+		}
+		if includeTo {
+			snapshots = append(snapshots, toAccount)
+		}
+
+		amountMinor := rapid.Int64Range(1, 1_000).Draw(t, "amount")
+		amount, err := domain.NewMoney(amountMinor, amountCurrency)
+		if err != nil {
+			t.Fatalf("NewMoney rejected a known currency: %v", err)
+		}
+
+		cmd := domain.TransferCommand{From: "from", To: "to", Amount: amount}
+		posting, postErr := domain.Post(cmd, snapshots, time.Now(), "tx-relaxed")
+		if postErr == nil && !domain.EntriesSumToZero(posting.Entries) {
+			t.Fatalf("Post succeeded across mismatched currencies without honouring I1: %+v", posting.Entries)
+		}
+	})
+}
+
+// TestMoney_AdversarialMinorUnits covers the PBT obligation "Adversarial
+// amounts: zero, one minor unit, max int64" over domain.Money.
+//
+// bypass: these are named boundary values (zero, one unit, int64 max), not an
+// equivalence class a generator would reliably hit -- a table test names the
+// intent more honestly than a property with `min_value`/`max_value` pinned to
+// the exact same three numbers.
+func TestMoney_AdversarialMinorUnits(t *testing.T) {
+	cases := []struct {
+		name       string
+		minorUnits int64
+	}{
+		{"zero", 0},
+		{"one minor unit", 1},
+		{"max int64", math.MaxInt64},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			money, err := domain.NewMoney(tc.minorUnits, "USD")
+			if err != nil {
+				t.Fatalf("NewMoney(%d, USD) unexpected error: %v", tc.minorUnits, err)
+			}
+			if money.MinorUnits() != tc.minorUnits {
+				t.Fatalf("MinorUnits() = %d, want %d", money.MinorUnits(), tc.minorUnits)
+			}
+		})
+	}
+}
+
+// TestPost_ExactBalanceAndOffByOneCent covers the PBT obligation "Adversarial
+// amounts: exact balance, off-by-one-cent" over domain.Post.
+//
+// bypass: this is a two-sided boundary (the exact balance must succeed, one
+// cent past it must be refused) that needs Account + Post context, not a
+// single Money input -- a table test over Post names the boundary more
+// honestly than a property re-deriving the same two numbers.
+func TestPost_ExactBalanceAndOffByOneCent(t *testing.T) {
+	currency := "USD"
+	balance, err := domain.NewMoney(500, currency)
+	if err != nil {
+		t.Fatalf("NewMoney rejected a known currency: %v", err)
+	}
+	wallet, err := domain.NewAccount("wallet-1", domain.Wallet, balance)
+	if err != nil {
+		t.Fatalf("NewAccount rejected a non-negative balance: %v", err)
+	}
+	systemBalance, err := domain.NewMoney(0, currency)
+	if err != nil {
+		t.Fatalf("NewMoney rejected a known currency: %v", err)
+	}
+	system, err := domain.NewAccount("system-1", domain.System, systemBalance)
+	if err != nil {
+		t.Fatalf("NewAccount rejected a non-negative balance: %v", err)
+	}
+
+	t.Run("exact balance withdrawal succeeds and empties the wallet", func(t *testing.T) {
+		amount, err := domain.NewMoney(500, currency)
+		if err != nil {
+			t.Fatalf("NewMoney rejected a known currency: %v", err)
+		}
+		cmd := domain.TransferCommand{From: "wallet-1", To: "system-1", Amount: amount}
+		posting, err := domain.Post(cmd, []domain.Account{wallet, system}, time.Now(), "tx-exact")
+		if err != nil {
+			t.Fatalf("unexpected refusal at exact balance: %v", err)
+		}
+		if !domain.EntriesSumToZero(posting.Entries) {
+			t.Fatalf("entries do not sum to zero: %+v", posting.Entries)
+		}
+	})
+
+	t.Run("one cent over balance is refused as insufficient funds", func(t *testing.T) {
+		amount, err := domain.NewMoney(501, currency)
+		if err != nil {
+			t.Fatalf("NewMoney rejected a known currency: %v", err)
+		}
+		cmd := domain.TransferCommand{From: "wallet-1", To: "system-1", Amount: amount}
+		_, postErr := domain.Post(cmd, []domain.Account{wallet, system}, time.Now(), "tx-over")
+
+		var violation domain.Violation
+		if !errors.As(postErr, &violation) || violation.Kind() != domain.InsufficientFunds {
+			t.Fatalf("expected insufficient_funds, got %v", postErr)
+		}
+	})
+}
+
+// TestPost_UnknownAccountNamesTheMissingOne covers the acceptance criterion
+// "Post returns UnknownAccount naming the account absent from the locked
+// snapshots".
+func TestPost_UnknownAccountNamesTheMissingOne(t *testing.T) {
+	currency := "USD"
+	balance, err := domain.NewMoney(100, currency)
+	if err != nil {
+		t.Fatalf("NewMoney rejected a known currency: %v", err)
+	}
+	onlyAccount, err := domain.NewAccount("known", domain.Wallet, balance)
+	if err != nil {
+		t.Fatalf("NewAccount rejected a non-negative balance: %v", err)
+	}
+	amount, err := domain.NewMoney(1, currency)
+	if err != nil {
+		t.Fatalf("NewMoney rejected a known currency: %v", err)
+	}
+
+	cmd := domain.TransferCommand{From: "known", To: "ghost", Amount: amount}
+	_, postErr := domain.Post(cmd, []domain.Account{onlyAccount}, time.Now(), "tx-unknown")
+
+	var violation domain.Violation
+	if !errors.As(postErr, &violation) || violation.Kind() != domain.UnknownAccount {
+		t.Fatalf("expected account_not_found, got %v", postErr)
+	}
+	if violation.Account() != "ghost" {
+		t.Fatalf("UnknownAccount named %q, want %q", violation.Account(), "ghost")
+	}
+}
+
+// TestNewMoney_RejectsUnknownCurrency covers the acceptance criterion
+// "NewMoney rejects ... any unknown currency".
+func TestNewMoney_RejectsUnknownCurrency(t *testing.T) {
+	_, err := domain.NewMoney(100, "XXX")
+
+	var violation domain.Violation
+	if !errors.As(err, &violation) || violation.Kind() != domain.InvalidAmount {
+		t.Fatalf("expected invalid_amount for an unknown currency, got %v", err)
+	}
+}
