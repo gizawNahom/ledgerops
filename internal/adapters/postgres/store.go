@@ -7,8 +7,11 @@
 // the append-only protection on entries (D7) are all live SQL, not scaffold
 // no-ops. Begin, and the AccountRepository, TransactionRepository, and
 // IdempotencyStore it hands out, are real as of step 01-03, sharing one
-// *pgx.Tx per unit of work (DDD-13). AttemptOutOfBandChange,
-// InterruptPostingMidWrite, CountEntryPairsForKey, and
+// *pgx.Tx per unit of work (DDD-13). InterruptPostingMidWrite is real as of
+// step 02-03: it opens its own connection, writes the transaction row and
+// one leg, and abandons the transaction unsent, which is how the chaos
+// scenario proves atomicity survives a mid-write interruption.
+// AttemptOutOfBandChange, CountEntryPairsForKey, and
 // CountNegativeWalletObservations remain RED scaffolds — they land with the
 // corruption harness later.
 package postgres
@@ -19,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/golang-migrate/migrate/v4"
 	_ "github.com/golang-migrate/migrate/v4/database/postgres"
@@ -196,12 +200,58 @@ func AttemptOutOfBandChange(ctx context.Context, dsn string, action string, args
 	panic("postgres.AttemptOutOfBandChange not yet implemented -- RED scaffold")
 }
 
-// InterruptPostingMidWrite kills the process partway through a posting, so the
-// chaos scenario can observe what survived. If this turns out to be awkward to
-// write, the chaos demo — the thing that makes slice 01 worth anything — will
-// not exist (slice-01 § Pre-slice SPIKE).
+// InterruptPostingMidWrite simulates killing the process partway through a
+// posting, so the chaos scenario can observe what survived. It writes the
+// transaction row and the first leg of the movement — exactly as far as a
+// real posting gets before the second leg and COMMIT — inside one real
+// PostgreSQL transaction, then abandons that transaction without either
+// committing or rolling it back: the raw connection is closed underneath it.
+//
+// That abandonment is the interruption. A real `kill -9` on the service
+// process affords no opportunity to run deferred cleanup either; whatever a
+// live transaction never reached COMMIT for, PostgreSQL discards on its own
+// when the backend connection drops. No application-level two-phase-commit
+// or compensation logic is added here — the database's own atomicity is the
+// entire mechanism (BEGIN...COMMIT already guarantees "all or nothing";
+// this function proves it by stopping short of COMMIT).
 func InterruptPostingMidWrite(ctx context.Context, appDSN, from, to string, amountMinor int64, key string) error {
-	panic("postgres.InterruptPostingMidWrite not yet implemented -- RED scaffold")
+	conn, err := pgx.Connect(ctx, appDSN)
+	if err != nil {
+		return fmt.Errorf("connecting to interrupt a posting: %w", err)
+	}
+	// No Close via defer's normal path is enough on its own — closing a
+	// connection that never committed is exactly what happens when the
+	// process holding it is killed. The transaction started below is
+	// abandoned, not rolled back on purpose: PostgreSQL treats an abandoned
+	// backend connection the same way it treats a killed one.
+	defer conn.Close(context.Background())
+
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("opening the transaction to interrupt: %w", err)
+	}
+
+	transactionID := fmt.Sprintf("interrupted-%s-%s-%s", from, to, key)
+	recordedAt := time.Now().UTC()
+
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO transactions (id, recorded_at) VALUES ($1, $2)`,
+		transactionID, recordedAt); err != nil {
+		return fmt.Errorf("writing the transaction row before interruption: %w", err)
+	}
+
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO entries (transaction_id, account_id, counterparty_id, amount_minor, currency, recorded_at, sequence)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		transactionID, from, to, -amountMinor, "USD", recordedAt, 0); err != nil {
+		return fmt.Errorf("writing the first leg before interruption: %w", err)
+	}
+
+	// The interruption happens here: the second leg is never written, and
+	// neither Commit nor Rollback is ever called on tx. The deferred
+	// conn.Close above abandons it, which is what a process kill would have
+	// left behind for PostgreSQL to discard.
+	return nil
 }
 
 // CountEntryPairsForKey counts the entry pairs recorded under one idempotency

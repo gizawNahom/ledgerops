@@ -148,7 +148,7 @@ Feature: Post a transfer
     Then the caller is refused as unidentified
     And the balance of "alice" reads 100.00
 
-  @pending @chaos @driving_adapter @env-clean @contract-shape:bounded-change
+  @chaos @driving_adapter @env-clean @contract-shape:bounded-change
   Scenario: A transfer interrupted halfway leaves no half-applied movement
     Given a wallet account "alice" funded with 100.00
     And a wallet account "bob" exists
