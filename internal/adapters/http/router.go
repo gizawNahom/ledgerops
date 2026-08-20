@@ -3,20 +3,12 @@
 // invents its own error vocabulary — the sealed violation taxonomy (DDD-12)
 // decides what a refusal is called.
 //
-// SCAFFOLD: true — created by DISTILL for Mandate 7 RED-readiness.
-//
-// The routes below are REAL and the middleware chain is REAL. Only the handler
-// bodies are scaffolds, and they answer 501 rather than panicking. That is a
-// deliberate choice for the RED gate: a panicking handler drops the connection
-// and a scenario fails in transport, which classifies as BROKEN. Answering 501
-// lets every scenario reach its Then and fail on the assertion, which is
-// MISSING_FUNCTIONALITY — the only failure mode that makes GREEN meaningful
-// later (nw-distill § Pre-DELIVER fail-for-the-right-reason gate).
-//
-// Registering the routes here also means the walking skeleton proves routing,
-// argument handling, and the middleware chain from the first run: a scenario
-// that got 404 where it expected 501 would be telling us the route is missing,
-// which is a different and more useful failure than a silent one.
+// POST /accounts, POST /transfers, and GET /accounts/{id} are real as of step
+// 01-04, over the real application shell (internal/app) built at step 01-03.
+// GET /health/trial-balance is real too — the walking skeleton reads it back
+// to prove the ledger balances. GET /accounts/{id}/entries, GET
+// /console/verdict, and GET /metrics remain scaffolds: no active scenario
+// exercises them yet.
 package http
 
 import (
@@ -26,6 +18,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"ledgerops/internal/app"
 	"ledgerops/internal/app/ports"
 )
 
@@ -44,11 +37,13 @@ func NewRouter(deps Deps) http.Handler {
 	router := chi.NewRouter()
 	router.Use(requireOperatorKey(deps.OperatorKey))
 
-	router.Post("/accounts", scaffold("create account"))
-	router.Get("/accounts/{id}", scaffold("read balance"))
+	ledger := app.NewLedger(deps.Store, deps.Clock, deps.IDGenerator)
+
+	router.Post("/accounts", createAccountHandler(ledger))
+	router.Get("/accounts/{id}", getBalanceHandler(ledger))
 	router.Get("/accounts/{id}/entries", scaffold("trace entries"))
-	router.Post("/transfers", scaffold("post transfer"))
-	router.Get("/health/trial-balance", scaffold("verify books"))
+	router.Post("/transfers", postTransferHandler(ledger))
+	router.Get("/health/trial-balance", trialBalanceHandler(deps.Store))
 	router.Get("/console/verdict", scaffold("console verdict"))
 	router.Get("/metrics", scaffold("metrics exposition"))
 
