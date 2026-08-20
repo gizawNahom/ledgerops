@@ -5,9 +5,11 @@
 // Migrate, MigrateStep, MigrationStatements, and Open are real as of step
 // 01-02 (Migration 0): the schema, the two-role privilege split (OPS-10), and
 // the append-only protection on entries (D7) are all live SQL, not scaffold
-// no-ops. AttemptOutOfBandChange, InterruptPostingMidWrite,
-// CountEntryPairsForKey, and CountNegativeWalletObservations remain RED
-// scaffolds — they land with the repositories in step 01-03 and the
+// no-ops. Begin, and the AccountRepository, TransactionRepository, and
+// IdempotencyStore it hands out, are real as of step 01-03, sharing one
+// *pgx.Tx per unit of work (DDD-13). AttemptOutOfBandChange,
+// InterruptPostingMidWrite, CountEntryPairsForKey, and
+// CountNegativeWalletObservations remain RED scaffolds — they land with the
 // corruption harness later.
 package postgres
 
@@ -21,6 +23,7 @@ import (
 	"github.com/golang-migrate/migrate/v4"
 	_ "github.com/golang-migrate/migrate/v4/database/postgres"
 	"github.com/golang-migrate/migrate/v4/source/iofs"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"ledgerops/internal/app/ports"
@@ -130,16 +133,53 @@ type store struct {
 	pool *pgxpool.Pool
 }
 
-// Begin remains a RED scaffold: the repositories it would hand out
-// (AccountRepository, TransactionRepository, IdempotencyStore) are step
-// 01-03's work, not this one's.
+// Begin opens one unit of work as a real pgx transaction. The three
+// repositories it hands out (AccountRepository, TransactionRepository,
+// IdempotencyStore) all share this same *pgx.Tx handle — that sharing is
+// what DDD-13 means by "a caller could wire two of them to different
+// transactions": as an interface, UnitOfWork makes that impossible rather
+// than merely undocumented.
 func (s *store) Begin(ctx context.Context) (ports.UnitOfWork, error) {
-	panic("postgres.store.Begin not yet implemented -- repositories land in step 01-03")
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("opening a unit of work: %w", err)
+	}
+	return &unitOfWork{tx: tx}, nil
 }
 
 func (s *store) Close() error {
 	s.pool.Close()
 	return nil
+}
+
+// unitOfWork is the real ports.UnitOfWork. One *pgx.Tx, three repositories
+// reading and writing through it, and nothing reachable outside it.
+type unitOfWork struct {
+	tx pgx.Tx
+}
+
+func (u *unitOfWork) Accounts() ports.AccountRepository {
+	return accountRepository{tx: u.tx}
+}
+
+func (u *unitOfWork) Transactions() ports.TransactionRepository {
+	return transactionRepository{tx: u.tx}
+}
+
+func (u *unitOfWork) Idempotency() ports.IdempotencyStore {
+	return idempotencyStore{tx: u.tx}
+}
+
+// Commit and Rollback are idiomatic pgx.Tx passthroughs. A commit or
+// rollback attempted twice (e.g. Commit succeeding, then a deferred Rollback
+// firing anyway) is left to pgx's own error, which callers treat as
+// best-effort cleanup, not a fresh failure.
+func (u *unitOfWork) Commit(ctx context.Context) error {
+	return u.tx.Commit(ctx)
+}
+
+func (u *unitOfWork) Rollback(ctx context.Context) error {
+	return u.tx.Rollback(ctx)
 }
 
 // AttemptOutOfBandChange reaches past the driving ports to try to rewrite

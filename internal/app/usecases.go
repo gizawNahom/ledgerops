@@ -5,15 +5,25 @@
 // The dependency rule: the shell may call the core, the core never calls the
 // shell, and the core does not know the shell exists.
 //
-// SCAFFOLD: true — created by DISTILL for Mandate 7 RED-readiness.
+// PostTransfer, CreateAccount, and GetBalance are real as of step 01-03: the
+// Read → Decide → Write sandwich over the real postgres repositories, one
+// database transaction per call. GetEntries and VerifyBooks remain RED
+// scaffolds — out of scope for this step (slices 05/04).
 package app
 
 import (
 	"context"
+	"fmt"
 
 	"ledgerops/internal/app/ports"
 	"ledgerops/internal/domain"
 )
+
+// ledgerCurrency is the ledger's single configured currency. Every account is
+// opened in it; a movement across currencies never reaches this shell because
+// nothing here ever constructs a second one (see domain.CurrencyMismatch —
+// currently unreachable through any driving port, by design).
+const ledgerCurrency = "USD"
 
 // Ledger is the application layer. Every driving adapter goes through it and
 // nothing else.
@@ -27,7 +37,7 @@ type Ledger struct {
 // than being reached for, which is what makes every use case deterministic
 // under test.
 func NewLedger(store ports.Store, clock ports.Clock, nextID ports.IDGenerator) *Ledger {
-	panic("NewLedger not yet implemented -- RED scaffold")
+	return &Ledger{store: store, clock: clock, nextID: nextID}
 }
 
 // PostTransfer is the Read → Decide → Write sandwich, and the only place a
@@ -42,7 +52,56 @@ func NewLedger(store ports.Store, clock ports.Clock, nextID ports.IDGenerator) *
 // The key and the transaction commit together, so there is no window in which
 // one exists without the other (ADR-005).
 func (l *Ledger) PostTransfer(ctx context.Context, cmd TransferRequest) (Result, error) {
-	panic("Ledger.PostTransfer not yet implemented -- RED scaffold")
+	uow, err := l.store.Begin(ctx)
+	if err != nil {
+		return Result{}, fmt.Errorf("posting transfer: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = uow.Rollback(ctx)
+		}
+	}()
+
+	// Read (impure): lock the touched accounts in ascending id order
+	// (DDD-6) — the ordering is the repository's job, not this call site's.
+	snapshots, err := uow.Accounts().LockForUpdate(ctx, []string{cmd.From, cmd.To})
+	if err != nil {
+		return Result{}, fmt.Errorf("locking accounts for transfer: %w", err)
+	}
+	now := l.clock()
+	transactionID := l.nextID()
+
+	// Decide (pure): domain.Post is the whole rulebook. Nothing above or
+	// below this line evaluates I1 or I4.
+	posting, err := domain.Post(domain.TransferCommand{
+		From:   cmd.From,
+		To:     cmd.To,
+		Amount: cmd.Amount,
+	}, snapshots, now, transactionID)
+	if err != nil {
+		return Result{}, err
+	}
+
+	// Write (impure): the transaction, its entries, the balance deltas, and
+	// the idempotency claim all land in the same transaction, so there is no
+	// window in which one exists without the others (ADR-005).
+	if err := uow.Transactions().Append(ctx, posting); err != nil {
+		return Result{}, fmt.Errorf("recording transaction %q: %w", transactionID, err)
+	}
+	if err := uow.Accounts().ApplyDeltas(ctx, posting.Deltas); err != nil {
+		return Result{}, fmt.Errorf("applying balance deltas for transaction %q: %w", transactionID, err)
+	}
+	if _, err := uow.Idempotency().Claim(ctx, cmd.IdempotencyKey, cmd.Fingerprint, transactionID); err != nil {
+		return Result{}, fmt.Errorf("claiming idempotency key for transaction %q: %w", transactionID, err)
+	}
+
+	if err := uow.Commit(ctx); err != nil {
+		return Result{}, fmt.Errorf("committing transaction %q: %w", transactionID, err)
+	}
+	committed = true
+
+	return Result{Posting: posting, Replayed: false}, nil
 }
 
 // CreateAccount opens an account. A wallet starts at zero; value may only enter
@@ -50,12 +109,58 @@ func (l *Ledger) PostTransfer(ctx context.Context, cmd TransferRequest) (Result,
 // assignment — otherwise value appears unaccounted for and I1 is violated at
 // the source.
 func (l *Ledger) CreateAccount(ctx context.Context, accountID string, kind domain.AccountKind) error {
-	panic("Ledger.CreateAccount not yet implemented -- RED scaffold")
+	uow, err := l.store.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("opening account %q: %w", accountID, err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = uow.Rollback(ctx)
+		}
+	}()
+
+	zero, err := domain.NewMoney(0, ledgerCurrency)
+	if err != nil {
+		return err
+	}
+	account, err := domain.NewAccount(accountID, kind, zero)
+	if err != nil {
+		return err
+	}
+
+	if err := uow.Accounts().Create(ctx, account); err != nil {
+		return fmt.Errorf("opening account %q: %w", accountID, err)
+	}
+	if err := uow.Commit(ctx); err != nil {
+		return fmt.Errorf("opening account %q: %w", accountID, err)
+	}
+	committed = true
+	return nil
 }
 
 // GetBalance reads one account's stored balance.
 func (l *Ledger) GetBalance(ctx context.Context, accountID string) (domain.Account, error) {
-	panic("Ledger.GetBalance not yet implemented -- RED scaffold")
+	uow, err := l.store.Begin(ctx)
+	if err != nil {
+		return domain.Account{}, fmt.Errorf("reading balance for %q: %w", accountID, err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = uow.Rollback(ctx)
+		}
+	}()
+
+	account, err := uow.Accounts().Get(ctx, accountID)
+	if err != nil {
+		return domain.Account{}, err
+	}
+	if err := uow.Commit(ctx); err != nil {
+		return domain.Account{}, fmt.Errorf("reading balance for %q: %w", accountID, err)
+	}
+	committed = true
+	return account, nil
 }
 
 // GetEntries reads one account's ordered history. Ordering is by recorded

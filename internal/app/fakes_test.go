@@ -1,0 +1,187 @@
+package app_test
+
+// Fakes for the three transactional ports (Store/UnitOfWork/
+// AccountRepository/TransactionRepository/IdempotencyStore), permitted at the
+// application layer per DDD-13's Clock/IDGenerator split and the step 01-03
+// TEST PARADIGM note: PostTransfer's ORCHESTRATION is what this suite proves,
+// with the real repositories themselves exercised for real via Testcontainers
+// in internal/adapters/postgres (Mandate 6). A fake repository here would be
+// modelling the very transactional behaviour that package proves for real.
+//
+// Per the test-double-input-validation doctrine (nw-tdd-methodology), these
+// fakes reject what the real repositories would reject: ApplyDeltas on an
+// unknown account, Create on a duplicate id, Claim on an already-claimed key.
+
+import (
+	"context"
+	"fmt"
+	"sort"
+
+	"ledgerops/internal/app/ports"
+	"ledgerops/internal/domain"
+)
+
+// fakeStore is the shared state a fakeUnitOfWork's repositories read and
+// write. One fakeStore per test case — never shared across rapid.Check
+// iterations — so before/after snapshots are never contaminated by a prior
+// draw.
+type fakeStore struct {
+	accounts  map[string]domain.Account
+	postings  map[string]domain.Posting
+	entries   []domain.Entry
+	claims    map[string]ports.Claim
+	committed bool
+}
+
+func newFakeStore(accounts ...domain.Account) *fakeStore {
+	byID := make(map[string]domain.Account, len(accounts))
+	for _, account := range accounts {
+		byID[account.ID()] = account
+	}
+	return &fakeStore{
+		accounts: byID,
+		postings: map[string]domain.Posting{},
+		claims:   map[string]ports.Claim{},
+	}
+}
+
+func (s *fakeStore) Begin(ctx context.Context) (ports.UnitOfWork, error) {
+	return &fakeUnitOfWork{store: s}, nil
+}
+
+func (s *fakeStore) Close() error { return nil }
+
+type fakeUnitOfWork struct {
+	store      *fakeStore
+	rolledBack bool
+}
+
+func (u *fakeUnitOfWork) Accounts() ports.AccountRepository { return fakeAccountRepository{u.store} }
+func (u *fakeUnitOfWork) Transactions() ports.TransactionRepository {
+	return fakeTransactionRepository{u.store}
+}
+func (u *fakeUnitOfWork) Idempotency() ports.IdempotencyStore { return fakeIdempotencyStore{u.store} }
+
+func (u *fakeUnitOfWork) Commit(ctx context.Context) error {
+	u.store.committed = true
+	return nil
+}
+
+func (u *fakeUnitOfWork) Rollback(ctx context.Context) error {
+	u.rolledBack = true
+	return nil
+}
+
+type fakeAccountRepository struct{ store *fakeStore }
+
+var _ ports.AccountRepository = fakeAccountRepository{}
+
+func (r fakeAccountRepository) LockForUpdate(ctx context.Context, accountIDs []string) ([]domain.Account, error) {
+	seen := make(map[string]bool, len(accountIDs))
+	sorted := make([]string, 0, len(accountIDs))
+	for _, id := range accountIDs {
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		sorted = append(sorted, id)
+	}
+	sort.Strings(sorted)
+
+	accounts := make([]domain.Account, 0, len(sorted))
+	for _, id := range sorted {
+		if account, ok := r.store.accounts[id]; ok {
+			accounts = append(accounts, account)
+		}
+	}
+	return accounts, nil
+}
+
+func (r fakeAccountRepository) ApplyDeltas(ctx context.Context, deltas []domain.BalanceDelta) error {
+	for _, delta := range deltas {
+		account, ok := r.store.accounts[delta.AccountID]
+		if !ok {
+			return fmt.Errorf("fakeAccountRepository: unknown account %q", delta.AccountID)
+		}
+		updated, err := account.Apply(delta.Delta)
+		if err != nil {
+			return err
+		}
+		r.store.accounts[delta.AccountID] = updated
+	}
+	return nil
+}
+
+func (r fakeAccountRepository) Create(ctx context.Context, account domain.Account) error {
+	if _, exists := r.store.accounts[account.ID()]; exists {
+		return fmt.Errorf("fakeAccountRepository: account %q already exists", account.ID())
+	}
+	r.store.accounts[account.ID()] = account
+	return nil
+}
+
+func (r fakeAccountRepository) Get(ctx context.Context, accountID string) (domain.Account, error) {
+	account, ok := r.store.accounts[accountID]
+	if !ok {
+		return domain.Account{}, domain.NewUnknownAccount(accountID)
+	}
+	return account, nil
+}
+
+type fakeTransactionRepository struct{ store *fakeStore }
+
+var _ ports.TransactionRepository = fakeTransactionRepository{}
+
+func (r fakeTransactionRepository) Append(ctx context.Context, posting domain.Posting) error {
+	if _, exists := r.store.postings[posting.Transaction.ID()]; exists {
+		return fmt.Errorf("fakeTransactionRepository: transaction %q already recorded", posting.Transaction.ID())
+	}
+	r.store.postings[posting.Transaction.ID()] = posting
+	r.store.entries = append(r.store.entries, posting.Entries...)
+	return nil
+}
+
+func (r fakeTransactionRepository) Get(ctx context.Context, transactionID string) (domain.Posting, error) {
+	posting, ok := r.store.postings[transactionID]
+	if !ok {
+		return domain.Posting{}, fmt.Errorf("fakeTransactionRepository: unknown transaction %q", transactionID)
+	}
+	return posting, nil
+}
+
+func (r fakeTransactionRepository) EntriesFor(ctx context.Context, accountID string) ([]domain.Entry, error) {
+	var entries []domain.Entry
+	for _, entry := range r.store.entries {
+		if entry.AccountID() == accountID {
+			entries = append(entries, entry)
+		}
+	}
+	return entries, nil
+}
+
+func (r fakeTransactionRepository) TrialBalance(ctx context.Context) (domain.Money, int, error) {
+	zero, _ := domain.NewMoney(0, "USD")
+	return zero, len(r.store.entries), nil
+}
+
+func (r fakeTransactionRepository) ComputedBalances(ctx context.Context) (map[string]domain.Money, error) {
+	return nil, nil
+}
+
+type fakeIdempotencyStore struct{ store *fakeStore }
+
+var _ ports.IdempotencyStore = fakeIdempotencyStore{}
+
+func (r fakeIdempotencyStore) Claim(ctx context.Context, key, fingerprint, transactionID string) (ports.Claim, error) {
+	if existing, ok := r.store.claims[key]; ok {
+		return ports.Claim{}, fmt.Errorf("fakeIdempotencyStore: key %q already claimed by transaction %q", key, existing.TransactionID)
+	}
+	claim := ports.Claim{Key: key, Fingerprint: fingerprint, TransactionID: transactionID}
+	r.store.claims[key] = claim
+	return claim, nil
+}
+
+func (r fakeIdempotencyStore) Lookup(ctx context.Context, key string) (ports.Claim, bool, error) {
+	claim, ok := r.store.claims[key]
+	return claim, ok, nil
+}
