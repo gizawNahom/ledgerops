@@ -132,7 +132,7 @@ Feature: Post a transfer
       | whose amount is left empty                                    |
       | whose amount is sent as a bare number rather than written out |
 
-  @pending @error @contract-shape:unbounded-preservation
+  @error @contract-shape:unbounded-preservation
   Scenario: An unidentified caller is refused before anything is read or written
     Given a wallet account "alice" funded with 100.00
     And the caller presents no operator key
@@ -140,7 +140,7 @@ Feature: Post a transfer
     Then the caller is refused as unidentified
     And the balance of "alice" reads 100.00
 
-  @pending @error @contract-shape:unbounded-preservation
+  @error @contract-shape:unbounded-preservation
   Scenario: A caller presenting the wrong operator key is refused
     Given a wallet account "alice" funded with 100.00
     And the caller presents an operator key that was never issued

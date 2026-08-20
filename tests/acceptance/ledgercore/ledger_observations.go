@@ -96,8 +96,17 @@ func startPostgres(ctx context.Context) (appDSN string, privilegedDSN string, er
 
 // --- reads through the driving ports --------------------------------------
 
+// readBalance is a Then-side verification read. It authenticates as the
+// legitimate operator explicitly rather than inheriting l.actingAs, because a
+// preceding When step may have deliberately poisoned actingAs to prove a
+// refusal (e.g. "the caller presents no operator key") — the follow-on
+// balance check must still be able to observe that nothing moved. This does
+// not apply to readTrace/readBooks: those are also invoked as When-side
+// actions (Trace, AskWhetherBooksBalance) where inheriting a bad actingAs is
+// the scenario under test (see milestone-04/milestone-05 "unidentified
+// caller" scenarios).
 func (l *Ledger) readBalance(ctx context.Context, account AccountName) (Money, error) {
-	answer, err := l.call(ctx, http.MethodGet, "/accounts/"+url.PathEscape(string(account)), nil, NoIdempotencyKey)
+	answer, err := l.callAs(ctx, ApplicationRole, http.MethodGet, "/accounts/"+url.PathEscape(string(account)), nil, NoIdempotencyKey)
 	if err != nil {
 		return 0, err
 	}

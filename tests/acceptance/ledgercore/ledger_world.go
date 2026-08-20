@@ -385,20 +385,33 @@ func (l *Ledger) dsnFor(as Credentials) string {
 // --- transport -------------------------------------------------------------
 
 func (l *Ledger) call(ctx context.Context, method, path string, body any, key IdempotencyKey) (Answer, error) {
+	return l.callAs(ctx, l.actingAs, method, path, body, key)
+}
+
+// callAs is call with the caller's identity given explicitly instead of
+// inherited from l.actingAs. Then-side verification reads use this — a
+// deliberately-poisoned actingAs from a preceding refusal When must not also
+// poison the read-back that checks nothing moved (see readBalance in
+// ledger_observations.go).
+func (l *Ledger) callAs(ctx context.Context, as Credentials, method, path string, body any, key IdempotencyKey) (Answer, error) {
 	encoded, err := json.Marshal(body)
 	if err != nil {
 		return Answer{}, err
 	}
-	return l.callRaw(ctx, method, path, encoded, key)
+	return l.callRawAs(ctx, as, method, path, encoded, key)
 }
 
 func (l *Ledger) callRaw(ctx context.Context, method, path string, body []byte, key IdempotencyKey) (Answer, error) {
+	return l.callRawAs(ctx, l.actingAs, method, path, body, key)
+}
+
+func (l *Ledger) callRawAs(ctx context.Context, as Credentials, method, path string, body []byte, key IdempotencyKey) (Answer, error) {
 	request, err := http.NewRequestWithContext(ctx, method, l.server.URL+path, bytes.NewReader(body))
 	if err != nil {
 		return Answer{}, err
 	}
 	request.Header.Set("Content-Type", "application/json")
-	l.authenticate(request)
+	l.authenticateAs(request, as)
 	if key != NoIdempotencyKey && key != "" {
 		request.Header.Set("Idempotency-Key", string(key))
 	}
@@ -416,8 +429,8 @@ func (l *Ledger) callRaw(ctx context.Context, method, path string, body []byte, 
 	return decodeAnswer(response.StatusCode, raw), nil
 }
 
-func (l *Ledger) authenticate(request *http.Request) {
-	switch l.actingAs {
+func (l *Ledger) authenticateAs(request *http.Request, as Credentials) {
+	switch as {
 	case NoKey:
 		return
 	case UnissuedKey:
