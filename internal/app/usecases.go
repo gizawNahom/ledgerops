@@ -17,6 +17,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"ledgerops/internal/app/ports"
@@ -128,7 +129,18 @@ func (l *Ledger) CreateAccount(ctx context.Context, accountID string, kind domai
 	if err != nil {
 		return err
 	}
-	account, err := domain.NewAccount(accountID, kind, zero)
+
+	// Courtesy check (DDD-18): read the snapshot before attempting the
+	// insert. The unique constraint on the account name (migration 0) is the
+	// final backstop under concurrency; this is the pure decision that turns
+	// a known collision into a named refusal rather than a raw constraint
+	// error.
+	alreadyOpen, err := l.accountAlreadyOpen(ctx, uow, accountID)
+	if err != nil {
+		return err
+	}
+
+	account, err := domain.OpenAccount(accountID, kind, zero, alreadyOpen)
 	if err != nil {
 		return err
 	}
@@ -141,6 +153,22 @@ func (l *Ledger) CreateAccount(ctx context.Context, accountID string, kind domai
 	}
 	committed = true
 	return nil
+}
+
+// accountAlreadyOpen performs the impure read behind the DDD-18 courtesy
+// check: whether an account is already bound to this id. UnknownAccount is
+// the expected shape of "no", not an error to propagate; anything else (a
+// genuine infrastructure failure) is.
+func (l *Ledger) accountAlreadyOpen(ctx context.Context, uow ports.UnitOfWork, accountID string) (bool, error) {
+	_, err := uow.Accounts().Get(ctx, accountID)
+	if err == nil {
+		return true, nil
+	}
+	var violation domain.Violation
+	if errors.As(err, &violation) && violation.Kind() == domain.UnknownAccount {
+		return false, nil
+	}
+	return false, fmt.Errorf("checking whether account %q is already open: %w", accountID, err)
 }
 
 // GetBalance reads one account's stored balance.

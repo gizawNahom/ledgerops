@@ -5,11 +5,13 @@
 package http
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 
 	"github.com/go-chi/chi/v5"
 
@@ -143,8 +145,13 @@ func postTransferHandler(ledger *app.Ledger) http.HandlerFunc {
 			return
 		}
 
+		// DisallowUnknownFields: a field the ledger does not know about is a
+		// request it cannot read as a command, not a request it silently
+		// tolerates (DDD-19).
+		decoder := json.NewDecoder(bytes.NewReader(rawBody))
+		decoder.DisallowUnknownFields()
 		var body postTransferRequest
-		if err := json.Unmarshal(rawBody, &body); err != nil {
+		if err := decoder.Decode(&body); err != nil {
 			writeRefusal(w, http.StatusBadRequest, "malformed_request", nil)
 			return
 		}
@@ -155,7 +162,11 @@ func postTransferHandler(ledger *app.Ledger) http.HandlerFunc {
 
 		amount, err := parseAmount(body.Amount)
 		if err != nil {
-			writeRefusal(w, http.StatusUnprocessableEntity, string(domain.InvalidAmount), nil)
+			if errors.Is(err, errAmountNotLexicallyANumber) {
+				writeRefusal(w, http.StatusBadRequest, "malformed_request", nil)
+				return
+			}
+			writeDomainError(w, err)
 			return
 		}
 
@@ -193,26 +204,31 @@ func transferAnswer(result app.Result) map[string]any {
 	}
 }
 
-// parseAmount reads the wire decimal ("50.00") into domain.Money. It refuses
-// anything that is not an exact two-decimal amount in the ledger's single
-// configured currency, per ADR-001 / DDD-5 — no float ever exists here.
+// decimalLiteral is the LEXICAL shape a wire amount must have to be readable
+// as a command at all (DDD-19): an optional sign, digits, a decimal point,
+// digits. Whether the scale and magnitude those digits carry are legal is not
+// this adapter's call — that is domain knowledge, decided by
+// domain.NewMoneyFromDecimalLiteral.
+var decimalLiteral = regexp.MustCompile(`^(-?)(\d+)\.(\d+)$`)
+
+// errAmountNotLexicallyANumber marks a parseAmount failure that belongs to
+// the HTTP adapter (malformed_request/400), as distinct from a domain
+// refusal (invalid_amount/422) for an amount that parsed fine lexically but
+// is illegal.
+var errAmountNotLexicallyANumber = errors.New("amount is not lexically a decimal number")
+
+// parseAmount reads the wire decimal ("50.00") into domain.Money. The
+// lexical check (is this shaped like a decimal number?) happens here; the
+// legality check (does its scale and magnitude fit the currency?) is
+// domain.NewMoneyFromDecimalLiteral's call, per the purity boundary DDD-19
+// draws.
 func parseAmount(text string) (domain.Money, error) {
-	var whole, frac int64
-	var negative bool
-	rest := text
-	if len(rest) > 0 && rest[0] == '-' {
-		negative = true
-		rest = rest[1:]
+	match := decimalLiteral.FindStringSubmatch(text)
+	if match == nil {
+		return domain.Money{}, errAmountNotLexicallyANumber
 	}
-	n, err := fmt.Sscanf(rest, "%d.%d", &whole, &frac)
-	if err != nil || n != 2 {
-		return domain.Money{}, domain.NewViolation(domain.InvalidAmount)
-	}
-	minor := whole*100 + frac
-	if negative {
-		minor = -minor
-	}
-	return domain.NewMoney(minor, "USD")
+	negative := match[1] == "-"
+	return domain.NewMoneyFromDecimalLiteral(negative, match[2], match[3], "USD")
 }
 
 // formatMoney renders minor units as a major-unit decimal, matching the wire
@@ -238,27 +254,6 @@ func writeDomainError(w http.ResponseWriter, err error) {
 	writeJSON(w, http.StatusInternalServerError, map[string]any{
 		"error": "internal_error",
 	})
-}
-
-func writeViolation(w http.ResponseWriter, v domain.Violation) {
-	switch v.Kind() {
-	case domain.UnknownAccount:
-		writeRefusal(w, http.StatusNotFound, string(v.Kind()), map[string]any{
-			"account_id": v.Account(),
-		})
-	case domain.InsufficientFunds:
-		writeRefusal(w, http.StatusUnprocessableEntity, string(v.Kind()), map[string]any{
-			"account_id": v.Account(),
-			"available":  formatMoney(v.Available()),
-			"requested":  formatMoney(v.Requested()),
-		})
-	case domain.InvalidAmount:
-		writeRefusal(w, http.StatusUnprocessableEntity, string(v.Kind()), nil)
-	case domain.CurrencyMismatch:
-		writeRefusal(w, http.StatusUnprocessableEntity, string(v.Kind()), nil)
-	default:
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "internal_error"})
-	}
 }
 
 func writeRefusal(w http.ResponseWriter, status int, kind string, extra map[string]any) {

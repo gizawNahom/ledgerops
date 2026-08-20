@@ -20,7 +20,7 @@ Feature: Post a transfer
     Then the account is created
     And the balance of "alice" reads 0.00
 
-  @pending @error @contract-shape:unbounded-preservation
+  @error @contract-shape:unbounded-preservation
   Scenario: Opening an account somebody already opened is refused and their account is untouched
     Given a wallet account "alice" funded with 100.00
     When the integrator opens a wallet account "alice"
@@ -58,7 +58,7 @@ Feature: Post a transfer
     And the balance of "bob" reads 50.00
     And every account's balance equals the sum of its own entries
 
-  @pending @error @contract-shape:unbounded-preservation
+  @error @contract-shape:unbounded-preservation
   Scenario: A transfer to an account nobody opened is refused and nothing moves
     Given a wallet account "alice" funded with 100.00
     When the integrator moves 25.00 from "alice" to "nobody" under key "t-1"
@@ -67,7 +67,7 @@ Feature: Post a transfer
     And the balance of "alice" reads 100.00
     And the ledger holds 2 entries whose amounts sum to zero
 
-  @pending @error @contract-shape:unbounded-preservation
+  @error @contract-shape:unbounded-preservation
   Scenario: A transfer out of an account nobody opened is refused and nothing moves
     Given a wallet account "bob" exists
     When the integrator moves 25.00 from "nobody" to "bob" under key "t-1"
@@ -85,7 +85,7 @@ Feature: Post a transfer
     And the balance of "bob" reads 0.01
     And the ledger holds 4 entries whose amounts sum to zero
 
-  @pending @error @contract-shape:unbounded-preservation
+  @error @contract-shape:unbounded-preservation
   Scenario Outline: A transfer of an amount that moves nothing is refused
     Given a wallet account "alice" funded with 100.00
     And a wallet account "bob" exists
@@ -98,7 +98,7 @@ Feature: Post a transfer
       | 0.00   |
       | -1.00  |
 
-  @pending @error @contract-shape:unbounded-preservation
+  @error @contract-shape:unbounded-preservation
   Scenario Outline: An amount the ledger cannot hold exactly is refused and nothing moves
     Given a wallet account "alice" funded with 100.00
     And a wallet account "bob" exists
@@ -112,7 +112,7 @@ Feature: Post a transfer
       | 50.001               |
       | 92233720368547758.08 |
 
-  @pending @error @driving_adapter @contract-shape:unbounded-preservation
+  @error @driving_adapter @contract-shape:unbounded-preservation
   Scenario Outline: A request the ledger cannot read as a command is refused and nothing moves
     Given a wallet account "alice" funded with 100.00
     And a wallet account "bob" exists

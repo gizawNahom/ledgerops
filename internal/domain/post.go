@@ -1,6 +1,10 @@
 package domain
 
-import "time"
+import (
+	"math/big"
+	"strings"
+	"time"
+)
 
 // Post is the posting rulebook (DDD-14) — the one pure function where I1 and I4
 // are decided, and the primary target of the property suite and of nightly
@@ -87,6 +91,54 @@ func findAccount(snapshots []Account, id string) (Account, bool) {
 		}
 	}
 	return Account{}, false
+}
+
+// OpenAccount is the pure decision behind opening an account (DDD-18). The
+// application shell performs the read that produces alreadyOpen — a lookup
+// against the store — and this function performs no I/O of its own; it is the
+// courtesy check the domain owns, ahead of the unique constraint that is the
+// final backstop under concurrency. An id already bound to an account is
+// refused rather than treated as a retry: nothing here can tell a genuine
+// retry apart from a name collision between two independent callers, and
+// guessing "retry" would hand the second caller an account somebody else
+// created.
+func OpenAccount(id string, kind AccountKind, zero Money, alreadyOpen bool) (Account, error) {
+	if alreadyOpen {
+		return Account{}, NewAccountAlreadyExists(id)
+	}
+	return NewAccount(id, kind, zero)
+}
+
+// NewMoneyFromDecimalLiteral is the domain-side legality decision for an
+// amount exactly as a caller wrote it (DDD-19). A driving adapter's job stops
+// at confirming the text is lexically a decimal number (digits, an optional
+// leading sign, a decimal point, digits) — whether that number's scale fits
+// the currency and whether its magnitude fits the ledger's exact-arithmetic
+// representation is domain knowledge, decided here rather than guessed at the
+// boundary. An amount with more fractional digits than the currency's scale,
+// or one whose minor-unit value cannot be held in an int64, is refused
+// InvalidAmount exactly like a zero or negative amount is.
+func NewMoneyFromDecimalLiteral(negative bool, wholeDigits, fracDigits, currency string) (Money, error) {
+	scale, known := currencyScales[currency]
+	if !known {
+		return Money{}, NewViolation(InvalidAmount)
+	}
+	if len(fracDigits) > scale {
+		return Money{}, NewViolation(InvalidAmount)
+	}
+	padded := fracDigits + strings.Repeat("0", scale-len(fracDigits))
+	combined := wholeDigits + padded
+	magnitude, ok := new(big.Int).SetString(combined, 10)
+	if !ok {
+		return Money{}, NewViolation(InvalidAmount)
+	}
+	if negative {
+		magnitude.Neg(magnitude)
+	}
+	if !magnitude.IsInt64() {
+		return Money{}, NewViolation(InvalidAmount)
+	}
+	return Money{minorUnits: magnitude.Int64(), currency: currency}, nil
 }
 
 // TransferCommand is the movement as the integrator asked for it: one call, not

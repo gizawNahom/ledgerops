@@ -20,18 +20,24 @@ const (
 	InsufficientFunds ViolationKind = "insufficient_funds"
 	// UnknownAccount — the movement names an account that was never opened.
 	UnknownAccount ViolationKind = "account_not_found"
+	// AccountAlreadyExists — opening an account under an id that already
+	// names one is refused (DDD-18). The identifier is already bound; a
+	// caller retry cannot be told apart from a name collision between two
+	// independent callers, so this is a refusal, never an idempotent success.
+	AccountAlreadyExists ViolationKind = "account_already_exists"
 	// InvalidAmount — the movement moves nothing, moves a negative amount, or
 	// names a currency/scale the ledger cannot hold.
 	InvalidAmount ViolationKind = "invalid_amount"
-	// CurrencyMismatch — the two legs of a movement do not share a currency,
-	// so they can never sum to zero per currency for any amount (I1). Decided
-	// in the domain core (Post / Money.Add) per ADR-008 / DDD-19. Currently
-	// unreachable through any driving port — every account is opened in the
-	// ledger's single configured currency, and that unreachability is the
-	// mechanism by which "multi-currency transactions, out of scope" is
-	// enforced. Declared here so I1's "per currency" phrasing stays honest and
-	// so the PBT obligation "relax the same-currency assumption" over
-	// domain.Post has somewhere to land.
+	// CurrencyMismatch —
+	//
+	// Unreachable through the driving ports today: every account is opened in
+	// the ledger's single configured currency, so Post never sees two. That is
+	// deliberate — this member is how multi-currency transactions, out of
+	// scope is enforced rather than merely asserted, and I1 being per-currency
+	// is why it is a domain refusal rather than validation. Reachable at layer
+	// 1 now (PBT obligations, relax the same-currency assumption), and at
+	// layer 3 the day POST /accounts accepts a currency. Do not delete for
+	// being uncovered.
 	CurrencyMismatch ViolationKind = "currency_mismatch"
 )
 
@@ -83,6 +89,12 @@ func NewUnknownAccount(account string) Violation {
 	return Violation{kind: UnknownAccount, account: account, sealed: sealedMarker{}}
 }
 
+// NewAccountAlreadyExists names the account whose id was already bound when
+// opening was attempted (DDD-18).
+func NewAccountAlreadyExists(account string) Violation {
+	return Violation{kind: AccountAlreadyExists, account: account, sealed: sealedMarker{}}
+}
+
 // NewCurrencyMismatch names both currencies a movement tried to reconcile.
 func NewCurrencyMismatch(fromCurrency, toCurrency string) Violation {
 	return Violation{
@@ -105,6 +117,8 @@ func (v Violation) Error() string {
 		)
 	case UnknownAccount:
 		return fmt.Sprintf("account not found: %s", v.account)
+	case AccountAlreadyExists:
+		return fmt.Sprintf("account already exists: %s", v.account)
 	case InvalidAmount:
 		return "invalid amount"
 	case CurrencyMismatch:
