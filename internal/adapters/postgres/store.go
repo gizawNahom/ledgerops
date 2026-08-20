@@ -11,9 +11,11 @@
 // step 02-03: it opens its own connection, writes the transaction row and
 // one leg, and abandons the transaction unsent, which is how the chaos
 // scenario proves atomicity survives a mid-write interruption.
-// AttemptOutOfBandChange, CountEntryPairsForKey, and
-// CountNegativeWalletObservations remain RED scaffolds — they land with the
-// corruption harness later.
+// AttemptOutOfBandChange is real as of step 02-04: it enforces D7 twice
+// over, same as migration 0's own SQL, by attempting the out-of-band change
+// through a fresh connection under the given role's credentials.
+// CountEntryPairsForKey and CountNegativeWalletObservations remain RED
+// scaffolds — they land with the corruption harness later.
 package postgres
 
 import (
@@ -74,8 +76,21 @@ func Migrate(ctx context.Context, privilegedDSN string) error {
 	return nil
 }
 
-// MigrateStep applies only the newest schema change, which is how a scenario
-// exercises a migration running over history it may not rewrite.
+// MigrateStep applies the newest schema change over existing history, which
+// is how a scenario exercises a migration running over history it may not
+// rewrite.
+//
+// This brings the store to head via the same idempotent, expand-only m.Up()
+// that Migrate uses, rather than advancing exactly one version with
+// m.Steps(1). golang-migrate's Steps(1) seeks a specific next version and
+// errors ("file does not exist") when none is pending, which is exactly the
+// case a scenario built from MigrateFromZero already sits in: the newest
+// schema change was already applied while building the populated history it
+// is now asked to run "over". Modeling this as "bring current" rather than
+// "advance exactly one version" makes re-running the full set over existing
+// history — proving nothing in it erases an entry — the actual contract
+// under test, and it stays correct if a genuinely pending migration exists
+// too: m.Up() applies every migration not yet applied, one included.
 func MigrateStep(ctx context.Context, privilegedDSN string) error {
 	m, err := newMigrator(privilegedDSN)
 	if err != nil {
@@ -83,7 +98,7 @@ func MigrateStep(ctx context.Context, privilegedDSN string) error {
 	}
 	defer closeMigrator(m)
 
-	if err := m.Steps(1); err != nil && !errors.Is(err, migrate.ErrNoChange) {
+	if err := m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
 		return fmt.Errorf("applying the newest migration: %w", err)
 	}
 	return nil
@@ -195,9 +210,150 @@ func (u *unitOfWork) Rollback(ctx context.Context) error {
 //   - as the privileged role, the alteration MUST succeed, because slice 04's
 //     verdict only means something if a genuine drift can be produced.
 //
+// D7 is enforced twice over (migration 0's comment): the app role holds no
+// UPDATE/DELETE grant on entries, and an unconditional BEFORE UPDATE OR
+// DELETE trigger refuses either statement regardless of role. Only a role
+// that can also ALTER TABLE ... DISABLE TRIGGER — the privileged role alone —
+// can get an alteration past the second layer, and only by disabling the
+// trigger first. That is why "alter_entry" (privileged, used by slice 04's
+// CorruptEntry) disables the trigger before altering and re-enables it after,
+// while "alter_entry_protection_on" deliberately never touches the trigger,
+// so the same privileged connection proves the trigger alone still refuses
+// an alteration nobody disabled first.
+//
 // An error return means the store refused. A nil return means it did not.
 func AttemptOutOfBandChange(ctx context.Context, dsn string, action string, args map[string]any) error {
-	panic("postgres.AttemptOutOfBandChange not yet implemented -- RED scaffold")
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		return fmt.Errorf("connecting to attempt an out-of-band change: %w", err)
+	}
+	defer conn.Close(context.Background())
+
+	switch action {
+	case "alter_entry":
+		return alterEntryOutOfBand(ctx, conn, args, true)
+	case "alter_entry_protection_on":
+		return alterEntryOutOfBand(ctx, conn, args, false)
+	case "erase_entry":
+		return eraseEntryOutOfBand(ctx, conn, args)
+	case "disable_protection":
+		return disableProtectionOutOfBand(ctx, conn)
+	case "alter_stored_balance":
+		return alterStoredBalanceOutOfBand(ctx, conn, args)
+	default:
+		return fmt.Errorf("unknown out-of-band action %q", action)
+	}
+}
+
+// targetEntry resolves which recorded entry an out-of-band attempt reaches
+// for. Most scenarios don't care which entry — they only care whether the
+// attempt is refused — so args may be nil and this picks the first recorded
+// entry, ordered deterministically. Slice 04's CorruptEntry cares which one,
+// so it passes account_id/ordinal explicitly.
+func targetEntry(ctx context.Context, conn *pgx.Conn, args map[string]any) (transactionID string, sequence int64, err error) {
+	if accountID, ok := args["account_id"].(string); ok {
+		ordinal, _ := args["ordinal"].(int)
+		row := conn.QueryRow(ctx,
+			`SELECT transaction_id, sequence FROM entries WHERE account_id = $1
+			 ORDER BY transaction_id, sequence OFFSET $2 LIMIT 1`,
+			accountID, ordinal)
+		if err := row.Scan(&transactionID, &sequence); err != nil {
+			return "", 0, fmt.Errorf("locating the entry to tamper with: %w", err)
+		}
+		return transactionID, sequence, nil
+	}
+
+	row := conn.QueryRow(ctx,
+		`SELECT transaction_id, sequence FROM entries ORDER BY transaction_id, sequence LIMIT 1`)
+	if err := row.Scan(&transactionID, &sequence); err != nil {
+		return "", 0, fmt.Errorf("locating an entry to tamper with: %w", err)
+	}
+	return transactionID, sequence, nil
+}
+
+// alterEntryOutOfBand attempts to change one recorded entry's amount.
+// disableTriggerFirst selects between the two contract-shapes AlterEntry and
+// AlterEntryProtectedOn need: with it true, the trigger is disabled (which
+// only the privileged role's ALTER TABLE grant can do) before the UPDATE and
+// re-enabled after, restoring D7 for whatever runs next; with it false, the
+// UPDATE runs directly, at the mercy of whatever protection is currently
+// live — which is precisely what "with the protection left on" asserts.
+func alterEntryOutOfBand(ctx context.Context, conn *pgx.Conn, args map[string]any, disableTriggerFirst bool) error {
+	transactionID, sequence, err := targetEntry(ctx, conn, args)
+	if err != nil {
+		return err
+	}
+
+	delta := int64(1)
+	if raw, ok := args["delta"].(int64); ok {
+		delta = raw
+	}
+
+	if disableTriggerFirst {
+		if _, err := conn.Exec(ctx, `ALTER TABLE entries DISABLE TRIGGER entries_append_only`); err != nil {
+			return fmt.Errorf("disabling the append-only trigger: %w", err)
+		}
+		defer conn.Exec(context.Background(), `ALTER TABLE entries ENABLE TRIGGER entries_append_only`)
+	}
+
+	if _, err := conn.Exec(ctx,
+		`UPDATE entries SET amount_minor = amount_minor + $1 WHERE transaction_id = $2 AND sequence = $3`,
+		delta, transactionID, sequence); err != nil {
+		return fmt.Errorf("altering a recorded entry: %w", err)
+	}
+	return nil
+}
+
+// eraseEntryOutOfBand attempts to delete one recorded entry. Reachable only
+// by a role that can both disable the trigger and hold DELETE — i.e. the
+// privileged role; the application role is refused at the trigger, the
+// privilege grant, or both.
+func eraseEntryOutOfBand(ctx context.Context, conn *pgx.Conn, args map[string]any) error {
+	transactionID, sequence, err := targetEntry(ctx, conn, args)
+	if err != nil {
+		return err
+	}
+
+	if _, err := conn.Exec(ctx, `ALTER TABLE entries DISABLE TRIGGER entries_append_only`); err != nil {
+		return fmt.Errorf("disabling the append-only trigger: %w", err)
+	}
+	defer conn.Exec(context.Background(), `ALTER TABLE entries ENABLE TRIGGER entries_append_only`)
+
+	if _, err := conn.Exec(ctx,
+		`DELETE FROM entries WHERE transaction_id = $1 AND sequence = $2`,
+		transactionID, sequence); err != nil {
+		return fmt.Errorf("erasing a recorded entry: %w", err)
+	}
+	return nil
+}
+
+// disableProtectionOutOfBand attempts to switch the append-only trigger off
+// and, deliberately, never turns it back on within this call — the scenario
+// under test is whether the switch-off itself is refused, not what happens
+// after.
+func disableProtectionOutOfBand(ctx context.Context, conn *pgx.Conn) error {
+	if _, err := conn.Exec(ctx, `ALTER TABLE entries DISABLE TRIGGER entries_append_only`); err != nil {
+		return fmt.Errorf("disabling the append-only trigger: %w", err)
+	}
+	return nil
+}
+
+// alterStoredBalanceOutOfBand attempts to change one account's stored
+// balance directly. Accounts carry no append-only guarantee (ADR-003), so
+// this is reachable by any role holding UPDATE on accounts — it exists for
+// slice 04's drift-detection demo, not for a D7 refusal assertion.
+func alterStoredBalanceOutOfBand(ctx context.Context, conn *pgx.Conn, args map[string]any) error {
+	accountID, _ := args["account_id"].(string)
+	delta, _ := args["delta"].(int64)
+	if accountID == "" {
+		return fmt.Errorf("alter_stored_balance requires an account_id")
+	}
+	if _, err := conn.Exec(ctx,
+		`UPDATE accounts SET balance_minor = balance_minor + $1 WHERE id = $2`,
+		delta, accountID); err != nil {
+		return fmt.Errorf("altering a stored balance: %w", err)
+	}
+	return nil
 }
 
 // InterruptPostingMidWrite simulates killing the process partway through a
