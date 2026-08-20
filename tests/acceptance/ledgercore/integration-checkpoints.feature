@@ -43,7 +43,7 @@ Feature: The store keeps the promises the application layer cannot
     When the privileged credentials attempt to alter a recorded entry with the protection left on
     Then the alteration is refused by the store
 
-  @pending @env-clean @contract-shape:bounded-change
+  @env-clean @contract-shape:bounded-change
   Scenario: The schema builds from nothing
     Given an empty store with no schema at all
     When the schema is migrated from zero

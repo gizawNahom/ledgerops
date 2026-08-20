@@ -1,63 +1,146 @@
-// Package postgres is the driven adapter. SQL stays visible — no ORM — because
-// the locking is the part that matters and it must be readable (DDD-6).
+// Package postgres is the driven adapter. SQL stays visible — no ORM —
+// because the locking is the part that matters and it must be readable
+// (DDD-6).
 //
-// SCAFFOLD: true — created by DISTILL for Mandate 7 RED-readiness.
-//
-// Two functions here deliberately do NOT panic: Migrate and Open. The
-// acceptance suite calls both while establishing a scenario's Given, and a
-// panic there would fail the scenario in setup — classified BROKEN — instead of
-// at its assertion. They no-op so that every scenario reaches its When, gets a
-// 501 from the HTTP scaffold, and fails on its Then for the right reason.
-// Everything a scenario's assertion actually depends on panics as usual.
+// Migrate, MigrateStep, MigrationStatements, and Open are real as of step
+// 01-02 (Migration 0): the schema, the two-role privilege split (OPS-10), and
+// the append-only protection on entries (D7) are all live SQL, not scaffold
+// no-ops. AttemptOutOfBandChange, InterruptPostingMidWrite,
+// CountEntryPairsForKey, and CountNegativeWalletObservations remain RED
+// scaffolds — they land with the repositories in step 01-03 and the
+// corruption harness later.
 package postgres
 
 import (
 	"context"
+	"embed"
+	"errors"
 	"fmt"
+	"strings"
+
+	"github.com/golang-migrate/migrate/v4"
+	_ "github.com/golang-migrate/migrate/v4/database/postgres"
+	"github.com/golang-migrate/migrate/v4/source/iofs"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"ledgerops/internal/app/ports"
 )
+
+//go:embed migrations/*.sql
+var migrationFiles embed.FS
+
+// newMigrator loads the embedded migration set and opens it against the
+// privileged DSN. DDL runs only as ledgerops_migrate — the service never
+// connects as this role (OPS-10).
+func newMigrator(privilegedDSN string) (*migrate.Migrate, error) {
+	source, err := iofs.New(migrationFiles, "migrations")
+	if err != nil {
+		return nil, fmt.Errorf("loading embedded migrations: %w", err)
+	}
+	m, err := migrate.NewWithSourceInstance("iofs", source, privilegedDSN)
+	if err != nil {
+		return nil, fmt.Errorf("opening migrator as the privileged role: %w", err)
+	}
+	return m, nil
+}
+
+func closeMigrator(m *migrate.Migrate) {
+	sourceErr, dbErr := m.Close()
+	_ = sourceErr
+	_ = dbErr
+}
 
 // Migrate applies the whole migration set as the privileged role. Migrations
 // are expand-only: no migration may DELETE from or drop the entry table, and
 // every schema change must leave the previous binary able to run against the
 // new schema (brief.md § Deployment shape).
-//
-// SCAFFOLD no-op — see the package comment for why this one does not panic.
 func Migrate(ctx context.Context, privilegedDSN string) error {
+	m, err := newMigrator(privilegedDSN)
+	if err != nil {
+		return err
+	}
+	defer closeMigrator(m)
+
+	if err := m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
+		return fmt.Errorf("migrating from zero: %w", err)
+	}
 	return nil
 }
 
 // MigrateStep applies only the newest schema change, which is how a scenario
 // exercises a migration running over history it may not rewrite.
-//
-// SCAFFOLD no-op — see the package comment.
 func MigrateStep(ctx context.Context, privilegedDSN string) error {
+	m, err := newMigrator(privilegedDSN)
+	if err != nil {
+		return err
+	}
+	defer closeMigrator(m)
+
+	if err := m.Steps(1); err != nil && !errors.Is(err, migrate.ErrNoChange) {
+		return fmt.Errorf("applying the newest migration: %w", err)
+	}
 	return nil
 }
 
-// MigrationStatements returns every migration's SQL by name, so a scenario can
-// assert the expand-only rule across the whole set rather than only the newest.
+// MigrationStatements returns every migration's up-direction SQL by file
+// name, so a scenario can assert the expand-only rule across the whole set
+// rather than only the newest. Down migrations are excluded: they exist for
+// local rollback only and are never applied over recorded history, so
+// scanning them for D7 violations would flag a legitimate `DROP TABLE
+// entries` that only ever runs against an empty database.
 func MigrationStatements() (map[string]string, error) {
-	return map[string]string{}, nil
+	entries, err := migrationFiles.ReadDir("migrations")
+	if err != nil {
+		return nil, fmt.Errorf("reading embedded migrations: %w", err)
+	}
+
+	statements := make(map[string]string, len(entries))
+	for _, entry := range entries {
+		name := entry.Name()
+		if !strings.HasSuffix(name, ".up.sql") {
+			continue
+		}
+		contents, err := migrationFiles.ReadFile("migrations/" + name)
+		if err != nil {
+			return nil, fmt.Errorf("reading %s: %w", name, err)
+		}
+		statements[name] = string(contents)
+	}
+	return statements, nil
 }
 
-// Open connects as the application role. That role holds SELECT and INSERT on
-// entries and has UPDATE and DELETE revoked (OPS-10) — the service never
+// Open connects as the application role. That role holds SELECT and INSERT
+// on entries and has UPDATE and DELETE revoked (OPS-10) — the service never
 // connects as the migrate role.
-//
-// SCAFFOLD no-op — see the package comment.
 func Open(ctx context.Context, appDSN string) (ports.Store, error) {
-	return scaffoldStore{}, nil
+	pool, err := pgxpool.New(ctx, appDSN)
+	if err != nil {
+		return nil, fmt.Errorf("opening the store as the application role: %w", err)
+	}
+	if err := pool.Ping(ctx); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("the application role could not reach the store: %w", err)
+	}
+	return &store{pool: pool}, nil
 }
 
-type scaffoldStore struct{}
-
-func (scaffoldStore) Begin(ctx context.Context) (ports.UnitOfWork, error) {
-	panic("postgres.Store.Begin not yet implemented -- RED scaffold")
+// store is the real ports.Store, backed by a pgx connection pool held under
+// the application role's credentials.
+type store struct {
+	pool *pgxpool.Pool
 }
 
-func (scaffoldStore) Close() error { return nil }
+// Begin remains a RED scaffold: the repositories it would hand out
+// (AccountRepository, TransactionRepository, IdempotencyStore) are step
+// 01-03's work, not this one's.
+func (s *store) Begin(ctx context.Context) (ports.UnitOfWork, error) {
+	panic("postgres.store.Begin not yet implemented -- repositories land in step 01-03")
+}
+
+func (s *store) Close() error {
+	s.pool.Close()
+	return nil
+}
 
 // AttemptOutOfBandChange reaches past the driving ports to try to rewrite
 // recorded history as the given role. It exists for exactly two reasons, both
