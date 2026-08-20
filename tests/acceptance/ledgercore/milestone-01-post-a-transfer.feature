@@ -14,7 +14,7 @@ Feature: Post a transfer
     Given the ledger is running against an empty store
     And a system account "treasury" exists
 
-  @pending @contract-shape:bounded-change
+  @contract-shape:bounded-change
   Scenario: A new account starts empty
     When the integrator opens a wallet account "alice"
     Then the account is created
@@ -29,7 +29,7 @@ Feature: Post a transfer
     And the balance of "alice" reads 100.00
     And the ledger holds 2 entries whose amounts sum to zero
 
-  @pending @contract-shape:bounded-change
+  @contract-shape:bounded-change
   Scenario: Value enters the ledger only as a movement from the system account
     Given a wallet account "alice" exists
     When the integrator moves 100.00 from "treasury" to "alice" under key "fund-1"
@@ -38,7 +38,7 @@ Feature: Post a transfer
     And the balance of "treasury" reads -100.00
     And the ledger holds 2 entries whose amounts sum to zero
 
-  @pending @contract-shape:bounded-change
+  @contract-shape:bounded-change
   Scenario: A posted transfer records exactly two legs that cancel out
     Given a wallet account "alice" funded with 100.00
     And a wallet account "bob" exists
@@ -48,7 +48,7 @@ Feature: Post a transfer
     And both legs belong to the same transaction
     And the two legs sum to zero
 
-  @pending @contract-shape:bounded-change
+  @contract-shape:bounded-change
   Scenario: A balance is the sum of the entries that produced it
     Given a wallet account "alice" funded with 100.00
     And a wallet account "bob" exists
@@ -75,7 +75,7 @@ Feature: Post a transfer
     And the refusal names the account "nobody"
     And the ledger holds no entries
 
-  @pending @contract-shape:bounded-change
+  @contract-shape:bounded-change
   Scenario: The smallest amount the ledger can move is accepted
     Given a wallet account "alice" funded with 100.00
     And a wallet account "bob" exists

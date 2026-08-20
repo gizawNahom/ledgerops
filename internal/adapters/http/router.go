@@ -6,9 +6,12 @@
 // POST /accounts, POST /transfers, and GET /accounts/{id} are real as of step
 // 01-04, over the real application shell (internal/app) built at step 01-03.
 // GET /health/trial-balance is real too — the walking skeleton reads it back
-// to prove the ledger balances. GET /accounts/{id}/entries, GET
-// /console/verdict, and GET /metrics remain scaffolds: no active scenario
-// exercises them yet.
+// to prove the ledger balances. GET /accounts/{id}/entries is real as of step
+// 02-01, narrowly: it returns enough (transaction id, counterparty, amount,
+// recorded-at) to prove a transfer's two legs settled under one transaction
+// id; the full traceability wire shape, including running balance and
+// unknown-account refusal, is milestone-05's job. GET /console/verdict and
+// GET /metrics remain scaffolds: no active scenario exercises them yet.
 package http
 
 import (
@@ -41,7 +44,7 @@ func NewRouter(deps Deps) http.Handler {
 
 	router.Post("/accounts", createAccountHandler(ledger))
 	router.Get("/accounts/{id}", getBalanceHandler(ledger))
-	router.Get("/accounts/{id}/entries", scaffold("trace entries"))
+	router.Get("/accounts/{id}/entries", getEntriesHandler(ledger))
 	router.Post("/transfers", postTransferHandler(ledger))
 	router.Get("/health/trial-balance", trialBalanceHandler(deps.Store))
 	router.Get("/console/verdict", scaffold("console verdict"))

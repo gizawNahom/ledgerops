@@ -151,6 +151,10 @@ func NewEntry(transactionID, accountID, counterparty string, amount Money, recor
 	}, nil
 }
 
+// TransactionID exposes the transaction an entry belongs to — what lets a
+// caller confirm two legs settled atomically as one transaction.
+func (e Entry) TransactionID() string { return e.transactionID }
+
 // AccountID, Counterparty, Amount, RecordedAt and Sequence expose what an entry
 // must show for an operator to read it without cross-referencing anything by
 // hand (US-5).

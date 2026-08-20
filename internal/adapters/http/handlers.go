@@ -85,6 +85,39 @@ func getBalanceHandler(ledger *app.Ledger) http.HandlerFunc {
 	}
 }
 
+// getEntriesHandler reads one account's ordered entry history — the trace
+// that proves two legs of a transfer settled together (US-5, narrow slice:
+// this step needs only the fields that prove atomicity; the full
+// traceability wire shape, including running balance, is milestone-05's job).
+func getEntriesHandler(ledger *app.Ledger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		accountID := chi.URLParam(r, "id")
+
+		entries, err := ledger.GetEntries(r.Context(), accountID)
+		if err != nil {
+			writeDomainError(w, err)
+			return
+		}
+
+		writeJSON(w, http.StatusOK, map[string]any{
+			"entries": entriesToWire(entries),
+		})
+	}
+}
+
+func entriesToWire(entries []domain.Entry) []map[string]any {
+	wire := make([]map[string]any, 0, len(entries))
+	for _, entry := range entries {
+		wire = append(wire, map[string]any{
+			"transaction_id": entry.TransactionID(),
+			"counterparty":   entry.Counterparty(),
+			"amount":         formatMoney(entry.Amount()),
+			"recorded_at":    entry.RecordedAt(),
+		})
+	}
+	return wire
+}
+
 // postTransferRequest is the wire shape POST /transfers accepts.
 type postTransferRequest struct {
 	From   string `json:"from"`

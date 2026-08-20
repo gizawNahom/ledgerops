@@ -7,8 +7,12 @@
 //
 // PostTransfer, CreateAccount, and GetBalance are real as of step 01-03: the
 // Read → Decide → Write sandwich over the real postgres repositories, one
-// database transaction per call. GetEntries and VerifyBooks remain RED
-// scaffolds — out of scope for this step (slices 05/04).
+// database transaction per call. GetEntries is real as of step 02-01,
+// narrowly: it reads the ordered history straight through to the wire so a
+// posted transfer's two legs can be traced to one transaction id; the full
+// traceability contract (running balance, unknown-account refusal) is
+// milestone-05's job. VerifyBooks remains a RED scaffold — out of scope for
+// this step (slice 04).
 package app
 
 import (
@@ -167,7 +171,26 @@ func (l *Ledger) GetBalance(ctx context.Context, accountID string) (domain.Accou
 // instant then by sequence, so two entries sharing a clock tick still read in a
 // settled order (US-5).
 func (l *Ledger) GetEntries(ctx context.Context, accountID string) ([]domain.Entry, error) {
-	panic("Ledger.GetEntries not yet implemented -- RED scaffold")
+	uow, err := l.store.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("reading entries for %q: %w", accountID, err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = uow.Rollback(ctx)
+		}
+	}()
+
+	entries, err := uow.Transactions().EntriesFor(ctx, accountID)
+	if err != nil {
+		return nil, err
+	}
+	if err := uow.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("reading entries for %q: %w", accountID, err)
+	}
+	committed = true
+	return entries, nil
 }
 
 // VerifyBooks answers the operator's one question by full scan (D9): sum every
