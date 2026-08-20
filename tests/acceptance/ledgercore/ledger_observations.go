@@ -19,7 +19,14 @@ import (
 // NewLedger builds the composition root with the two fakes the infrastructure
 // policy permits, and nothing else faked.
 func NewLedger() *Ledger {
-	fixed := []string{"txn_0001", "txn_0002", "txn_0003", "txn_0004", "txn_0005"}
+	// Default-issued ids use a "seed_" prefix so they can never collide with a
+	// hand-picked fixture literal like "txn_0001" pinned via FixNextIdentifier
+	// in a .feature file's Given step. Production's real id generator produces
+	// an unrelated format again ("txn_1", "txn_2" — no zero-padding), so this
+	// fixture-only format was always meant to be test-visible only; the prefix
+	// just makes that intent unambiguous instead of a coincidence of today's
+	// literals not colliding.
+	fixed := []string{"seed_txn_0001", "seed_txn_0002", "seed_txn_0003", "seed_txn_0004", "seed_txn_0005"}
 	issued := 0
 	return &Ledger{
 		operatorKey: "test-operator-key",
@@ -29,7 +36,7 @@ func NewLedger() *Ledger {
 		clock:       func() time.Time { return time.Date(2026, 8, 18, 9, 0, 0, 0, time.UTC) },
 		nextID: func() string {
 			issued++
-			return fmt.Sprintf("txn_%04d", issued)
+			return fmt.Sprintf("seed_txn_%04d", issued)
 		},
 	}
 }
