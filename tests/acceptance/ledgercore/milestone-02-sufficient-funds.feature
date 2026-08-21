@@ -13,7 +13,7 @@ Feature: Reject insufficient funds
     Given the ledger is running against an empty store
     And a system account "treasury" exists
 
-  @pending @error @env-clean @contract-shape:unbounded-preservation
+  @error @env-clean @contract-shape:unbounded-preservation
   Scenario: Spending more than a wallet holds is refused with the shortfall
     Given a wallet account "alice" funded with 10.00
     And a wallet account "bob" exists
@@ -21,7 +21,7 @@ Feature: Reject insufficient funds
     Then the transfer is refused for insufficient funds
     And the refusal states 10.00 available against 50.00 requested
 
-  @pending @error @env-clean @contract-shape:unbounded-preservation
+  @error @env-clean @contract-shape:unbounded-preservation
   Scenario: A refused transfer leaves the ledger exactly as it was
     Given a wallet account "alice" funded with 10.00
     And a wallet account "bob" exists
@@ -39,7 +39,7 @@ Feature: Reject insufficient funds
     Then the transfer is accepted
     And the balance of "alice" reads 0.00
 
-  @pending @error @env-clean @contract-shape:unbounded-preservation
+  @error @env-clean @contract-shape:unbounded-preservation
   Scenario: Spending one minor unit past a wallet's balance is refused
     Given a wallet account "alice" funded with 10.00
     And a wallet account "bob" exists
