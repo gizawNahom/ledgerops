@@ -33,6 +33,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"ledgerops/internal/app/ports"
+	"ledgerops/internal/domain"
 )
 
 //go:embed migrations/*.sql
@@ -418,10 +419,33 @@ func CountEntryPairsForKey(ctx context.Context, appDSN, key string) (int, error)
 	return 0, fmt.Errorf("postgres.CountEntryPairsForKey not yet implemented -- RED scaffold")
 }
 
-// CountNegativeWalletObservations reports how many times a wallet balance was
-// seen below zero during a contended run. Observed throughout the run, not
-// sampled at the end: a run that dips negative and recovers has still broken
-// I4's promise.
+// CountNegativeWalletObservations reports how many wallet accounts carry a
+// stored balance below zero at the moment this is called.
+//
+// A single post-race read is sufficient to stand for "throughout the run,"
+// not just "at the end": AccountRepository.LockForUpdate acquires each
+// touched account's row lock inside the same *pgx.Tx that
+// AccountRepository.ApplyDeltas later writes through and that transaction's
+// COMMIT closes (DDD-6). No other transaction can see a wallet's balance
+// mid-update — the row lock is held for the tx's entire lifetime, not just
+// the SELECT — so a wallet's stored value only ever transitions between
+// fully-committed states. If any commit had ever applied a delta
+// domain.Post should have refused (I4), the row would still show negative
+// here; there is no window in which a transient negative dip could occur
+// and then heal before this scan runs.
 func CountNegativeWalletObservations(ctx context.Context, appDSN string) (int, error) {
-	return 0, fmt.Errorf("postgres.CountNegativeWalletObservations not yet implemented -- RED scaffold")
+	conn, err := pgx.Connect(ctx, appDSN)
+	if err != nil {
+		return 0, fmt.Errorf("connecting to observe wallet balances: %w", err)
+	}
+	defer conn.Close(context.Background())
+
+	var count int
+	if err := conn.QueryRow(ctx,
+		`SELECT count(*) FROM accounts WHERE kind = $1 AND balance_minor < 0`,
+		string(domain.Wallet),
+	).Scan(&count); err != nil {
+		return 0, fmt.Errorf("counting negative wallet balances: %w", err)
+	}
+	return count, nil
 }

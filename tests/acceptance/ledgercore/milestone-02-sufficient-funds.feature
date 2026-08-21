@@ -63,7 +63,7 @@ Feature: Reject insufficient funds
     Then the transfer is refused for insufficient funds
     And the balance of "treasury" reads -10.00
 
-  @pending @env-contended @kpi-2 @contract-shape:bounded-change
+  @env-contended @kpi-2 @contract-shape:bounded-change
   Scenario: Twenty spenders race one balance and only one of them wins
     Given a wallet account "alice" funded with 100.00
     And a wallet account "bob" exists
@@ -73,7 +73,7 @@ Feature: Reject insufficient funds
     And the balance of "alice" reads 0.00
     And the balance of "bob" reads 100.00
 
-  @pending @env-contended @kpi-2 @contract-shape:bounded-change
+  @env-contended @kpi-2 @contract-shape:bounded-change
   Scenario: A thousand contended spends never drive a wallet below zero
     Given a wallet account "alice" funded with 500.00
     And a wallet account "bob" exists
