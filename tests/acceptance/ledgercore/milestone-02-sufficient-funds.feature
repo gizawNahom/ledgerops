@@ -31,7 +31,7 @@ Feature: Reject insufficient funds
     And the balance of "bob" reads 0.00
     And the ledger holds 2 entries whose amounts sum to zero
 
-  @pending @env-clean @contract-shape:bounded-change
+  @env-clean @contract-shape:bounded-change
   Scenario: Spending a wallet down to exactly zero is allowed
     Given a wallet account "alice" funded with 10.00
     And a wallet account "bob" exists
@@ -48,7 +48,7 @@ Feature: Reject insufficient funds
     And the refusal states 10.00 available against 10.01 requested
     And the balance of "alice" reads 10.00
 
-  @pending @env-clean @contract-shape:bounded-change
+  @env-clean @contract-shape:bounded-change
   Scenario: A system account is permitted to go negative
     Given a wallet account "alice" exists
     When the integrator moves 100.00 from "treasury" to "alice" under key "fund-1"
@@ -56,7 +56,7 @@ Feature: Reject insufficient funds
     And the balance of "treasury" reads -100.00
     And "treasury" is a system account
 
-  @pending @error @env-clean @contract-shape:unbounded-preservation
+  @error @env-clean @contract-shape:unbounded-preservation
   Scenario: A system account's counterparty is still held to its own balance
     Given a wallet account "alice" funded with 10.00
     When the integrator moves 50.00 from "alice" to "treasury" under key "t-1"

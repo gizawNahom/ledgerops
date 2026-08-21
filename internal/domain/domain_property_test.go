@@ -293,6 +293,32 @@ func TestPost_ExactBalanceAndOffByOneCent(t *testing.T) {
 			t.Fatalf("expected insufficient_funds, got %v", postErr)
 		}
 	})
+
+	t.Run("system source past its own balance still succeeds and goes negative by design", func(t *testing.T) {
+		amount, err := domain.NewMoney(501, currency)
+		if err != nil {
+			t.Fatalf("NewMoney rejected a known currency: %v", err)
+		}
+		emptyWallet, err := domain.NewAccount("wallet-2", domain.Wallet, systemBalance)
+		if err != nil {
+			t.Fatalf("NewAccount rejected a non-negative balance: %v", err)
+		}
+		cmd := domain.TransferCommand{From: "system-1", To: "wallet-2", Amount: amount}
+		posting, err := domain.Post(cmd, []domain.Account{system, emptyWallet}, time.Now(), "tx-system-negative")
+		if err != nil {
+			t.Fatalf("system source refused past its own (zero) balance, but I4 does not bind System: %v", err)
+		}
+		if !domain.EntriesSumToZero(posting.Entries) {
+			t.Fatalf("entries do not sum to zero: %+v", posting.Entries)
+		}
+		updated, err := system.Apply(amount.Negate())
+		if err != nil {
+			t.Fatalf("Account.Apply refused a System account going negative: %v", err)
+		}
+		if updated.Balance().MinorUnits() >= 0 {
+			t.Fatalf("expected system account to go negative by design, got %d", updated.Balance().MinorUnits())
+		}
+	})
 }
 
 // TestPost_UnknownAccountNamesTheMissingOne covers the acceptance criterion
