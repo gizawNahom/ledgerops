@@ -30,6 +30,16 @@ import (
 // currently unreachable through any driving port, by design).
 const ledgerCurrency = "USD"
 
+// ErrIdempotencyKeyConflict marks a same-key request whose fingerprint does
+// not match the one the key was first claimed with (DDD-8). This is an
+// application-shell decision, not a domain.ViolationKind member: no rule in
+// the pure core is broken by the request itself, only the shell's
+// replay-or-refuse contract over the key. The adapter maps it onto
+// idempotency_key_conflict/409 (ADR-008), the same status family as
+// account_already_exists — the identifier is already bound to something
+// else.
+var ErrIdempotencyKeyConflict = errors.New("idempotency key claimed by a different request")
+
 // Ledger is the application layer. Every driving adapter goes through it and
 // nothing else.
 type Ledger struct {
@@ -68,18 +78,24 @@ func (l *Ledger) PostTransfer(ctx context.Context, cmd TransferRequest) (Result,
 		}
 	}()
 
-	// Replay check (impure read, ahead of the Read → Decide → Write
+	// Replay/conflict check (impure read, ahead of the Read → Decide → Write
 	// sandwich): a same-key/same-fingerprint repeat is answered by
 	// RE-RENDERING the stored transaction (DDD-8), never by re-running
 	// domain.Post or serving a remembered response body. A same-key
-	// different-fingerprint repeat is NOT handled here — it falls through to
-	// the normal write path, where the unique constraint on the key is the
-	// backstop (key-conflict refusal is a later step's job).
+	// different-fingerprint repeat is refused outright, here, before any
+	// account is locked or any write attempted — the first transaction's
+	// balances and entries are never touched by a conflicting reuse. The
+	// unique constraint on the key (migration 0002) remains the backstop that
+	// makes this hold under concurrent claims of the same key (I7); this
+	// check is the correct behaviour on top of it, not a replacement for it.
 	claim, found, err := uow.Idempotency().Lookup(ctx, cmd.IdempotencyKey)
 	if err != nil {
 		return Result{}, fmt.Errorf("looking up idempotency key for replay: %w", err)
 	}
-	if found && claim.Fingerprint == cmd.Fingerprint {
+	if found {
+		if claim.Fingerprint != cmd.Fingerprint {
+			return Result{}, ErrIdempotencyKeyConflict
+		}
 		posting, err := uow.Transactions().Get(ctx, claim.TransactionID)
 		if err != nil {
 			return Result{}, fmt.Errorf("re-rendering replay for transaction %q: %w", claim.TransactionID, err)

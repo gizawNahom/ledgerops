@@ -178,6 +178,10 @@ func postTransferHandler(ledger *app.Ledger) http.HandlerFunc {
 			Fingerprint:    fingerprintTransfer(body.From, body.To, amount),
 		})
 		if err != nil {
+			if errors.Is(err, app.ErrIdempotencyKeyConflict) {
+				writeRefusal(w, http.StatusConflict, "idempotency_key_conflict", nil)
+				return
+			}
 			writeDomainError(w, err)
 			return
 		}

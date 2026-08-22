@@ -38,7 +38,7 @@ Feature: Retry safely
     And the integrator repeats the same request under key "k-1"
     Then the legs in the replayed answer match the entries recorded for that transaction
 
-  @pending @error @env-clean @contract-shape:bounded-change
+  @error @env-clean @contract-shape:bounded-change
   Scenario: Reusing a key for a different movement fails loudly
     When the integrator moves 50.00 from "alice" to "bob" under key "k-1"
     And the integrator moves 25.00 from "alice" to "bob" under key "k-1"
@@ -46,7 +46,7 @@ Feature: Retry safely
     And the balance of "alice" reads 50.00
     And the ledger holds 4 entries whose amounts sum to zero
 
-  @pending @error @env-clean @contract-shape:bounded-change
+  @error @env-clean @contract-shape:bounded-change
   Scenario: Reusing a key for the same amount between different accounts fails loudly
     Given a wallet account "carol" exists
     When the integrator moves 50.00 from "alice" to "bob" under key "k-1"
@@ -69,7 +69,7 @@ Feature: Retry safely
     And the balance of "alice" reads 100.00
     And the ledger holds 2 entries whose amounts sum to zero
 
-  @pending @error @env-clean @contract-shape:bounded-change
+  @error @env-clean @contract-shape:bounded-change
   Scenario: A refused transfer does not consume its key
     When the integrator moves 500.00 from "alice" to "bob" under key "k-1"
     Then the transfer is refused for insufficient funds
