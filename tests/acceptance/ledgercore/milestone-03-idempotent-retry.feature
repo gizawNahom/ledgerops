@@ -77,7 +77,7 @@ Feature: Retry safely
     Then the transfer is accepted
     And the balance of "alice" reads 50.00
 
-  @pending @chaos @env-clean @contract-shape:bounded-change
+  @chaos @env-clean @contract-shape:bounded-change
   Scenario: A key and the movement it guards survive an interruption together or not at all
     When the ledger is killed partway through moving 50.00 from "alice" to "bob" under key "k-1"
     And the ledger is restarted against the same store

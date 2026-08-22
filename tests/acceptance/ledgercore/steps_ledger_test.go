@@ -442,12 +442,12 @@ func RegisterSteps(ctx *godog.ScenarioContext, l *Ledger) {
 		return l.ThenAtLeastAttemptsWereMade(n)
 	})
 
-	ctx.Then(`^exactly (\d+) transactions? (?:was|were) recorded for that key$`, func(n int) error {
-		return l.ThenExactlyTransactionsWereRecordedForTheKey(n)
+	ctx.Then(`^exactly (\d+) transactions? (?:was|were) recorded for that key$`, func(c context.Context, n int) error {
+		return l.ThenExactlyTransactionsWereRecordedForTheKey(c, n)
 	})
 
-	ctx.Then(`^exactly (\d+) pairs? of entries (?:was|were) recorded for that key$`, func(n int) error {
-		return l.ThenExactlyEntryPairsWereRecordedForTheKey(n)
+	ctx.Then(`^exactly (\d+) pairs? of entries (?:was|were) recorded for that key$`, func(c context.Context, n int) error {
+		return l.ThenExactlyEntryPairsWereRecordedForTheKey(c, n)
 	})
 
 	ctx.Then(`^all (\d+) answers name the same transaction$`, func(n int) error {

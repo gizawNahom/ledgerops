@@ -442,6 +442,33 @@ func CountEntryPairsForKey(ctx context.Context, appDSN, key string) (int, error)
 	return entryCount / 2, nil
 }
 
+// CountDistinctTransactionsForKey counts the distinct transaction ids claimed
+// under one idempotency key. Because `key` is the primary key of
+// idempotency_keys (migration 0002), at most one transaction id can ever be
+// claimed per key — so this returns 0 (key never claimed, or an interrupted
+// attempt that never reached the claim) or 1 (a real posting claimed it), and
+// never anything else. That makes it the ground-truth answer to "did the key
+// and the movement it guards survive together, exactly once" regardless of
+// whether the caller reaching this key did so through a single request or a
+// race of many under the same key — it queries the store directly rather than
+// reading a race-runner-specific report.
+func CountDistinctTransactionsForKey(ctx context.Context, appDSN, key string) (int, error) {
+	conn, err := pgx.Connect(ctx, appDSN)
+	if err != nil {
+		return 0, fmt.Errorf("connecting to count transactions for key %q: %w", key, err)
+	}
+	defer conn.Close(context.Background())
+
+	var count int
+	if err := conn.QueryRow(ctx,
+		`SELECT count(DISTINCT transaction_id) FROM idempotency_keys WHERE key = $1`,
+		key,
+	).Scan(&count); err != nil {
+		return 0, fmt.Errorf("counting transactions for key %q: %w", key, err)
+	}
+	return count, nil
+}
+
 // CountNegativeWalletObservations reports how many wallet accounts carry a
 // stored balance below zero at the moment this is called.
 //

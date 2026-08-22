@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"ledgerops/internal/adapters/postgres"
 )
 
 // The Then-side of the composition root. Every assertion a scenario can make
@@ -596,22 +598,37 @@ func (l *Ledger) ThenAtLeastAttemptsWereMade(want int) error {
 		want, l.lastRace.Attempts)
 }
 
-// ThenExactlyTransactionsWereRecordedForTheKey asserts I7 under concurrency.
-func (l *Ledger) ThenExactlyTransactionsWereRecordedForTheKey(want int) error {
-	if l.lastRace.DistinctTransactionIDs == want {
+// ThenExactlyTransactionsWereRecordedForTheKey asserts I7 — for the key most
+// recently acted under (l.lastRequest.Key). It queries the store directly via
+// postgres.CountDistinctTransactionsForKey rather than reading a
+// race-runner-specific report, so it is correct for both the concurrent-race
+// scenarios (which submit under a shared key) and single-shot scenarios such
+// as the chaos "killed partway through, then retried" journey, which never
+// populates l.lastRace.
+func (l *Ledger) ThenExactlyTransactionsWereRecordedForTheKey(ctx context.Context, want int) error {
+	got, err := postgres.CountDistinctTransactionsForKey(ctx, l.appDSN, string(l.lastRequest.Key))
+	if err != nil {
+		return fmt.Errorf("counting distinct transactions for that key: %w", err)
+	}
+	if got == want {
 		return nil
 	}
-	return fmt.Errorf("expected %d distinct transaction(s) for that key, %d were recorded",
-		want, l.lastRace.DistinctTransactionIDs)
+	return fmt.Errorf("expected %d distinct transaction(s) for that key, %d were recorded", want, got)
 }
 
 // ThenExactlyEntryPairsWereRecordedForTheKey catches a double write that
-// happens to render the same id — which the id check alone would miss.
-func (l *Ledger) ThenExactlyEntryPairsWereRecordedForTheKey(want int) error {
-	if l.lastRace.EntryPairsStored == want {
+// happens to render the same id — which the id check alone would miss. Like
+// its sibling above, it queries the store directly for the key most recently
+// acted under so it works for single-shot scenarios as well as races.
+func (l *Ledger) ThenExactlyEntryPairsWereRecordedForTheKey(ctx context.Context, want int) error {
+	got, err := postgres.CountEntryPairsForKey(ctx, l.appDSN, string(l.lastRequest.Key))
+	if err != nil {
+		return fmt.Errorf("counting entry pairs for that key: %w", err)
+	}
+	if got == want {
 		return nil
 	}
-	return fmt.Errorf("expected %d entry pair(s) for that key, %d were stored", want, l.lastRace.EntryPairsStored)
+	return fmt.Errorf("expected %d entry pair(s) for that key, %d were stored", want, got)
 }
 
 // ThenAllAnswersNameTheSameTransaction asserts every racing caller was told the
