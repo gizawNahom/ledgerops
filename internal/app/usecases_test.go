@@ -179,6 +179,81 @@ func TestProperty_PostTransfer_RefusalLeavesEveryUniverseSlotUnchanged(t *testin
 	})
 }
 
+// TestProperty_PostTransfer_RepeatedApplicationEqualsOneApplication covers
+// this step's TEST PARADIGM obligation: for any request and any repeat count
+// N >= 1, submitting the SAME idempotency key and fingerprint N times against
+// the same fake ports leaves the final state identical to what a single
+// application produces. Call 1 is the real write; calls 2..N must all be
+// replays — Replayed: true, the same TransactionID, and the universe
+// unchanged from the state call 1 left behind.
+func TestProperty_PostTransfer_RepeatedApplicationEqualsOneApplication(t *testing.T) {
+	rapid.Check(t, func(rt *rapid.T) {
+		fromStartMinor := rapid.Int64Range(1, 1_000_000).Draw(rt, "fromStart")
+		amountMinor := rapid.Int64Range(1, fromStartMinor).Draw(rt, "amount")
+		repeatCount := rapid.IntRange(1, 5).Draw(rt, "repeatCount")
+
+		fromBalance, err := domain.NewMoney(fromStartMinor, "USD")
+		if err != nil {
+			rt.Fatalf("NewMoney rejected a known currency: %v", err)
+		}
+		fromAccount, err := domain.NewAccount("from", domain.Wallet, fromBalance)
+		if err != nil {
+			rt.Fatalf("NewAccount rejected a non-negative balance: %v", err)
+		}
+		zero, err := domain.NewMoney(0, "USD")
+		if err != nil {
+			rt.Fatalf("NewMoney rejected a known currency: %v", err)
+		}
+		toAccount, err := domain.NewAccount("to", domain.System, zero)
+		if err != nil {
+			rt.Fatalf("NewAccount rejected a non-negative balance: %v", err)
+		}
+
+		store := newFakeStore(fromAccount, toAccount)
+		ledger := app.NewLedger(store, fixedClock, sequentialIDs())
+
+		amount, err := domain.NewMoney(amountMinor, "USD")
+		if err != nil {
+			rt.Fatalf("NewMoney rejected a known currency: %v", err)
+		}
+
+		request := app.TransferRequest{
+			From:           "from",
+			To:             "to",
+			Amount:         amount,
+			IdempotencyKey: "idem-key",
+			Fingerprint:    "fingerprint",
+		}
+
+		first, err := ledger.PostTransfer(context.Background(), request)
+		if err != nil {
+			rt.Fatalf("unexpected refusal on first application: %v", err)
+		}
+		if first.Replayed {
+			rt.Fatalf("a first-time posting must not report Replayed")
+		}
+
+		afterFirst := captureUniverse(store, "from", "to")
+
+		for i := 2; i <= repeatCount; i++ {
+			repeat, err := ledger.PostTransfer(context.Background(), request)
+			if err != nil {
+				rt.Fatalf("unexpected refusal on repeat %d: %v", i, err)
+			}
+			if !repeat.Replayed {
+				rt.Fatalf("repeat %d must report Replayed, got a fresh write", i)
+			}
+			if repeat.Posting.Transaction.ID() != first.Posting.Transaction.ID() {
+				rt.Fatalf("repeat %d TransactionID = %q, want %q (same as first application)",
+					i, repeat.Posting.Transaction.ID(), first.Posting.Transaction.ID())
+			}
+
+			afterRepeat := captureUniverse(store, "from", "to")
+			statedelta.AssertStateDelta(t, afterFirst, afterRepeat, universe, map[string]statedelta.Predicate{})
+		}
+	})
+}
+
 // TestProperty_CreateAccount_OpensAtZeroBalance covers CreateAccount's
 // contract: a newly opened account of either kind starts at zero, through the
 // real AccountRepository.Create call (here, the fake honouring the same

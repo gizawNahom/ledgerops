@@ -22,7 +22,7 @@ Feature: Retry safely
     And a wallet account "alice" funded with 100.00
     And a wallet account "bob" exists
 
-  @pending @env-clean @contract-shape:bounded-change
+  @env-clean @contract-shape:bounded-change
   Scenario: Submitting the same transfer twice moves value once
     When the integrator moves 50.00 from "alice" to "bob" under key "k-1"
     And the integrator repeats the same request under key "k-1"
@@ -32,7 +32,7 @@ Feature: Retry safely
     And the balance of "alice" reads 50.00
     And the ledger holds 4 entries whose amounts sum to zero
 
-  @pending @env-clean @contract-shape:bounded-change
+  @env-clean @contract-shape:bounded-change
   Scenario: A replay reports the movement that is actually recorded
     When the integrator moves 50.00 from "alice" to "bob" under key "k-1"
     And the integrator repeats the same request under key "k-1"
@@ -54,7 +54,7 @@ Feature: Retry safely
     Then the second request is refused as a key conflict
     And the balance of "carol" reads 0.00
 
-  @pending @env-clean @contract-shape:bounded-change
+  @env-clean @contract-shape:bounded-change
   Scenario: The same request written differently is still the same request
     When the integrator moves 50.00 from "alice" to "bob" under key "k-1"
     And the integrator repeats the same request under key "k-1" with its fields reordered and respaced
@@ -62,7 +62,7 @@ Feature: Retry safely
     And both answers name the same transaction
     And the ledger holds 4 entries whose amounts sum to zero
 
-  @pending @error @env-clean @contract-shape:unbounded-preservation
+  @error @env-clean @contract-shape:unbounded-preservation
   Scenario: A transfer submitted without a key is refused
     When the integrator moves 50.00 from "alice" to "bob" under no key
     Then the transfer is refused as missing a key

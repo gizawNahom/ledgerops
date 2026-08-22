@@ -68,6 +68,29 @@ func (l *Ledger) PostTransfer(ctx context.Context, cmd TransferRequest) (Result,
 		}
 	}()
 
+	// Replay check (impure read, ahead of the Read → Decide → Write
+	// sandwich): a same-key/same-fingerprint repeat is answered by
+	// RE-RENDERING the stored transaction (DDD-8), never by re-running
+	// domain.Post or serving a remembered response body. A same-key
+	// different-fingerprint repeat is NOT handled here — it falls through to
+	// the normal write path, where the unique constraint on the key is the
+	// backstop (key-conflict refusal is a later step's job).
+	claim, found, err := uow.Idempotency().Lookup(ctx, cmd.IdempotencyKey)
+	if err != nil {
+		return Result{}, fmt.Errorf("looking up idempotency key for replay: %w", err)
+	}
+	if found && claim.Fingerprint == cmd.Fingerprint {
+		posting, err := uow.Transactions().Get(ctx, claim.TransactionID)
+		if err != nil {
+			return Result{}, fmt.Errorf("re-rendering replay for transaction %q: %w", claim.TransactionID, err)
+		}
+		if err := uow.Commit(ctx); err != nil {
+			return Result{}, fmt.Errorf("committing replay read for transaction %q: %w", claim.TransactionID, err)
+		}
+		committed = true
+		return Result{Posting: posting, Replayed: true}, nil
+	}
+
 	// Read (impure): lock the touched accounts in ascending id order
 	// (DDD-6) — the ordering is the repository's job, not this call site's.
 	snapshots, err := uow.Accounts().LockForUpdate(ctx, []string{cmd.From, cmd.To})

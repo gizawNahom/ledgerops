@@ -175,7 +175,7 @@ func postTransferHandler(ledger *app.Ledger) http.HandlerFunc {
 			To:             body.To,
 			Amount:         amount,
 			IdempotencyKey: key,
-			Fingerprint:    string(rawBody),
+			Fingerprint:    fingerprintTransfer(body.From, body.To, amount),
 		})
 		if err != nil {
 			writeDomainError(w, err)
@@ -188,6 +188,16 @@ func postTransferHandler(ledger *app.Ledger) http.HandlerFunc {
 		}
 		writeJSON(w, status, transferAnswer(result))
 	}
+}
+
+// fingerprintTransfer computes the idempotency fingerprint over the PARSED
+// command, not the raw request bytes (DDD-8): two bodies naming the same
+// From/To/Amount but reordered or respaced must fingerprint identically. Using
+// the parsed domain.Money (minor units + currency) rather than the wire
+// literal also absorbs any lexical variance in how the same amount was
+// spelled.
+func fingerprintTransfer(from, to string, amount domain.Money) string {
+	return fmt.Sprintf("%s|%s|%d|%s", from, to, amount.MinorUnits(), amount.Currency())
 }
 
 func transferAnswer(result app.Result) map[string]any {
