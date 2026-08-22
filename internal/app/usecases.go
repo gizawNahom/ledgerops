@@ -55,6 +55,52 @@ func NewLedger(store ports.Store, clock ports.Clock, nextID ports.IDGenerator) *
 	return &Ledger{store: store, clock: clock, nextID: nextID}
 }
 
+// withUnitOfWork runs fn inside one unit of work: opens it, commits on
+// success, and rolls back on any error path (including a panic passing
+// through fn). CreateAccount, GetBalance, and GetEntries each repeated this
+// open/commit-or-rollback ceremony on their own; consolidating it here is
+// what stops a future read or write use case repeating it a fourth way.
+// describe names the operation for the Begin/Commit error wrap, matching
+// what each call site already said before this consolidation.
+//
+// PostTransfer does NOT use this helper: its sandwich has an early
+// commit-and-return on the replay path and a recursive retry on a lost
+// idempotency-claim race, neither of which fits this shape without
+// obscuring the control flow the ADR-005 commentary there depends on.
+func withUnitOfWork[T any](ctx context.Context, store ports.Store, describe string, fn func(ports.UnitOfWork) (T, error)) (T, error) {
+	var zero T
+	uow, err := store.Begin(ctx)
+	if err != nil {
+		return zero, fmt.Errorf("%s: %w", describe, err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = uow.Rollback(ctx)
+		}
+	}()
+
+	result, err := fn(uow)
+	if err != nil {
+		return zero, err
+	}
+	if err := uow.Commit(ctx); err != nil {
+		return zero, fmt.Errorf("%s: %w", describe, err)
+	}
+	committed = true
+	return result, nil
+}
+
+// inUnitOfWork is withUnitOfWork specialised to actions with no result value
+// besides success or failure — CreateAccount is the only call site that
+// needs this shape.
+func inUnitOfWork(ctx context.Context, store ports.Store, describe string, fn func(ports.UnitOfWork) error) error {
+	_, err := withUnitOfWork(ctx, store, describe, func(uow ports.UnitOfWork) (struct{}, error) {
+		return struct{}{}, fn(uow)
+	})
+	return err
+}
+
 // PostTransfer is the Read → Decide → Write sandwich, and the only place a
 // movement is recorded.
 //
@@ -165,45 +211,32 @@ func (l *Ledger) PostTransfer(ctx context.Context, cmd TransferRequest) (Result,
 // assignment — otherwise value appears unaccounted for and I1 is violated at
 // the source.
 func (l *Ledger) CreateAccount(ctx context.Context, accountID string, kind domain.AccountKind) error {
-	uow, err := l.store.Begin(ctx)
+	openingBalance, err := domain.NewMoney(0, ledgerCurrency)
 	if err != nil {
-		return fmt.Errorf("opening account %q: %w", accountID, err)
+		return err
 	}
-	committed := false
-	defer func() {
-		if !committed {
-			_ = uow.Rollback(ctx)
+
+	return inUnitOfWork(ctx, l.store, fmt.Sprintf("opening account %q", accountID), func(uow ports.UnitOfWork) error {
+		// Courtesy check (DDD-18): read the snapshot before attempting the
+		// insert. The unique constraint on the account name (migration 0) is
+		// the final backstop under concurrency; this is the pure decision
+		// that turns a known collision into a named refusal rather than a
+		// raw constraint error.
+		alreadyOpen, err := l.accountAlreadyOpen(ctx, uow, accountID)
+		if err != nil {
+			return err
 		}
-	}()
 
-	zero, err := domain.NewMoney(0, ledgerCurrency)
-	if err != nil {
-		return err
-	}
+		account, err := domain.OpenAccount(accountID, kind, openingBalance, alreadyOpen)
+		if err != nil {
+			return err
+		}
 
-	// Courtesy check (DDD-18): read the snapshot before attempting the
-	// insert. The unique constraint on the account name (migration 0) is the
-	// final backstop under concurrency; this is the pure decision that turns
-	// a known collision into a named refusal rather than a raw constraint
-	// error.
-	alreadyOpen, err := l.accountAlreadyOpen(ctx, uow, accountID)
-	if err != nil {
-		return err
-	}
-
-	account, err := domain.OpenAccount(accountID, kind, zero, alreadyOpen)
-	if err != nil {
-		return err
-	}
-
-	if err := uow.Accounts().Create(ctx, account); err != nil {
-		return fmt.Errorf("opening account %q: %w", accountID, err)
-	}
-	if err := uow.Commit(ctx); err != nil {
-		return fmt.Errorf("opening account %q: %w", accountID, err)
-	}
-	committed = true
-	return nil
+		if err := uow.Accounts().Create(ctx, account); err != nil {
+			return fmt.Errorf("opening account %q: %w", accountID, err)
+		}
+		return nil
+	})
 }
 
 // accountAlreadyOpen performs the impure read behind the DDD-18 courtesy
@@ -224,52 +257,20 @@ func (l *Ledger) accountAlreadyOpen(ctx context.Context, uow ports.UnitOfWork, a
 
 // GetBalance reads one account's stored balance.
 func (l *Ledger) GetBalance(ctx context.Context, accountID string) (domain.Account, error) {
-	uow, err := l.store.Begin(ctx)
-	if err != nil {
-		return domain.Account{}, fmt.Errorf("reading balance for %q: %w", accountID, err)
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_ = uow.Rollback(ctx)
-		}
-	}()
-
-	account, err := uow.Accounts().Get(ctx, accountID)
-	if err != nil {
-		return domain.Account{}, err
-	}
-	if err := uow.Commit(ctx); err != nil {
-		return domain.Account{}, fmt.Errorf("reading balance for %q: %w", accountID, err)
-	}
-	committed = true
-	return account, nil
+	return withUnitOfWork(ctx, l.store, fmt.Sprintf("reading balance for %q", accountID),
+		func(uow ports.UnitOfWork) (domain.Account, error) {
+			return uow.Accounts().Get(ctx, accountID)
+		})
 }
 
 // GetEntries reads one account's ordered history. Ordering is by recorded
 // instant then by sequence, so two entries sharing a clock tick still read in a
 // settled order (US-5).
 func (l *Ledger) GetEntries(ctx context.Context, accountID string) ([]domain.Entry, error) {
-	uow, err := l.store.Begin(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("reading entries for %q: %w", accountID, err)
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_ = uow.Rollback(ctx)
-		}
-	}()
-
-	entries, err := uow.Transactions().EntriesFor(ctx, accountID)
-	if err != nil {
-		return nil, err
-	}
-	if err := uow.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("reading entries for %q: %w", accountID, err)
-	}
-	committed = true
-	return entries, nil
+	return withUnitOfWork(ctx, l.store, fmt.Sprintf("reading entries for %q", accountID),
+		func(uow ports.UnitOfWork) ([]domain.Entry, error) {
+			return uow.Transactions().EntriesFor(ctx, accountID)
+		})
 }
 
 // VerifyBooks answers the operator's one question by full scan (D9): sum every

@@ -9,9 +9,10 @@
 // transactions and nothing in the type system would object — which is exactly
 // the class of bug DDD-6's lock-ordering rule exists to prevent.
 //
-// SCAFFOLD: true — created by DISTILL for Mandate 7 RED-readiness. The
-// declarations are the contract DELIVER implements; there are no bodies here to
-// panic, which is correct: an interface has nothing to leave unimplemented.
+// Every port declared here is implemented for real: internal/adapters/postgres
+// backs Store/UnitOfWork/AccountRepository/TransactionRepository/
+// IdempotencyStore, and internal/app wires Clock/IDGenerator. There are no
+// scaffold bodies left in this file.
 package ports
 
 import (

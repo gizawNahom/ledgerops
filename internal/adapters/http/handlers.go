@@ -288,7 +288,7 @@ func trialBalanceHandler(store ports.Store) http.HandlerFunc {
 		ctx := r.Context()
 		uow, err := store.Begin(ctx)
 		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "internal_error"})
+			writeRefusal(w, http.StatusInternalServerError, "internal_error", nil)
 			return
 		}
 		committed := false
@@ -300,11 +300,11 @@ func trialBalanceHandler(store ports.Store) http.HandlerFunc {
 
 		total, count, err := uow.Transactions().TrialBalance(ctx)
 		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "internal_error"})
+			writeRefusal(w, http.StatusInternalServerError, "internal_error", nil)
 			return
 		}
 		if err := uow.Commit(ctx); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "internal_error"})
+			writeRefusal(w, http.StatusInternalServerError, "internal_error", nil)
 			return
 		}
 		committed = true

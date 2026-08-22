@@ -171,6 +171,19 @@ func (r transactionRepository) ComputedBalances(ctx context.Context) (map[string
 	return balances, nil
 }
 
+// entryFromRow builds one domain.Entry from the six columns both scanEntries
+// and scanAccountEntries read off `entries`. The two queries fix a different
+// column (transaction_id vs account_id) and scan the other, but the
+// construction from there — Money, then Entry — was identical in both; this
+// is the one place that construction happens.
+func entryFromRow(transactionID, accountID, counterparty, currency string, amountMinor, sequence int64, recordedAt time.Time) (domain.Entry, error) {
+	amount, err := domain.NewMoney(amountMinor, currency)
+	if err != nil {
+		return domain.Entry{}, err
+	}
+	return domain.NewEntry(transactionID, accountID, counterparty, amount, recordedAt, sequence)
+}
+
 func scanEntries(rows pgx.Rows, transactionID string) ([]domain.Entry, error) {
 	var entries []domain.Entry
 	for rows.Next() {
@@ -182,11 +195,7 @@ func scanEntries(rows pgx.Rows, transactionID string) ([]domain.Entry, error) {
 		if err := rows.Scan(&accountID, &counterparty, &amountMinor, &currency, &recordedAt, &sequence); err != nil {
 			return nil, fmt.Errorf("reading an entry for transaction %q: %w", transactionID, err)
 		}
-		amount, err := domain.NewMoney(amountMinor, currency)
-		if err != nil {
-			return nil, err
-		}
-		entry, err := domain.NewEntry(transactionID, accountID, counterparty, amount, recordedAt, sequence)
+		entry, err := entryFromRow(transactionID, accountID, counterparty, currency, amountMinor, sequence, recordedAt)
 		if err != nil {
 			return nil, err
 		}
@@ -209,11 +218,7 @@ func scanAccountEntries(rows pgx.Rows, accountID string) ([]domain.Entry, error)
 		if err := rows.Scan(&transactionID, &counterparty, &amountMinor, &currency, &recordedAt, &sequence); err != nil {
 			return nil, fmt.Errorf("reading an entry for account %q: %w", accountID, err)
 		}
-		amount, err := domain.NewMoney(amountMinor, currency)
-		if err != nil {
-			return nil, err
-		}
-		entry, err := domain.NewEntry(transactionID, accountID, counterparty, amount, recordedAt, sequence)
+		entry, err := entryFromRow(transactionID, accountID, counterparty, currency, amountMinor, sequence, recordedAt)
 		if err != nil {
 			return nil, err
 		}

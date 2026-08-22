@@ -16,18 +16,8 @@ func TestStore_Begin_ThreeRepositoriesShareOneTransaction(t *testing.T) {
 	ctx := context.Background()
 
 	uow := beginUOW(t, store)
-	balance, err := domain.NewMoney(1000, "USD")
-	if err != nil {
-		t.Fatalf("NewMoney: %v", err)
-	}
-	account, err := domain.NewAccount("wallet-shared", domain.Wallet, balance)
-	if err != nil {
-		t.Fatalf("NewAccount: %v", err)
-	}
 	// Written through Accounts()...
-	if err := uow.Accounts().Create(ctx, account); err != nil {
-		t.Fatalf("Create: %v", err)
-	}
+	seedAccount(t, ctx, uow, "wallet-shared", domain.Wallet, 1000)
 	// ...read back through a second call to Accounts() on the SAME uow,
 	// before commit — only possible if both share one transaction handle.
 	got, err := uow.Accounts().Get(ctx, "wallet-shared")
@@ -60,23 +50,13 @@ func TestStore_Begin_UncommittedWorkIsInvisibleAfterRollback(t *testing.T) {
 	ctx := context.Background()
 
 	uow := beginUOW(t, store)
-	balance, err := domain.NewMoney(1, "USD")
-	if err != nil {
-		t.Fatalf("NewMoney: %v", err)
-	}
-	account, err := domain.NewAccount("wallet-never-committed", domain.Wallet, balance)
-	if err != nil {
-		t.Fatalf("NewAccount: %v", err)
-	}
-	if err := uow.Accounts().Create(ctx, account); err != nil {
-		t.Fatalf("Create: %v", err)
-	}
+	seedAccount(t, ctx, uow, "wallet-never-committed", domain.Wallet, 1)
 	if err := uow.Rollback(ctx); err != nil {
 		t.Fatalf("Rollback: %v", err)
 	}
 
 	verifyUOW := beginUOW(t, store)
-	_, err = verifyUOW.Accounts().Get(ctx, "wallet-never-committed")
+	_, err := verifyUOW.Accounts().Get(ctx, "wallet-never-committed")
 	_ = verifyUOW.Rollback(ctx)
 
 	var violation domain.Violation
