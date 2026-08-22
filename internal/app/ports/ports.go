@@ -16,6 +16,7 @@ package ports
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"ledgerops/internal/domain"
@@ -78,6 +79,14 @@ type IdempotencyStore interface {
 	Claim(ctx context.Context, key string, fingerprint string, transactionID string) (Claim, error)
 	Lookup(ctx context.Context, key string) (Claim, bool, error)
 }
+
+// ErrIdempotencyKeyClaimConflict marks a Claim call that lost a race: another
+// concurrent request's Claim for the same key committed first. The unique
+// constraint on the key (I7) is what makes this detectable rather than a
+// silent double-write. The caller must abandon whatever this attempt wrote —
+// never commit it — and re-resolve the key, exactly as a same-key retry
+// arriving after the winner's commit would (ADR-005).
+var ErrIdempotencyKeyClaimConflict = errors.New("idempotency key claimed concurrently by another request")
 
 // Claim is what an idempotency record holds. There is no cached response body:
 // replays re-render from the stored transaction (ADR-005), so a later change to

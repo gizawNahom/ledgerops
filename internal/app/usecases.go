@@ -137,6 +137,18 @@ func (l *Ledger) PostTransfer(ctx context.Context, cmd TransferRequest) (Result,
 		return Result{}, fmt.Errorf("applying balance deltas for transaction %q: %w", transactionID, err)
 	}
 	if _, err := uow.Idempotency().Claim(ctx, cmd.IdempotencyKey, cmd.Fingerprint, transactionID); err != nil {
+		if errors.Is(err, ports.ErrIdempotencyKeyClaimConflict) {
+			// Lost the race: another concurrent submission of this key
+			// committed first. This attempt's transaction and entries were
+			// never committed and are discarded by the deferred rollback
+			// above (committed stays false) — nothing this attempt wrote
+			// is ever visible. Re-resolving from the top re-runs the
+			// Lookup/replay-or-conflict check above, which is now
+			// guaranteed to find the winner's committed claim (I7), and
+			// answers exactly as a same-key retry arriving after the
+			// winner would.
+			return l.PostTransfer(ctx, cmd)
+		}
 		return Result{}, fmt.Errorf("claiming idempotency key for transaction %q: %w", transactionID, err)
 	}
 

@@ -14,8 +14,10 @@
 // AttemptOutOfBandChange is real as of step 02-04: it enforces D7 twice
 // over, same as migration 0's own SQL, by attempting the out-of-band change
 // through a fresh connection under the given role's credentials.
-// CountEntryPairsForKey and CountNegativeWalletObservations remain RED
-// scaffolds — they land with the corruption harness later.
+// CountNegativeWalletObservations is real as of step 02-04's corruption
+// harness. CountEntryPairsForKey is real as of step 04-03: it resolves a
+// claimed key's transaction id and halves the entry count recorded against
+// it.
 package postgres
 
 import (
@@ -415,8 +417,29 @@ func InterruptPostingMidWrite(ctx context.Context, appDSN, from, to string, amou
 // key. Asserted alongside the distinct transaction count because the id check
 // alone would miss a double write that happens to render the same id
 // (kpi-contracts.yaml, KPI-3).
+//
+// It resolves the key's claimed transaction id (idempotency_keys, migration
+// 0002) and counts the entries recorded against that transaction, halved: a
+// posting always writes exactly two legs (DDD-8), so entry count / 2 is the
+// pair count. A key that was never claimed resolves the subquery to no row,
+// which makes the outer WHERE compare against NULL and count zero — the
+// correct answer for "no transaction exists under that key yet".
 func CountEntryPairsForKey(ctx context.Context, appDSN, key string) (int, error) {
-	return 0, fmt.Errorf("postgres.CountEntryPairsForKey not yet implemented -- RED scaffold")
+	conn, err := pgx.Connect(ctx, appDSN)
+	if err != nil {
+		return 0, fmt.Errorf("connecting to count entry pairs for key %q: %w", key, err)
+	}
+	defer conn.Close(context.Background())
+
+	var entryCount int
+	if err := conn.QueryRow(ctx,
+		`SELECT count(*) FROM entries
+		 WHERE transaction_id = (SELECT transaction_id FROM idempotency_keys WHERE key = $1)`,
+		key,
+	).Scan(&entryCount); err != nil {
+		return 0, fmt.Errorf("counting entry pairs for key %q: %w", key, err)
+	}
+	return entryCount / 2, nil
 }
 
 // CountNegativeWalletObservations reports how many wallet accounts carry a

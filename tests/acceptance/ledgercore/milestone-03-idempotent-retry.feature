@@ -87,7 +87,7 @@ Feature: Retry safely
     And the balance of "alice" reads 50.00
     And every account's balance equals the sum of its own entries
 
-  @pending @env-contended @kpi-3 @contract-shape:bounded-change
+  @env-contended @kpi-3 @contract-shape:bounded-change
   Scenario: Fifty simultaneous submissions of one key move value once
     When 50 integrators submit the same 50.00 transfer from "alice" to "bob" under key "k-1" at the same moment
     Then exactly 1 transaction was recorded for that key
