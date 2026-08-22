@@ -338,3 +338,54 @@ strategy). Observability: `slog` JSON logs + Prometheus exposition at
 console SPA need their own DELIVER pass against the slice briefs now at
 `docs/architecture/ledger-core/slices/slice-04-*.md` and `slice-05-*.md`,
 which already carry full acceptance criteria and dependency notes.
+
+---
+
+## Retrospective — two recurring patterns worth naming
+
+This run was not clean: several steps required escalation or re-dispatch
+before landing. Neither pattern below is a defect in the delivered code —
+both are process observations worth carrying into the next DELIVER run on
+this project.
+
+**Pattern 1 — test-harness gaps kept surfacing outside the implementing
+crafter's file scope.** Steps 02-03, 02-04 (three times), and 04-03 each
+found a genuine bug in `tests/acceptance/ledgercore/` support code
+(`ledger_world.go`, `ledger_observations.go`, `ledger_assertions.go`,
+`ledger_seeding.go`) while implementing production code against it — a
+missing `Background` fixture line, a Clock/IDGenerator wiring bug, an
+id-fixture collision, an authentication read-back bug, an assertion helper
+that only worked for one scenario shape. Five Whys: the crafter found the
+bug → because the acceptance test failed for a reason unrelated to the
+production code it was implementing → because the test harness was authored
+once, upfront, during DISTILL, before any of these scenarios had ever
+actually executed against real production code → because DISTILL activates
+scenarios by removing `@pending` one at a time and most of the suite's Given
+clauses never reached their Then clause until DELIVER exercised them for
+real (recorded in `feature-delta.md`'s own DISTILL section: "5 of 53 reach
+their Then... the other 48 stop in a Given") → because Mandate 1 (seed
+through real driving ports, not backdoors) makes early scenarios structurally
+unable to prove later scenarios' harness code correct. This is arguably
+inherent to one-scenario-at-a-time DELIVER discipline, not a fixable defect
+in either wave's process — but the ESCALATION discipline (crafter declines
+to touch harness code outside its `files_to_modify`, routes to
+`nw-acceptance-designer` instead of silently patching or weakening an
+assertion) held every time and is worth keeping as a hard rule, not
+softening it to let crafters "just fix the test."
+
+**Pattern 2 — several dispatched agents hit API timeouts or connection
+drops mid-task**, most often after completing the real work but before
+logging DES phases or committing. In each case the orchestrator verified the
+actual repository state independently (build, full test suite, git log)
+before either finishing the commit/logging itself or re-dispatching a
+narrower continuation, rather than trusting the interrupted agent's partial
+self-report. Five Whys: the agent got cut off → because some steps in this
+run (02-04 especially) required 5+ rounds of investigation, fix, and
+re-verification, pushing individual dispatches past what a single API call
+window reliably completes → because the underlying bugs were genuinely
+subtle (a timezone-rendering bug, a fixture-collision bug) and took real
+back-and-forth to isolate → no deeper cause found; this reads as ordinary
+variance in task size versus timeout budget, not a process defect. The
+mitigation that worked: never trust a report the harness flags as
+early-terminated without independently re-verifying git state and test
+results before proceeding.
