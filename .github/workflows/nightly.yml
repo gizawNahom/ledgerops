@@ -1,0 +1,76 @@
+name: Nightly
+
+# Scheduled, non-blocking reporting jobs (OPS-9). None of these gate a push
+# or PR — that is what ci.yml is for. No `deploy` job exists here: there is
+# nowhere to deploy (OPS-1); a stub no-op deploy job would be worse than its
+# absence.
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  # CLAUDE.md § Mutation Testing Strategy: nightly-delta, scoped to Go files
+  # changed in the last 24h, reported not blocking. No mutation testing tool
+  # is vendored in this repo yet (checked at step 05-03: go.mod/go.sum carry
+  # no mutation tool) — this job exists with the right trigger and scope,
+  # and reports that gap honestly rather than failing or faking a result.
+  mutation-delta:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Identify Go files changed in the last 24h
+        run: |
+          git log --since="24 hours ago" --name-only --pretty=format: -- '*.go' \
+            | sort -u > changed-go-files.txt || true
+          echo "Go files changed in the last 24h:"
+          cat changed-go-files.txt
+      - name: Report mutation-delta status (placeholder, OPS-9)
+        run: |
+          echo "::notice title=mutation-delta::nightly-delta mutation testing is not yet wired — no mutation testing tool is vendored in go.mod. This job reports scope (files changed in the last 24h) only, and is intentionally non-blocking."
+
+  # KPI-6: cycle time between slice-NN-shipped tags. Reported, not blocking.
+  slice-cycle-time:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Report slice cycle time (KPI-6)
+        run: |
+          TAGS="$(git tag -l 'slice-*-shipped' | sort -V)"
+          if [ -z "$TAGS" ]; then
+            echo "::notice title=slice-cycle-time::no slice-NN-shipped tags found"
+          else
+            echo "slice-NN-shipped tags found:"
+            echo "$TAGS"
+            echo "$TAGS" | while read -r tag; do
+              git log -1 --format='%H %cI' "$tag"
+            done
+          fi
+
+  # KPI-5, honest cold reading: same demo-01..03 + chaos-01 sequence as
+  # ci.yml's `demo` job, but with the Docker layer cache disabled so
+  # demo_first_green_seconds reflects a genuinely cold build, not a
+  # runner-cache-warmed one. Reported, not blocking.
+  demo-cold:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Disable Docker layer cache
+        run: docker builder prune -af
+      - name: Run demo-01..03 and chaos-01 cold (KPI-5)
+        run: |
+          START=$(date +%s)
+          make demo-01 demo-02 demo-03 chaos-01
+          END=$(date +%s)
+          DURATION=$((END - START))
+          echo "::notice title=KPI-5 (cold)::demo_first_green_seconds=${DURATION}"
+      - name: Tear down compose stack
+        if: always()
+        run: docker compose down -v

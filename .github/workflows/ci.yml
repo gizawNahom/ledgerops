@@ -1,0 +1,170 @@
+name: CI
+
+# Trunk-based development (see docs/feature/ledger-core/feature-delta.md §
+# CI/CD pipeline outline): the full gate suite runs on every push to every
+# branch, not just main, because main is expected to always be releasable.
+# pull_request is included too so PR checks surface the same gates before
+# merge.
+on:
+  push:
+  pull_request:
+
+env:
+  GO_VERSION_FILE: go.mod
+
+jobs:
+  # --- commit-stage gates, no database, run in parallel from the start -----
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ env.GO_VERSION_FILE }}
+          cache: true
+      - name: gofmt (must report no files)
+        run: |
+          UNFORMATTED="$(gofmt -l .)"
+          if [ -n "$UNFORMATTED" ]; then
+            echo "The following files are not gofmt-formatted:"
+            echo "$UNFORMATTED"
+            exit 1
+          fi
+      - name: go vet
+        run: go vet ./...
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ env.GO_VERSION_FILE }}
+          cache: true
+      - name: go build
+        run: go build ./...
+
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ env.GO_VERSION_FILE }}
+          cache: true
+      # No PostgreSQL service here by design: internal/domain and
+      # internal/app carry no Testcontainers dependency (verified by import
+      # inspection against ledgerops/internal/{domain,app}/... at step
+      # 05-03) — PostTransfer's orchestration is proven here over fakes
+      # (see internal/app/fakes_test.go); the real repositories are proven
+      # for real in the `integration` job below.
+      - name: go test -race (domain + app)
+        run: go test ./internal/domain/... ./internal/app/... -race
+
+  property:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ env.GO_VERSION_FILE }}
+          cache: true
+      # pgregory.net/rapid PBT suite, amplified past the unit job's default
+      # check count. rapid prints its seed and a reproduction command to
+      # stdout on failure (`-rapid.seed=...`); that log is captured and
+      # uploaded as an artifact so a failure is reproducible without rerunning
+      # CI.
+      - name: Run property-based tests (>=1000 checks)
+        run: |
+          set -o pipefail
+          go test ./internal/domain/... ./internal/app/... -race -rapid.checks=1000 -v 2>&1 | tee property-test-output.log
+      - name: Upload property test log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: property-test-failure-log
+          path: property-test-output.log
+
+  # --- database-backed gates, fan out after build ---------------------------
+
+  integration:
+    needs: [lint, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ env.GO_VERSION_FILE }}
+          cache: true
+      # Testcontainers (OPS-11) brings up PostgreSQL 16 itself per test and
+      # migrates it from zero — the docker daemon that ubuntu-latest ships
+      # pre-installed is all this job needs, no services: block required.
+      - name: go test -race (adapters/postgres)
+        run: go test ./internal/adapters/postgres/... -race
+
+  append-only-proof:
+    needs: [integration]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ env.GO_VERSION_FILE }}
+          cache: true
+      # @append-only scenarios in integration-checkpoints.feature: proves
+      # UPDATE/DELETE on entries as ledgerops_app is refused, both by revoked
+      # privilege and by the trigger (D7/OPS-10). Each scenario brings up its
+      # own Testcontainers PostgreSQL.
+      - name: Run @append-only acceptance scenarios
+        env:
+          LEDGEROPS_AT_TAGS: "@append-only"
+        run: go test ./tests/acceptance/ledgercore/...
+
+  invariant-gates:
+    needs: [integration]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ env.GO_VERSION_FILE }}
+          cache: true
+      # This run's scope only (step 05-03): race-02 proves I4 (no wallet
+      # balance ever observed below zero) and race-03 proves I7 (idempotent
+      # submissions collapse onto one transaction) against the real
+      # docker-compose stack. corrupt-04 and any trial-balance check are
+      # slice-04 — deliberately NOT included here.
+      - name: make race-02 (KPI-2, I4 under contention)
+        run: make race-02
+      - name: make race-03 (KPI-3, I7 under contention)
+        run: make race-03
+      - name: Tear down compose stack
+        if: always()
+        run: docker compose down -v
+
+  demo:
+    needs: [build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # No setup-go step: demo-01..03 and chaos-01 drive the app only over
+      # its HTTP port via curl; the app binary itself is built inside the
+      # Dockerfile's own build stage as part of `make up`.
+      - name: Run demo-01..03 and chaos-01 from a clean checkout (KPI-5)
+        id: demo
+        run: |
+          START=$(date +%s)
+          make demo-01 demo-02 demo-03 chaos-01
+          END=$(date +%s)
+          DURATION=$((END - START))
+          echo "demo_first_green_seconds=${DURATION}" >> "$GITHUB_OUTPUT"
+          echo "demo_first_green_seconds=${DURATION}" >> "$GITHUB_ENV"
+          echo "::notice title=KPI-5::demo_first_green_seconds=${DURATION}"
+      - name: Tear down compose stack
+        if: always()
+        run: docker compose down -v
