@@ -7,9 +7,10 @@ Three were resolved by user ruling before any scenario was written (DDR-1..3
 below); two more were raised while writing them (U-1, U-2). All five are now
 closed — each upstream edit was made only after the owning wave's reviewer
 confirmed the finding and directed the change. Two further findings came out of
-the review cycle itself and are recorded at the end: R-1 (closed) and **R-2,
-which is OPEN** — a HIGH reviewer condition the user chose on 2026-08-19 to
-record and defer rather than implement before DELIVER.
+the review cycle itself and are recorded at the end: R-1 (closed) and **R-2**
+— a HIGH reviewer condition the user chose on 2026-08-19 to record and defer
+rather than implement before DELIVER. **R-2 closed 2026-08-21 at DELIVER step
+05-04**, per its own entry below.
 
 ---
 
@@ -155,6 +156,18 @@ items and none of them is the contract-shape tag. Adding it there would have
 caught this before review. That is a framework fix, not a project one.
 
 ### R-2 — no HTTP status code is asserted anywhere in the suite
+
+**Status: CLOSED 2026-08-21, DELIVER step 05-04.** `Answer` gained a
+`Status int` field; `decodeAnswer` now captures `response.StatusCode`
+instead of discarding it; `ledger_assertions.go`'s `statusFor(RefusalKind)`
+transcribes ADR-008's status table verbatim across all nine sealed members
+and is wired into the refusal/accept/replay assertions exactly as the
+reviewer's recommended fix shape below describes — folded into existing
+assertions, zero `.feature` changes, zero new step decorators. DDR-3 (replay
+answers 200) is now asserted. Verified: all 49 acceptance scenarios stayed
+green when the assertion was added, meaning production had been built
+correctly against ADR-008 throughout DELIVER — the gap was in test coverage
+only, not in behavior.
 
 **Raised by**: `@nw-acceptance-designer-reviewer` (CONDITIONALLY_APPROVED, one
 HIGH condition) against the three scenarios added when C2b and C6a closed.

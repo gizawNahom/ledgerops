@@ -160,15 +160,14 @@ keeps the HTTP adapter from inventing its own error vocabulary. The cost is that
 exhaustiveness is not compiler-checked — a linter over the switch sites is the
 compensating control, and belongs to DEVOPS.
 
-**Status: OUTSTANDING, not discharged.** This sentence previously read
-"**Discharged**: `golangci-lint` runs the `exhaustive` linter in CI job 1,
-required on every push." That was and is false. CI job 1 is a DEVOPS *design*
-(`feature-delta.md` § CI/CD pipeline outline); no `.github/workflows/` and no
-`.golangci.*` exist in this repository, verified 2026-08-19. Nothing runs. The
-claim is corrected here rather than left standing because DDD-12's sealing has
-no compiler enforcement behind it — this linter is the entire mechanism, and a
-compensating control believed to be in place is worse than one known to be
-missing.
+**Status: DISCHARGED, verified 2026-08-22.** This sentence twice read
+"OUTSTANDING, not discharged" and, before that, a false "Discharged" claim
+corrected on 2026-08-19 when neither `.github/workflows/` nor `.golangci.*`
+existed. Both now exist and were built in DELIVER: `.golangci.yml` (step
+05-02) enables `exhaustive` over both named surfaces, and
+`.github/workflows/ci.yml` (step 05-03) runs `golangci-lint` in the `lint`
+job, required on every push per trunk-based branch protection. The
+compensating control DDD-12 depends on is in place, not merely designed.
 
 **The obligation, stated so DEVOPS inherits a requirement rather than a
 discovery.** `golangci-lint` must run the `exhaustive` linter over **two**
