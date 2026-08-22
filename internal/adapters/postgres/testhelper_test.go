@@ -32,7 +32,17 @@ func migratedStore(t *testing.T) ports.Store {
 		tcpostgres.WithUsername("ledgerops_migrate"),
 		tcpostgres.WithPassword("migrate-secret"),
 		testcontainers.WithWaitStrategy(
-			wait.ForListeningPort("5432/tcp").WithStartupTimeout(90*time.Second),
+			// Postgres's official image restarts itself once internally after
+			// initdb; the port is briefly listening during that first phase
+			// too, so a port-only wait can return "ready" in the narrow window
+			// right before the restart and hand back a connection the restart
+			// then resets. Waiting for the ready-to-accept-connections log
+			// line TWICE (once per boot) is what the module's own default
+			// wait strategy does — pinning it explicitly here so the
+			// StartupTimeout override doesn't silently drop that protection.
+			wait.ForLog("database system is ready to accept connections").
+				WithOccurrence(2).
+				WithStartupTimeout(90*time.Second),
 		),
 	)
 	if err != nil {
