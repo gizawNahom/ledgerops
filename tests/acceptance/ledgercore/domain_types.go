@@ -332,6 +332,7 @@ type Leg struct {
 // observable the acceptance scenarios assert on — never an internal struct.
 type Answer struct {
 	Outcome       Outcome
+	Status        int
 	TransactionID string
 	Legs          []Leg
 	Refusal       RefusalKind

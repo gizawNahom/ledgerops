@@ -20,13 +20,47 @@ import (
 
 // --- how a submission was answered ----------------------------------------
 
+// statusFor is a verbatim transcription of ADR-008's status table — the
+// authoritative mapping from a refusal to the HTTP status the adapter answers
+// with. It is a complete switch over the sealed RefusalKind set (DDD-17), not
+// a fallback-with-default: an unmapped kind is a test-authoring error that
+// must be loud, not a silent 0.
+func statusFor(kind RefusalKind) int {
+	switch kind {
+	case MalformedRequest:
+		return 400
+	case MissingKey:
+		return 400
+	case Unidentified:
+		return 401
+	case UnknownAccount:
+		return 404
+	case AccountAlreadyExists:
+		return 409
+	case KeyConflict:
+		return 409
+	case InvalidAmount:
+		return 422
+	case InsufficientFunds:
+		return 422
+	case CurrencyMismatch:
+		return 422
+	default:
+		panic(fmt.Sprintf("statusFor: %q is not a member of the sealed RefusalKind taxonomy — see ADR-008", kind))
+	}
+}
+
 // ThenTheTransferIsAccepted asserts the last submission posted.
 func (l *Ledger) ThenTheTransferIsAccepted() error {
-	if l.lastAnswer.Outcome == Accepted {
-		return nil
+	if l.lastAnswer.Outcome != Accepted {
+		return fmt.Errorf("expected the transfer to be accepted, but it was %s (answer: %s)",
+			l.lastAnswer.Outcome, l.lastAnswer.Raw)
 	}
-	return fmt.Errorf("expected the transfer to be accepted, but it was %s (answer: %s)",
-		l.lastAnswer.Outcome, l.lastAnswer.Raw)
+	if l.lastAnswer.Status != 201 {
+		return fmt.Errorf("expected status 201 for an accepted transfer, got %d (answer: %s)",
+			l.lastAnswer.Status, l.lastAnswer.Raw)
+	}
+	return nil
 }
 
 // ThenTheAccountIsCreated asserts the last account submission was accepted.
@@ -45,6 +79,10 @@ func (l *Ledger) ThenItIsRefusedAs(kind RefusalKind) error {
 	if l.lastAnswer.Refusal != kind {
 		return fmt.Errorf("expected a refusal for %s, got %s (answer: %s)",
 			kind, l.lastAnswer.Refusal, l.lastAnswer.Raw)
+	}
+	if want := statusFor(kind); l.lastAnswer.Status != want {
+		return fmt.Errorf("expected status %d for a refusal of %s, got %d (answer: %s)",
+			want, kind, l.lastAnswer.Status, l.lastAnswer.Raw)
 	}
 	return nil
 }
@@ -72,12 +110,18 @@ func (l *Ledger) ThenTheRefusalStatesTheShortfall(available, requested Money) er
 }
 
 // ThenTheRepeatIsAnsweredAsAReplay asserts the retry was recognised as one.
+// The status assertion closes DDR-3: the replay-answers-200 ruling had zero
+// test coverage before this step.
 func (l *Ledger) ThenTheRepeatIsAnsweredAsAReplay() error {
-	if l.lastAnswer.Outcome == Replayed {
-		return nil
+	if l.lastAnswer.Outcome != Replayed {
+		return fmt.Errorf("expected the repeat to be answered as a replay, it was %s (answer: %s)",
+			l.lastAnswer.Outcome, l.lastAnswer.Raw)
 	}
-	return fmt.Errorf("expected the repeat to be answered as a replay, it was %s (answer: %s)",
-		l.lastAnswer.Outcome, l.lastAnswer.Raw)
+	if l.lastAnswer.Status != 200 {
+		return fmt.Errorf("expected status 200 for a replay (DDR-3), got %d (answer: %s)",
+			l.lastAnswer.Status, l.lastAnswer.Raw)
+	}
+	return nil
 }
 
 // ThenBothAnswersNameTheSameTransaction asserts the retry did not create a

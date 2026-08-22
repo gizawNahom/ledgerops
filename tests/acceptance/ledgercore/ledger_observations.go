@@ -207,7 +207,7 @@ func (l *Ledger) readTrace(ctx context.Context, account AccountName) ([]TraceRow
 }
 
 func decodeAnswer(status int, raw []byte) Answer {
-	answer := Answer{Raw: string(raw)}
+	answer := Answer{Raw: string(raw), Status: status}
 	var payload struct {
 		TransactionID string `json:"transaction_id"`
 		Status        string `json:"status"`
