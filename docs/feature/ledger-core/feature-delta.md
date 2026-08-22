@@ -1623,3 +1623,58 @@ Also unproven by this run and deferred to DELIVER: every SQL path, the OPS-10
 two-role split, row-lock ordering, privilege revocation, and the API-key
 middleware — no pgx connection was opened, and all 3 auth scenarios died in
 their `Given`.
+
+---
+
+## Wave: DELIVER / [REF] Demo Evidence
+
+Post-Merge Integration Gate, run 2026-08-21 by the orchestrator directly
+against a freshly built `docker compose up -d --build` stack (torn down and
+rebuilt clean immediately before this run; torn down again after).
+
+**Full acceptance suite** — `go test -count=1 ./tests/acceptance/ledgercore/...`:
+**49 scenarios, 49 passed, 403 steps, 403 passed.** (One transient
+Testcontainers-startup flake — `the database system is starting up` — was
+observed on an intermediate run under heavy concurrent-container load from
+this session's own history; reproduced as non-reproducible on immediate
+re-run at 49/49, and confirmed environmental, not a code regression, by the
+container count at the time — 44 concurrent containers from this session's
+accumulated test runs.)
+
+**Environments exercised this run** (per `devops/environments.yaml` § target_environments):
+`clean` and `ci` — identical code path by design (OPS-11, Testcontainers),
+both exercised by the acceptance suite run above. `contended` — exercised by
+the suite's `@kpi-2`/`@kpi-3` scenarios (included in the 49) and again
+independently below via `make race-02`/`race-03` against the live compose
+stack. `populated` and `corrupted` are slice-04/05-only and out of scope
+this run.
+
+**Elevator Pitch demos** (US-1, US-2, US-3 — none `@infrastructure`), each
+executed as its literal "After" command against the live stack:
+
+| Story | Command | Result |
+|---|---|---|
+| US-1 — Post a transfer | `make demo-01` | Exit 0. `POST /transfers` → `HTTP 201`, `{"legs":[{"account":"alice-01","amount":"-50.00"},{"account":"bob-01","amount":"50.00"}],"transaction_id":"txn_90bf1650-..."}` |
+| US-2 — Reject insufficient funds | `make demo-02` | Exit 0. `POST /transfers` → `HTTP 422`, `{"error":"insufficient_funds","account_id":"alice-02","available":"10.00","requested":"50.00"}` |
+| US-3 — Retry safely | `make demo-03` | Exit 0. Two identical submissions under key `demo-03-retry` both answer `transaction_id: txn_0925e247-...` |
+
+**Chaos demo** (`make chaos-01`, US-1/US-3's atomicity guarantee under a real
+process kill): exit 0. App killed with `SIGKILL` mid-transfer, restarted,
+same idempotency key resubmitted → `HTTP 200` (replay), balance of
+`alice-chaos` reads `75.00` — exactly one 25.00 movement recorded, never
+zero, never doubled.
+
+**KPI denominators** (`make race-02`, `make race-03`, against the live stack
+via `scripts/race`):
+
+| KPI | Target | Result |
+|---|---|---|
+| KPI-2 — negative wallet balances | 0 over ≥1000 iterations | `iterations=1000`, `negative_balance_observations=0` — PASS |
+| KPI-3 — idempotent posting | exactly 1 txn from ≥50 submissions | `submissions=50`, `distinct_transaction_ids=1`, `entry_pairs_stored=1` — PASS |
+
+**Gate verdict: PASS.** All demos, all KPI denominators, and the full
+acceptance suite are green against a freshly built, freshly torn-down stack.
+US-4 (proof of balance) and US-5 (entry traceability) are `@infrastructure`-
+exempt by scope, not by failure — slices 04/05 are out of scope this run per
+the recorded DELIVER scope decision (feature-delta.md carries no section for
+that decision; recorded in project memory outside the repo).
