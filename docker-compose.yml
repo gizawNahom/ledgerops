@@ -1,0 +1,52 @@
+# Clean-clone demo stack (step 05-01): one ledgerops binary, one Postgres 16.
+#
+# Two-role setup per OPS-2/OPS-10: `migrate` runs the SQL in
+# internal/adapters/postgres/migrations against the privileged
+# `ledgerops_migrate` role and exits before `app` starts. The roles
+# themselves (including `ledgerops_app`) are created BY that SQL
+# (0001_init.up.sql), not by this file — compose only supplies the
+# already-provisioned migrate role via the postgres image's bootstrap env.
+# `app` then connects only as `ledgerops_app` (LEDGEROPS_APP_DSN), never as
+# the migrate role.
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ledgerops_migrate
+      POSTGRES_PASSWORD: migrate-secret
+      POSTGRES_DB: ledgerops
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ledgerops_migrate -d ledgerops"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+    ports:
+      - "5432:5432"
+
+  migrate:
+    image: migrate/migrate:v4.18.3
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./internal/adapters/postgres/migrations:/migrations:ro
+    command:
+      - "-path=/migrations"
+      - "-database=postgres://ledgerops_migrate:migrate-secret@postgres:5432/ledgerops?sslmode=disable"
+      - "up"
+    restart: "no"
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      LEDGEROPS_APP_DSN: postgres://ledgerops_app:app-secret@postgres:5432/ledgerops?sslmode=disable
+      LEDGEROPS_OPERATOR_KEY: demo-operator-key
+      LEDGEROPS_ADDR: ":8080"
+    ports:
+      - "8080:8080"
+    restart: "no"
