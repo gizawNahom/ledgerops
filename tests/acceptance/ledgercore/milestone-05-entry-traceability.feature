@@ -41,14 +41,14 @@ Feature: Trace a balance to its entries
     Then each row carries a running balance
     And the running balance on the last row reads the stored balance of "alice"
 
-  @pending @env-populated @contract-shape:unbounded-preservation
+  @env-populated @contract-shape:unbounded-preservation
   Scenario: Each movement is legible without cross-referencing anything
     Given a wallet account "alice" with 5 movements recorded against it
     When the operator traces "alice"
     Then every row names its transaction, its counterparty account, its amount, and when it happened
     And no row names "alice" as its own counterparty
 
-  @pending @env-populated @contract-shape:unbounded-preservation
+  @env-populated @contract-shape:unbounded-preservation
   Scenario: Two movements in the same instant still read in a settled order
     Given two movements against "alice" recorded at the very same instant
     When the operator traces "alice"
@@ -72,13 +72,13 @@ Feature: Trace a balance to its entries
     Then the entries of "alice" are returned
     And the running balance on the last row disagrees with the stored balance of "alice" by 5.00
 
-  @pending @error @env-populated @contract-shape:unbounded-preservation
+  @error @env-populated @contract-shape:unbounded-preservation
   Scenario: Tracing an account nobody opened is refused
     When the operator traces "nobody"
     Then the trace is refused as an unknown account
     And the refusal names the account "nobody"
 
-  @pending @error @env-populated @contract-shape:unbounded-preservation
+  @error @env-populated @contract-shape:unbounded-preservation
   Scenario: An unidentified caller cannot trace an account
     Given a wallet account "alice" with 5 movements recorded against it
     And the caller presents no operator key

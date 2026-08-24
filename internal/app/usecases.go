@@ -280,9 +280,17 @@ type TracedEntry struct {
 // signed amount into a running balance. Ordering is by recorded instant then
 // by sequence, so two entries sharing a clock tick still read in a settled
 // order (US-5).
+//
+// The account must already be open: tracing "nobody" answers
+// domain.UnknownAccount naming the account, never a partial (or empty)
+// result — the same account_not_found/404 decision site already sealed for
+// POST /transfers and GET /accounts/{id} (ADR-008, DDD-17).
 func (l *Ledger) GetEntries(ctx context.Context, accountID string) ([]TracedEntry, error) {
 	entries, err := withUnitOfWork(ctx, l.store, fmt.Sprintf("reading entries for %q", accountID),
 		func(uow ports.UnitOfWork) ([]domain.Entry, error) {
+			if _, err := uow.Accounts().Get(ctx, accountID); err != nil {
+				return nil, err
+			}
 			return uow.Transactions().EntriesFor(ctx, accountID)
 		})
 	if err != nil {
