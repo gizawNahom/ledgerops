@@ -145,6 +145,10 @@ func (l *Ledger) readBooks(ctx context.Context, surface Surface) (BooksReport, e
 	if err != nil {
 		return BooksReport{}, err
 	}
+	if answer.Outcome == Refused {
+		l.lastAnswer = answer
+		return BooksReport{}, nil
+	}
 	var payload struct {
 		Verdict         string `json:"verdict"`
 		ImbalanceMinor  int64  `json:"imbalance_minor"`

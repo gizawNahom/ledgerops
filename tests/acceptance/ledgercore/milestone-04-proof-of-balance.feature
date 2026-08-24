@@ -95,14 +95,15 @@ Feature: Prove the books balance
     And "alice" is listed as drifted
     And "bob" is listed as drifted
 
-  @pending @env-corrupted @real-io @adapter-integration @contract-shape:unbounded-preservation
+  @env-corrupted @real-io @adapter-integration @contract-shape:unbounded-preservation
   Scenario: Tampering is only possible for a privileged operator, never for the service
     Given a ledger carrying 3 settled transfers
     When the service's own credentials attempt to alter a recorded entry
+    And the operator asks whether the books balance
     Then the alteration is refused by the store
     And the verdict still reads "Books balance: YES"
 
-  @pending @error @env-populated @contract-shape:unbounded-preservation
+  @error @env-populated @contract-shape:unbounded-preservation
   Scenario: An unidentified caller cannot ask whether the books balance
     Given a ledger carrying 3 settled transfers
     And the caller presents no operator key
