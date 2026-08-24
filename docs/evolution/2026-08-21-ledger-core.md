@@ -472,3 +472,169 @@ variance in task size versus timeout budget, not a process defect. The
 mitigation that worked: never trust a report the harness flags as
 early-terminated without independently re-verifying git state and test
 results before proceeding.
+
+---
+
+## Retrospective — second pass (2026-08-24)
+
+Second DELIVER pass (slices 04/05) was also not clean: 3 escalations, each a
+genuine test-infrastructure bug (`tests/acceptance/ledgercore/`), not
+production code. All three share one property Pattern 1 above did not: each
+was in a scenario that had sat `@pending` since DISTILL (2026-08-18/19) and
+was activated for the first time 5-6 days later, in this pass.
+
+**Branch A — `readBooks()` swallowed a `Refused` outcome**
+(`ledger_observations.go`).
+
+- WHY 1: the "unidentified caller" scenario asserted the wrong thing.
+  [Evidence: `lastAnswer` held stale state from an earlier step at assertion
+  time.]
+- WHY 2: `readBooks()` had no branch for a non-2xx response — it always tried
+  to unmarshal a `BooksReport`, so a 401 never reached `l.lastAnswer`.
+  [Evidence: `ledger_observations.go` pre-fix, no `answer.Outcome == Refused`
+  check, versus `readTrace()`, which has one.]
+- WHY 3: the fix pattern already existed in the same file, in `readTrace()`
+  (slice 05, built later in DISTILL) but was never retrofitted to `readBooks()`
+  (slice 04, built earlier). [Evidence: `readTrace()`'s `Refused` branch is
+  byte-for-byte the fix commit `33c6bc8` later added to `readBooks()`.]
+- WHY 4: nothing forced sibling driving-port readers authored at different
+  DISTILL milestones to converge on one shape. Each was authored
+  independently against its own milestone's scenarios, and no scenario for
+  `readBooks()` had a `Refused`-path assertion until this pass, so the
+  omission was invisible at authoring time.
+- WHY 5 / ROOT CAUSE A: DISTILL has no mechanism to detect that two structurally
+  parallel functions (both: call a driving port, branch on outcome, unmarshal
+  a report) have diverged in a way only exercised by an as-yet-`@pending`
+  scenario. The correctness gap was authored once and stayed invisible until
+  DELIVER activated the one scenario that needed the missing branch.
+
+**Branch B — missing `When` step**
+(`milestone-04-proof-of-balance.feature`, "Tampering is only possible for a
+privileged operator, never for the service").
+
+- WHY 1: the scenario asserted a verdict ("Books balance: YES") without ever
+  requesting one. [Evidence: pre-fix `Given`/`When`/`Then` in commit
+  `33c6bc8`'s diff has no `When the operator asks whether the books balance`
+  step; `Then` reads `l.lastReport`, which nothing populated.]
+- WHY 2: a straightforward DISTILL authoring omission — the author wrote the
+  tamper action as the sole `When` and forgot the scenario's actual question
+  (whether the books balance) needs its own step. [Evidence: sibling scenario
+  two lines below in the same feature file has the correct two-`When`
+  shape for the same "tamper, then ask" pattern.]
+- WHY 3: nothing caught it before DELIVER because the scenario carried
+  `@pending` from authoring (2026-08-18/19) straight through both roadmap
+  reviews (first-pass and this pass's phase 06-07, both
+  `nw-acceptance-designer-reviewer` APPROVED) to this pass's activation.
+  [Evidence: `docs/feature/ledger-core/deliver/roadmap.json` step 06-04
+  activates it; no earlier step touches this scenario.]
+- WHY 4: `@pending` scenarios are excluded from execution by definition, and
+  neither roadmap review nor any CI gate parses Gherkin semantically (step
+  sequencing, whether a `Then` has a matching prior `When`) — reviews check
+  scope, tagging, and coverage shape, not per-scenario step-graph validity.
+- WHY 5 / ROOT CAUSE B: no gate in this project's DISTILL→DELIVER handoff
+  executes or statically validates a `@pending` scenario's step graph before
+  DELIVER is the first thing to run it. A missing `When` is undetectable by
+  inspection at the volume of 21 `@pending` scenarios and is only caught by
+  running the scenario — which is precisely what `@pending` defers.
+
+**Branch C — tautological assertion** (`ThenTheDivergingRowIsTheAlteredOne`,
+`ledger_assertions.go`).
+
+- WHY 1: the assertion could not fail regardless of implementation
+  correctness. [Evidence: commit `64971d4`'s diff shows the pre-fix body
+  recomputed the running-balance fold from `l.lastTrace` (production's own
+  wire response) and compared that recomputation to itself — the same
+  `RunningBalance` field it just summed.]
+- WHY 2: the author wrote a self-consistency check (does the running balance
+  accumulate correctly across rows) instead of an independence check (does
+  the row the trace points to match the row that was actually tampered).
+  These read as the same kind of check at authoring time — both "fold and
+  compare" — but only one has an independent oracle.
+- WHY 3: nothing caught it before this pass because, like Branch B, the
+  scenario was `@pending` from DISTILL through two roadmap reviews. A
+  tautological assertion produces a passing test at every prior gate (there
+  was no test run to fail) and is syntactically indistinguishable from a
+  correct one — no linter or reviewer read of the Gherkin surfaces it,
+  because Gherkin does not show step-body internals.
+- WHY 4: the project's review gates (`nw-acceptance-designer-reviewer`) audit
+  scenario structure, tags, and business-language purity, not the Go
+  implementation of step-definition bodies — that code is DISTILL's own
+  deliverable but sits below the layer any wave review reads.
+- WHY 5 / ROOT CAUSE C: there is no independent-oracle check for assertion
+  helpers at authoring time. The taxonomy that would catch this (Testing
+  Theater patterns — assertion always passes) is checked by
+  `nw-software-crafter-reviewer` in DELIVER, but only over code the crafter
+  touches; `ledger_assertions.go` is acceptance-designer-owned test
+  infrastructure, out of a crafter's `files_to_modify`, so it fell into the
+  same enforcement gap as Branches A and B until DELIVER's own escalation
+  path (not a scheduled review) surfaced it by running the scenario.
+
+**CROSS-VALIDATION**
+
+- Root Cause A, B, C do not contradict; they are three independent instances
+  of the same structural gap stated three ways (missing-branch, missing-step,
+  self-referential-check), all in DISTILL-authored test infrastructure, all
+  invisible until DELIVER activation.
+- Backwards check: if root causes A/B/C exist as stated, would readBooks
+  swallow the refusal, would the scenario assert without a When, would the
+  drift-row check pass vacuously? Yes to each — each fix (commits `33c6bc8`,
+  `64971d4`) is the direct negation of its root cause and each scenario went
+  green immediately after its specific fix, with no other change required.
+- All three symptoms are explained: no gap remains unaccounted for.
+
+**Common thread, answered directly**: yes — there is a structural reason
+`@pending`-scenario correctness isn't verified until DELIVER activates it.
+`@pending` is this project's only mechanism for deferring scope (Pattern 1
+above already established this for test-harness *runtime* bugs found via
+`Given`-clause execution); this pass shows the same mechanism also defers
+*authoring-time* defects in both the `.feature` file itself (Branch B) and
+its step-definition Go code (Branches A, C), because nothing exercises either
+until the tag is removed. This is a property of this project's specific
+combination of "author test infrastructure once, upfront, in DISTILL" +
+"defer scope via `@pending`" — not necessarily a general nWave DISTILL→DELIVER
+property, since a project that ran authored-but-`@pending` scenarios against
+stub/fake production code at DISTILL time (rather than leaving driving ports
+at `501 __SCAFFOLD__`) would catch step-graph and tautology defects earlier,
+at the cost of building throwaway stubs. This project chose not to (DDD-1's
+ports return `__SCAFFOLD__` until DELIVER implements them for real), which is
+a reasonable DISTILL-scope decision on its own terms, but it is the specific
+choice that makes activation-time discovery structural here.
+
+**Escalate-and-fix pattern — sound, and confirms Pattern 1/2, does not reveal
+a new pattern.** All three followed the same shape Pattern 1 named: crafter
+declined to fix test infrastructure outside `files_to_modify` (production
+files only), escalated to `nw-acceptance-designer`, the orchestrator
+independently re-verified the diagnosis (reading the actual diff/behavior,
+not trusting the crafter's self-report) before dispatching the fix, and the
+crafter independently re-verified the fix (suite re-run, all green) before
+committing. [Evidence: commits `33c6bc8` and `64971d4` bundle diagnosis and
+fix together with `Step-Id`s traceable in the execution log, matching the
+02-04 resume-trace shape Pattern 1 documented from the first pass.] Zero
+false-positive "fixed" claims across all three — consistent with, not new
+information beyond, Pattern 2's independent-verification discipline. This
+reads as the discipline working as designed on a slightly larger sample (3
+of 3 this pass, versus 5 instances across 3 steps in the first pass) rather
+than luck: the mechanism that makes it non-luck is the same each time —
+verification is independent of the reporting agent, not dependent on the
+bug being easy to find.
+
+**Framework-improvement suggestion — matching the style of upstream-issues.md
+finding R-1's "Worth propagating" note**: a tautological assertion (Branch C)
+is mechanically detectable before DELIVER by static analysis of each
+step-definition body that both *produces* and *checks* a derived value from
+the same source field with no independent second source. Concretely: grep
+step-definition files under `tests/acceptance/**/*_assertions.go` for a
+function whose only inputs to its pass/fail comparison are (a) a field read
+from the same struct that (b) the function itself just folded/recomputed —
+i.e. no second, independently-populated struct field (like the
+`tamperedRow`/`tamperedBy` pair the fix introduced) appears anywhere in the
+function body. This is a narrower, single-purpose sibling to
+`grep -c "@pending"`: not a general Testing-Theater linter (that needs
+judgment), but a cheap check for the single shape "recomputes its own oracle"
+that is fully mechanical because it only needs to count distinct data sources
+per assertion function, not understand what they mean. Worth adding as a
+`nw-acceptance-designer` self-review checklist item (alongside the missing
+contract-shape-tag item R-1 already recommends adding there) — it would not
+have caught Branch A or B (those need actual execution, not static
+inspection), but it is a real, cheap, non-judgment-requiring check for the
+one root cause (C) that static inspection can reach.
