@@ -58,7 +58,7 @@ Feature: Prove the books balance
     Then both surfaces give the same verdict
     And both surfaces report the same trial balance
 
-  @pending @error @env-corrupted @kpi-4 @contract-shape:unbounded-preservation
+  @error @env-corrupted @kpi-4 @contract-shape:unbounded-preservation
   Scenario: A tampered entry turns the verdict red and names the account
     Given a ledger carrying 3 settled transfers
     And the recorded amount of one entry belonging to "alice" is altered by 5.00 out of band
@@ -67,7 +67,7 @@ Feature: Prove the books balance
     And "alice" is listed as drifted
     And the drift entry states the stored balance, the computed balance, and a delta of 5.00
 
-  @pending @error @env-corrupted @kpi-4 @contract-shape:unbounded-preservation
+  @error @env-corrupted @kpi-4 @contract-shape:unbounded-preservation
   Scenario: Healthy accounts are not swept up with the drifted one
     Given a ledger carrying 3 settled transfers
     And the recorded amount of one entry belonging to "alice" is altered by 5.00 out of band
@@ -75,7 +75,7 @@ Feature: Prove the books balance
     Then exactly 1 account is listed as drifted
     And "bob" is not listed as drifted
 
-  @pending @error @env-corrupted @kpi-4 @contract-shape:unbounded-preservation
+  @error @env-corrupted @kpi-4 @contract-shape:unbounded-preservation
   Scenario: A tampered stored balance is caught as readily as a tampered entry
     Given a ledger carrying 3 settled transfers
     And the stored balance of "bob" is altered by 7.00 out of band
