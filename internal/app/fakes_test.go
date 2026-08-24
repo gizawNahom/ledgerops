@@ -128,6 +128,21 @@ func (r fakeAccountRepository) Get(ctx context.Context, accountID string) (domai
 	return account, nil
 }
 
+// All enumerates every account, ordered by id — VerifyBooks' full-scan
+// contract (D9) is what this fake exists for.
+func (r fakeAccountRepository) All(ctx context.Context) ([]domain.Account, error) {
+	ids := make([]string, 0, len(r.store.accounts))
+	for id := range r.store.accounts {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	accounts := make([]domain.Account, 0, len(ids))
+	for _, id := range ids {
+		accounts = append(accounts, r.store.accounts[id])
+	}
+	return accounts, nil
+}
+
 type fakeTransactionRepository struct{ store *fakeStore }
 
 var _ ports.TransactionRepository = fakeTransactionRepository{}
@@ -159,13 +174,43 @@ func (r fakeTransactionRepository) EntriesFor(ctx context.Context, accountID str
 	return entries, nil
 }
 
+// TrialBalance sums every entry, matching the real repository's contract
+// (internal/adapters/postgres/transactions.go) closely enough for VerifyBooks'
+// orchestration to be exercised over this fake — an all-zero stand-in would
+// hide the very defect (a stored balance that disagrees with its entries)
+// VerifyBooks exists to catch.
 func (r fakeTransactionRepository) TrialBalance(ctx context.Context) (domain.Money, int, error) {
-	zero, _ := domain.NewMoney(0, "USD")
-	return zero, len(r.store.entries), nil
+	currency := "USD"
+	var sumMinor int64
+	for _, entry := range r.store.entries {
+		sumMinor += entry.Amount().MinorUnits()
+		currency = entry.Amount().Currency()
+	}
+	total, err := domain.NewMoney(sumMinor, currency)
+	if err != nil {
+		return domain.Money{}, 0, err
+	}
+	return total, len(r.store.entries), nil
 }
 
+// ComputedBalances derives every account's balance from its entries, grouped
+// by account — the other half of VerifyBooks' I3 comparison.
 func (r fakeTransactionRepository) ComputedBalances(ctx context.Context) (map[string]domain.Money, error) {
-	return nil, nil
+	sums := map[string]int64{}
+	currencies := map[string]string{}
+	for _, entry := range r.store.entries {
+		sums[entry.AccountID()] += entry.Amount().MinorUnits()
+		currencies[entry.AccountID()] = entry.Amount().Currency()
+	}
+	balances := make(map[string]domain.Money, len(sums))
+	for accountID, sum := range sums {
+		balance, err := domain.NewMoney(sum, currencies[accountID])
+		if err != nil {
+			return nil, err
+		}
+		balances[accountID] = balance
+	}
+	return balances, nil
 }
 
 type fakeIdempotencyStore struct{ store *fakeStore }

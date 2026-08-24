@@ -328,3 +328,60 @@ func TestGetBalance_UnknownAccountIsRefused(t *testing.T) {
 		t.Fatalf("expected account_not_found, got %v", err)
 	}
 }
+
+// TestProperty_VerifyBooks_AgreeingBalancesAreReportedHealthy covers
+// VerifyBooks' healthy-path invariant (step 06-01 TEST PARADIGM note): for
+// any set of accounts whose stored balances already equal what their own
+// entries sum to, the verdict is Balanced with no drifted rows — regardless
+// of how many accounts there are or what their balances happen to be.
+func TestProperty_VerifyBooks_AgreeingBalancesAreReportedHealthy(t *testing.T) {
+	rapid.Check(t, func(rt *rapid.T) {
+		accountCount := rapid.IntRange(0, 6).Draw(rt, "accountCount")
+
+		accounts := make([]domain.Account, 0, accountCount)
+		entries := make([]domain.Entry, 0, accountCount)
+		for i := 0; i < accountCount; i++ {
+			accountID := fmt.Sprintf("acct-%d", i)
+			balanceMinor := rapid.Int64Range(0, 1_000_000).Draw(rt, fmt.Sprintf("balance-%d", i))
+
+			balance, err := domain.NewMoney(balanceMinor, "USD")
+			if err != nil {
+				t.Fatalf("NewMoney rejected a known currency: %v", err)
+			}
+			account, err := domain.NewAccount(accountID, domain.Wallet, balance)
+			if err != nil {
+				t.Fatalf("NewAccount rejected a non-negative balance: %v", err)
+			}
+			accounts = append(accounts, account)
+
+			// One entry per account whose amount equals the stored balance is
+			// the smallest fixture that makes ComputedBalances agree with
+			// Get — the property does not care HOW an account arrived at its
+			// balance, only that the two independent representations (I3)
+			// currently agree.
+			entry, err := domain.NewEntry(fmt.Sprintf("txn-seed-%d", i), accountID, "seed", balance, fixedClock(), 1)
+			if err != nil {
+				t.Fatalf("NewEntry rejected a well-formed seed entry: %v", err)
+			}
+			entries = append(entries, entry)
+		}
+
+		store := newFakeStore(accounts...)
+		store.entries = entries
+		ledger := app.NewLedger(store, fixedClock, sequentialIDs())
+
+		report, err := ledger.VerifyBooks(context.Background())
+		if err != nil {
+			t.Fatalf("unexpected error verifying the books: %v", err)
+		}
+		if !report.Balanced {
+			t.Fatalf("Balanced = false for agreeing balances, Drifted = %+v", report.Drifted)
+		}
+		if len(report.Drifted) != 0 {
+			t.Fatalf("Drifted = %+v, want empty for agreeing balances", report.Drifted)
+		}
+		if report.EntryCount != len(entries) {
+			t.Fatalf("EntryCount = %d, want %d", report.EntryCount, len(entries))
+		}
+	})
+}

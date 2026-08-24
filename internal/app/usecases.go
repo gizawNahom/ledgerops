@@ -11,14 +11,16 @@
 // narrowly: it reads the ordered history straight through to the wire so a
 // posted transfer's two legs can be traced to one transaction id; the full
 // traceability contract (running balance, unknown-account refusal) is
-// milestone-05's job. VerifyBooks remains a RED scaffold — out of scope for
-// this step (slice 04).
+// milestone-05's job. VerifyBooks is real as of step 06-01, narrowly: the
+// healthy/empty verdict over a full scan (D9); the corruption-attribution
+// scenarios (06-02..06-04) are what exercise the Drifted rows in anger.
 package app
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"ledgerops/internal/app/ports"
 	"ledgerops/internal/domain"
@@ -282,7 +284,78 @@ func (l *Ledger) GetEntries(ctx context.Context, accountID string) ([]domain.Ent
 // rather than replace the full scan. ElapsedMillis exists so that degradation
 // is measured rather than guessed at.
 func (l *Ledger) VerifyBooks(ctx context.Context) (BooksReport, error) {
-	panic("Ledger.VerifyBooks not yet implemented -- RED scaffold")
+	started := time.Now()
+
+	report, err := withUnitOfWork(ctx, l.store, "verifying the books",
+		func(uow ports.UnitOfWork) (BooksReport, error) {
+			accounts, err := uow.Accounts().All(ctx)
+			if err != nil {
+				return BooksReport{}, fmt.Errorf("reading every account: %w", err)
+			}
+			computed, err := uow.Transactions().ComputedBalances(ctx)
+			if err != nil {
+				return BooksReport{}, fmt.Errorf("computing balances from entries: %w", err)
+			}
+			trialBalance, entryCount, err := uow.Transactions().TrialBalance(ctx)
+			if err != nil {
+				return BooksReport{}, fmt.Errorf("computing the trial balance: %w", err)
+			}
+
+			drifted, err := driftedAccounts(accounts, computed)
+			if err != nil {
+				return BooksReport{}, err
+			}
+
+			return BooksReport{
+				Balanced:     len(drifted) == 0,
+				TrialBalance: trialBalance,
+				EntryCount:   entryCount,
+				Drifted:      drifted,
+			}, nil
+		})
+	if err != nil {
+		return BooksReport{}, err
+	}
+
+	report.ElapsedMillis = int(time.Since(started).Milliseconds())
+	return report, nil
+}
+
+// driftedAccounts is the PURE comparison at the heart of VerifyBooks: for
+// each stored account, compare its stored balance against what its entries
+// sum to (I3), and report only the ones that disagree. An account with no
+// entries at all computes to zero in its own currency, not to a missing map
+// entry — a wallet that has never moved still has a defined computed balance.
+func driftedAccounts(accounts []domain.Account, computed map[string]domain.Money) ([]Drift, error) {
+	var drifted []Drift
+	for _, account := range accounts {
+		stored := account.Balance()
+
+		balance, found := computed[account.ID()]
+		if !found {
+			zero, err := domain.NewMoney(0, stored.Currency())
+			if err != nil {
+				return nil, err
+			}
+			balance = zero
+		}
+
+		if balance == stored {
+			continue
+		}
+
+		delta, err := balance.Add(stored.Negate())
+		if err != nil {
+			return nil, err
+		}
+		drifted = append(drifted, Drift{
+			AccountID: account.ID(),
+			Stored:    stored,
+			Computed:  balance,
+			Delta:     delta,
+		})
+	}
+	return drifted, nil
 }
 
 // TransferRequest is a movement as it arrives from a driving adapter, with the

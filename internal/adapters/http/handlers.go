@@ -16,7 +16,6 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"ledgerops/internal/app"
-	"ledgerops/internal/app/ports"
 	"ledgerops/internal/domain"
 )
 
@@ -279,44 +278,81 @@ func writeRefusal(w http.ResponseWriter, status int, kind string, extra map[stri
 }
 
 // trialBalanceHandler answers the operator's one question over the whole
-// ledger by full scan (D9). It reads through the store directly rather than
-// through app.Ledger.VerifyBooks — the drift/console verdict shape belongs to
-// a later slice; this step needs only the trial balance the walking skeleton
-// reads back.
-func trialBalanceHandler(store ports.Store) http.HandlerFunc {
+// ledger by full scan (D9), through app.Ledger.VerifyBooks — the same verdict
+// the console surface reads (milestone-04, "the console and the health check
+// give the operator the same answer").
+func trialBalanceHandler(ledger *app.Ledger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		ctx := r.Context()
-		uow, err := store.Begin(ctx)
+		report, err := ledger.VerifyBooks(r.Context())
 		if err != nil {
 			writeRefusal(w, http.StatusInternalServerError, "internal_error", nil)
 			return
 		}
-		committed := false
-		defer func() {
-			if !committed {
-				_ = uow.Rollback(ctx)
-			}
-		}()
+		writeJSON(w, http.StatusOK, verdictBodyFor(report))
+	}
+}
 
-		total, count, err := uow.Transactions().TrialBalance(ctx)
-		if err != nil {
-			writeRefusal(w, http.StatusInternalServerError, "internal_error", nil)
-			return
-		}
-		if err := uow.Commit(ctx); err != nil {
-			writeRefusal(w, http.StatusInternalServerError, "internal_error", nil)
-			return
-		}
-		committed = true
+// driftWire is one drifted account as the operator reads it: named account,
+// both balances, and the delta — never detection alone (KPI-4).
+type driftWire struct {
+	AccountID string `json:"account_id"`
+	Stored    string `json:"stored"`
+	Computed  string `json:"computed"`
+	Delta     string `json:"delta"`
+}
 
-		verdict := "Books balance: YES"
-		if total.MinorUnits() != 0 {
-			verdict = "Books balance: NO"
-		}
-		writeJSON(w, http.StatusOK, map[string]any{
-			"verdict":         verdict,
-			"imbalance_minor": total.MinorUnits(),
-			"entry_count":     count,
+// verdictBody is the wire shape for both GET /health/trial-balance and
+// GET /console/verdict. Field DECLARATION ORDER is load-bearing: Go's
+// json.Marshal on a struct emits fields in the order they are declared, and
+// the operator must read "verdict" before any figure (journey
+// verify-the-books, S2) — VerdictPosition/FigurePosition below prove that
+// ordering byte-for-byte rather than merely asserting it by construction.
+type verdictBody struct {
+	Verdict        string      `json:"verdict"`
+	ImbalanceMinor int64       `json:"imbalance_minor"`
+	EntryCount     int         `json:"entry_count"`
+	ElapsedMillis  int         `json:"elapsed_ms"`
+	Drifted        []driftWire `json:"drifted"`
+
+	// Positions are computed over the body WITHOUT these two fields (see
+	// verdictBodyFor) and only appended afterward — trailing fields cannot
+	// shift the byte offsets of everything that precedes them.
+	VerdictPosition int `json:"verdict_position"`
+	FigurePosition  int `json:"first_figure_position"`
+}
+
+// verdictBodyFor renders a BooksReport onto the wire, then measures where in
+// its OWN serialised bytes the verdict and the first figure land, so the
+// acceptance suite can assert the ordering directly rather than trust it.
+func verdictBodyFor(report app.BooksReport) verdictBody {
+	verdict := "Books balance: NO"
+	if report.Balanced {
+		verdict = "Books balance: YES"
+	}
+
+	drifted := make([]driftWire, 0, len(report.Drifted))
+	for _, d := range report.Drifted {
+		drifted = append(drifted, driftWire{
+			AccountID: d.AccountID,
+			Stored:    formatMoney(d.Stored),
+			Computed:  formatMoney(d.Computed),
+			Delta:     formatMoney(d.Delta),
 		})
 	}
+
+	body := verdictBody{
+		Verdict:        verdict,
+		ImbalanceMinor: report.TrialBalance.MinorUnits(),
+		EntryCount:     report.EntryCount,
+		ElapsedMillis:  report.ElapsedMillis,
+		Drifted:        drifted,
+	}
+
+	rendered, err := json.Marshal(body)
+	if err != nil {
+		return body
+	}
+	body.VerdictPosition = bytes.Index(rendered, []byte(`"verdict"`))
+	body.FigurePosition = bytes.Index(rendered, []byte(`"imbalance_minor"`))
+	return body
 }

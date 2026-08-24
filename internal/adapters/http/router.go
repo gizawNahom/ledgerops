@@ -46,7 +46,7 @@ func NewRouter(deps Deps) http.Handler {
 	router.Get("/accounts/{id}", getBalanceHandler(ledger))
 	router.Get("/accounts/{id}/entries", getEntriesHandler(ledger))
 	router.Post("/transfers", postTransferHandler(ledger))
-	router.Get("/health/trial-balance", trialBalanceHandler(deps.Store))
+	router.Get("/health/trial-balance", trialBalanceHandler(ledger))
 	router.Get("/console/verdict", scaffold("console verdict"))
 	router.Get("/metrics", scaffold("metrics exposition"))
 

@@ -105,6 +105,31 @@ func (r accountRepository) Get(ctx context.Context, accountID string) (domain.Ac
 	return account, nil
 }
 
+// All enumerates every account, ordered by id, without locking any of them —
+// VerifyBooks' full scan is a read-only comparison against ComputedBalances,
+// not a write path, so it takes no row locks (D9).
+func (r accountRepository) All(ctx context.Context) ([]domain.Account, error) {
+	rows, err := r.tx.Query(ctx,
+		`SELECT id, kind, balance_minor, currency FROM accounts ORDER BY id`)
+	if err != nil {
+		return nil, fmt.Errorf("reading every account: %w", err)
+	}
+	defer rows.Close()
+
+	var accounts []domain.Account
+	for rows.Next() {
+		account, err := scanAccount(rows)
+		if err != nil {
+			return nil, fmt.Errorf("reading every account: %w", err)
+		}
+		accounts = append(accounts, account)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("reading every account: %w", err)
+	}
+	return accounts, nil
+}
+
 func scanAccount(row pgx.Row) (domain.Account, error) {
 	var (
 		id, kind, currency string

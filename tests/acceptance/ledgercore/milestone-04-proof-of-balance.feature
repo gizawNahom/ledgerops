@@ -21,14 +21,14 @@ Feature: Prove the books balance
     Given the ledger is running against an empty store
     And a system account "treasury" exists
 
-  @pending @env-populated @contract-shape:unbounded-preservation
+  @env-populated @contract-shape:unbounded-preservation
   Scenario: A healthy ledger states its verdict in words before any figures
     Given a ledger carrying 3 settled transfers
     When the operator asks whether the books balance
     Then the verdict reads "Books balance: YES"
     And the verdict is stated before any per-account figures
 
-  @pending @env-clean @contract-shape:unbounded-preservation
+  @env-clean @contract-shape:unbounded-preservation
   Scenario: A ledger holding nothing balances, and says so
     When the operator asks whether the books balance
     Then the verdict reads "Books balance: YES"
@@ -36,7 +36,7 @@ Feature: Prove the books balance
     And the verdict reports 0 entries scanned
     And no account is listed as drifted
 
-  @pending @env-populated @kpi-1 @contract-shape:unbounded-preservation
+  @env-populated @kpi-1 @contract-shape:unbounded-preservation
   Scenario: Every entry in a healthy ledger cancels out
     Given a ledger carrying 3 settled transfers
     When the operator asks whether the books balance

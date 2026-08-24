@@ -59,6 +59,11 @@ type AccountRepository interface {
 	ApplyDeltas(ctx context.Context, deltas []domain.BalanceDelta) error
 	Create(ctx context.Context, account domain.Account) error
 	Get(ctx context.Context, accountID string) (domain.Account, error)
+	// All enumerates every account the ledger has ever opened, in a
+	// deterministic order. VerifyBooks (D9) is the one caller: its full-scan
+	// verdict needs every stored balance to compare against ComputedBalances,
+	// not just the ones a caller happens to ask about.
+	All(ctx context.Context) ([]domain.Account, error)
 }
 
 // TransactionRepository writes the transaction and its entries. It offers no
