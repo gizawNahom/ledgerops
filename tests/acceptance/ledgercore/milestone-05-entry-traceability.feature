@@ -55,7 +55,7 @@ Feature: Trace a balance to its entries
     Then the entries are returned oldest first
     And tracing "alice" a second time returns them in the very same order
 
-  @pending @error @env-corrupted @contract-shape:unbounded-preservation
+  @error @env-corrupted @contract-shape:unbounded-preservation
   Scenario: On a drifted account the running balance parts company at the guilty row
     Given a wallet account "alice" with 5 movements recorded against it
     And the recorded amount of the third entry belonging to "alice" is altered by 5.00 out of band

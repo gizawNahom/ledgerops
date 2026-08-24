@@ -526,11 +526,27 @@ func (l *Ledger) ThenTheFinalRunningBalanceDisagreesBy(ctx context.Context, acco
 
 // ThenTheDivergingRowIsTheAlteredOne asserts the trace points at the guilty
 // row, which is the whole diagnostic value of slice 05.
+//
+// The check is independent of the production fold under test: l.tamperedRow
+// and l.tamperedBy were captured at tamper time (CorruptEntry), before
+// GetEntries ever ran, so they are not derived from l.lastTrace at all. Here
+// we reconstruct the running balance the trace WOULD show had the tamper
+// never happened — by undoing tamperedBy on the tampered row's own amount
+// before folding — and compare that independently-reconstructed expectation
+// against production's actual (still-corrupted) RunningBalance. Production
+// sums the raw, already-corrupted amounts; this reconstruction sums the
+// de-tampered amounts. The two folds only disagree from the tampered row
+// onward, so the first row where they part company is, independently, the
+// guilty row.
 func (l *Ledger) ThenTheDivergingRowIsTheAlteredOne() error {
-	running := Money(0)
+	pristine := Money(0)
 	for i, row := range l.lastTrace {
-		running += row.Amount
-		if row.RunningBalance != running {
+		amount := row.Amount
+		if i+1 == l.tamperedRow {
+			amount -= l.tamperedBy
+		}
+		pristine += amount
+		if row.RunningBalance != pristine {
 			if i+1 == l.tamperedRow {
 				return nil
 			}
