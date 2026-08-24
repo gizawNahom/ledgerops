@@ -265,14 +265,55 @@ func (l *Ledger) GetBalance(ctx context.Context, accountID string) (domain.Accou
 		})
 }
 
-// GetEntries reads one account's ordered history. Ordering is by recorded
-// instant then by sequence, so two entries sharing a clock tick still read in a
-// settled order (US-5).
-func (l *Ledger) GetEntries(ctx context.Context, accountID string) ([]domain.Entry, error) {
-	return withUnitOfWork(ctx, l.store, fmt.Sprintf("reading entries for %q", accountID),
+// TracedEntry pairs one entry with the running balance immediately after it
+// settles: the cumulative sum of Amount() over every entry up to and
+// including this one, in the order EntriesFor already returns (recorded_at,
+// then sequence). Entry.Amount() is already signed from the traced account's
+// own perspective (fromDelta negative, toDelta positive), so running balance
+// is a plain fold — no new sign logic belongs here.
+type TracedEntry struct {
+	Entry          domain.Entry
+	RunningBalance domain.Money
+}
+
+// GetEntries reads one account's ordered history and folds each entry's
+// signed amount into a running balance. Ordering is by recorded instant then
+// by sequence, so two entries sharing a clock tick still read in a settled
+// order (US-5).
+func (l *Ledger) GetEntries(ctx context.Context, accountID string) ([]TracedEntry, error) {
+	entries, err := withUnitOfWork(ctx, l.store, fmt.Sprintf("reading entries for %q", accountID),
 		func(uow ports.UnitOfWork) ([]domain.Entry, error) {
 			return uow.Transactions().EntriesFor(ctx, accountID)
 		})
+	if err != nil {
+		return nil, err
+	}
+	return runningBalances(entries)
+}
+
+// runningBalances is the pure fold at the heart of GetEntries: row i's
+// running balance is the sum of Amount() over rows 0..i, in the order the
+// entries already arrive. An empty history folds to an empty trace, never an
+// error.
+func runningBalances(entries []domain.Entry) ([]TracedEntry, error) {
+	if len(entries) == 0 {
+		return []TracedEntry{}, nil
+	}
+
+	running, err := domain.NewMoney(0, entries[0].Amount().Currency())
+	if err != nil {
+		return nil, err
+	}
+
+	traced := make([]TracedEntry, 0, len(entries))
+	for _, entry := range entries {
+		running, err = running.Add(entry.Amount())
+		if err != nil {
+			return nil, err
+		}
+		traced = append(traced, TracedEntry{Entry: entry, RunningBalance: running})
+	}
+	return traced, nil
 }
 
 // VerifyBooks answers the operator's one question by full scan (D9): sum every

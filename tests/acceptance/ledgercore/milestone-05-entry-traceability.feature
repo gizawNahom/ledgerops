@@ -13,13 +13,13 @@ Feature: Trace a balance to its entries
     Given the ledger is running against an empty store
     And a system account "treasury" exists
 
-  @pending @env-clean @contract-shape:unbounded-preservation
+  @env-clean @contract-shape:unbounded-preservation
   Scenario: An account nothing has happened to traces to an empty history
     Given a wallet account "alice" exists
     When the operator traces "alice"
     Then no entries are returned
 
-  @pending @env-clean @contract-shape:unbounded-preservation
+  @env-clean @contract-shape:unbounded-preservation
   Scenario: An account with a single movement traces to a single row
     Given a wallet account "alice" funded with 100.00
     When the operator traces "alice"
@@ -27,14 +27,14 @@ Feature: Trace a balance to its entries
     And each row carries a running balance
     And the running balance on the last row reads the stored balance of "alice"
 
-  @pending @env-populated @contract-shape:unbounded-preservation
+  @env-populated @contract-shape:unbounded-preservation
   Scenario: An account's history reads in a settled order
     Given a wallet account "alice" with 5 movements recorded against it
     When the operator traces "alice"
     Then the entries are returned oldest first
     And tracing "alice" a second time returns them in the very same order
 
-  @pending @env-populated @contract-shape:unbounded-preservation
+  @env-populated @contract-shape:unbounded-preservation
   Scenario: The running balance lands on the stored balance
     Given a wallet account "alice" with 5 movements recorded against it
     When the operator traces "alice"

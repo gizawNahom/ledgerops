@@ -86,34 +86,36 @@ func getBalanceHandler(ledger *app.Ledger) http.HandlerFunc {
 	}
 }
 
-// getEntriesHandler reads one account's ordered entry history — the trace
-// that proves two legs of a transfer settled together (US-5, narrow slice:
-// this step needs only the fields that prove atomicity; the full
-// traceability wire shape, including running balance, is milestone-05's job).
+// getEntriesHandler reads one account's ordered entry history, each row
+// carrying the running balance it settled to — the trace that both proves two
+// legs of a transfer settled together (US-5) and lets the operator see
+// exactly where a drifted account parts company from its stored balance
+// (milestone-05).
 func getEntriesHandler(ledger *app.Ledger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		accountID := chi.URLParam(r, "id")
 
-		entries, err := ledger.GetEntries(r.Context(), accountID)
+		traced, err := ledger.GetEntries(r.Context(), accountID)
 		if err != nil {
 			writeDomainError(w, err)
 			return
 		}
 
 		writeJSON(w, http.StatusOK, map[string]any{
-			"entries": entriesToWire(entries),
+			"entries": entriesToWire(traced),
 		})
 	}
 }
 
-func entriesToWire(entries []domain.Entry) []map[string]any {
-	wire := make([]map[string]any, 0, len(entries))
-	for _, entry := range entries {
+func entriesToWire(traced []app.TracedEntry) []map[string]any {
+	wire := make([]map[string]any, 0, len(traced))
+	for _, row := range traced {
 		wire = append(wire, map[string]any{
-			"transaction_id": entry.TransactionID(),
-			"counterparty":   entry.Counterparty(),
-			"amount":         formatMoney(entry.Amount()),
-			"recorded_at":    entry.RecordedAt().UTC(),
+			"transaction_id":  row.Entry.TransactionID(),
+			"counterparty":    row.Entry.Counterparty(),
+			"amount":          formatMoney(row.Entry.Amount()),
+			"recorded_at":     row.Entry.RecordedAt().UTC(),
+			"running_balance": formatMoney(row.RunningBalance),
 		})
 	}
 	return wire
