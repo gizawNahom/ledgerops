@@ -84,7 +84,7 @@ Feature: Prove the books balance
     And "bob" is listed as drifted
     And the drift entry states the stored balance, the computed balance, and a delta of 7.00
 
-  @pending @error @env-corrupted @kpi-4 @contract-shape:unbounded-preservation
+  @error @env-corrupted @kpi-4 @contract-shape:unbounded-preservation
   Scenario: Two damaged accounts are both named, not just the first one found
     Given a ledger carrying 3 settled transfers
     And the recorded amount of one entry belonging to "alice" is altered by 5.00 out of band
