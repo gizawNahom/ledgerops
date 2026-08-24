@@ -63,7 +63,7 @@ Feature: Trace a balance to its entries
     Then the running balance on the last row disagrees with the stored balance of "alice" by 5.00
     And the row where the running balance first parts company is the altered one
 
-  @pending @env-corrupted @contract-shape:unbounded-preservation
+  @env-corrupted @contract-shape:unbounded-preservation
   Scenario: The drift listing hands the operator straight to the entries
     Given a wallet account "alice" with 5 movements recorded against it
     And the recorded amount of the third entry belonging to "alice" is altered by 5.00 out of band

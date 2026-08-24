@@ -7,13 +7,12 @@
 //
 // PostTransfer, CreateAccount, and GetBalance are real as of step 01-03: the
 // Read → Decide → Write sandwich over the real postgres repositories, one
-// database transaction per call. GetEntries is real as of step 02-01,
-// narrowly: it reads the ordered history straight through to the wire so a
-// posted transfer's two legs can be traced to one transaction id; the full
-// traceability contract (running balance, unknown-account refusal) is
-// milestone-05's job. VerifyBooks is real as of step 06-01, narrowly: the
-// healthy/empty verdict over a full scan (D9); the corruption-attribution
-// scenarios (06-02..06-04) are what exercise the Drifted rows in anger.
+// database transaction per call. GetEntries is real as of step 02-01 and
+// carries the full traceability contract as of milestone-05: running balance
+// and unknown-account refusal. VerifyBooks is real as of step 06-01,
+// narrowly: the healthy/empty verdict over a full scan (D9); the
+// corruption-attribution scenarios (06-02..06-04) are what exercise the
+// Drifted rows in anger.
 package app
 
 import (

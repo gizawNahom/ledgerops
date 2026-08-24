@@ -7,14 +7,12 @@
 // 01-04, over the real application shell (internal/app) built at step 01-03.
 // GET /health/trial-balance is real too — the walking skeleton reads it back
 // to prove the ledger balances. GET /accounts/{id}/entries is real as of step
-// 02-01, narrowly: it returns enough (transaction id, counterparty, amount,
-// recorded-at) to prove a transfer's two legs settled under one transaction
-// id; the full traceability wire shape, including running balance and
-// unknown-account refusal, is milestone-05's job. GET /console/verdict is
-// real as of step 06-02: it shares verdictHandler with
-// GET /health/trial-balance, so the two surfaces cannot disagree by
-// construction. GET /metrics remains a scaffold: no active scenario
-// exercises it yet.
+// 02-01 and carries the full traceability wire shape as of milestone-05:
+// transaction id, counterparty, amount, recorded-at, running balance, and
+// unknown-account refusal. GET /console/verdict is real as of step 06-02: it
+// shares verdictHandler with GET /health/trial-balance, so the two surfaces
+// cannot disagree by construction. GET /metrics remains a scaffold: no active
+// scenario exercises it yet.
 package http
 
 import (
