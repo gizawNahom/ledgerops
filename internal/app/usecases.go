@@ -307,7 +307,7 @@ func runningBalances(entries []domain.Entry) ([]TracedEntry, error) {
 		return []TracedEntry{}, nil
 	}
 
-	running, err := domain.NewMoney(0, entries[0].Amount().Currency())
+	running, err := zeroMoney(entries[0].Amount().Currency())
 	if err != nil {
 		return nil, err
 	}
@@ -369,6 +369,15 @@ func (l *Ledger) VerifyBooks(ctx context.Context) (BooksReport, error) {
 	return report, nil
 }
 
+// zeroMoney constructs currency's zero value — the shared starting point
+// driftedAccounts uses for an account with no entries at all and
+// runningBalances uses to seed its fold, so both pure folds read the same
+// idiom for "nothing has happened yet" rather than reconstructing
+// domain.NewMoney(0, ...) independently.
+func zeroMoney(currency string) (domain.Money, error) {
+	return domain.NewMoney(0, currency)
+}
+
 // driftedAccounts is the PURE comparison at the heart of VerifyBooks: for
 // each stored account, compare its stored balance against what its entries
 // sum to (I3), and report only the ones that disagree. An account with no
@@ -381,7 +390,7 @@ func driftedAccounts(accounts []domain.Account, computed map[string]domain.Money
 
 		balance, found := computed[account.ID()]
 		if !found {
-			zero, err := domain.NewMoney(0, stored.Currency())
+			zero, err := zeroMoney(stored.Currency())
 			if err != nil {
 				return nil, err
 			}

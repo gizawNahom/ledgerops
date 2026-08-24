@@ -541,13 +541,15 @@ func (l *Ledger) ThenTheFinalRunningBalanceDisagreesBy(ctx context.Context, acco
 func (l *Ledger) ThenTheDivergingRowIsTheAlteredOne() error {
 	pristine := Money(0)
 	for i, row := range l.lastTrace {
+		isTamperedRow := i+1 == l.tamperedRow
+
 		amount := row.Amount
-		if i+1 == l.tamperedRow {
+		if isTamperedRow {
 			amount -= l.tamperedBy
 		}
 		pristine += amount
 		if row.RunningBalance != pristine {
-			if i+1 == l.tamperedRow {
+			if isTamperedRow {
 				return nil
 			}
 			return fmt.Errorf("the running balance first parts company at row %d; the altered entry is row %d", i+1, l.tamperedRow)
