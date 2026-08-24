@@ -1678,3 +1678,72 @@ US-4 (proof of balance) and US-5 (entry traceability) are `@infrastructure`-
 exempt by scope, not by failure — slices 04/05 are out of scope this run per
 the recorded DELIVER scope decision (feature-delta.md carries no section for
 that decision; recorded in project memory outside the repo).
+
+## Wave: DELIVER / [REF] Demo Evidence — slices 04/05 (2026-08-24)
+
+Post-Merge Integration Gate, run 2026-08-24 by the orchestrator directly
+against a freshly built `docker compose up -d --build` stack (torn down and
+rebuilt clean immediately before this run; torn down again after), for the
+newly-completed DELIVER pass covering slice 04 (proof-of-balance) and slice
+05 (entry-traceability).
+
+**Full acceptance suite** — `go test -count=1 ./tests/acceptance/ledgercore/...`,
+run before bringing up the demo stack: **70 scenarios, 70 passed, 543 steps,
+543 passed.** (49 from the prior pass + 21 new: 11 milestone-04 +
+10 milestone-05.)
+
+**Roadmap steps executed this pass**: phase 06 (slice 04, 4 steps: 06-01
+through 06-04) and phase 07 (slice 05, 3 steps: 07-01 through 07-03) — 7
+steps, 25 total across the whole feature. Two genuine bugs were found and
+fixed in pre-authored acceptance-test infrastructure during this pass (not
+production code):
+
+1. `readBooks()` in `tests/acceptance/ledgercore/ledger_observations.go` was
+   silently swallowing a `Refused` HTTP outcome instead of surfacing it —
+   fixed to check `answer.Outcome == Refused` before unmarshaling, mirroring
+   the existing `readTrace()` pattern.
+2. The "Tampering is only possible for a privileged operator, never for the
+   service" scenario in `milestone-04-proof-of-balance.feature` was missing
+   its `When the operator asks whether the books balance` step, so its
+   `Then` assertion had nothing to check — fixed by adding the missing step.
+3. `ThenTheDivergingRowIsTheAlteredOne` in `ledger_assertions.go` (slice 05)
+   was tautological — it recomputed production's own output and compared it
+   to itself, so it could never fail regardless of correctness. Fixed to
+   reconstruct the pristine (pre-tamper) running balance independently using
+   `l.tamperedRow`/`l.tamperedBy` (captured at tamper time, not derived from
+   the trace) and compare that against production's actual output.
+
+**Environments exercised this run**: `clean`/`ci` (via the acceptance suite,
+Testcontainers, OPS-11) — includes `populated` and `corrupted` environment
+tags now for the first time in this feature (slice 04/05 scenarios use
+`@env-populated` and `@env-corrupted`), since those were out of scope for
+the prior pass.
+
+**Elevator Pitch demos** (US-4, US-5), each executed as close to its literal
+"After" command as the driving port allows, against a freshly built
+`docker compose up -d --build` stack (torn down and rebuilt clean
+immediately before this run; torn down again after):
+
+Setup: opened `treasury-demo` (system) and `alice-demo` (wallet) via
+`POST /accounts`, funded alice with 100.00 from treasury via
+`POST /transfers` (`Idempotency-Key: demo-fund-1`) —
+`transaction_id: txn_1b575c10-5aca-47e6-8d85-1925d324977a`.
+
+| Story | Command | Result |
+|---|---|---|
+| US-4 — Prove the books balance (healthy) | `curl /console/verdict` | `{"verdict":"Books balance: YES","imbalance_minor":0,"entry_count":2,"elapsed_ms":3,"drifted":[],...}` |
+| US-4 — after out-of-band tamper | `curl /console/verdict` (after `UPDATE entries SET amount_minor = amount_minor + 500` on alice's entry, via the privileged role with the append-only trigger disabled/re-enabled around the write — the same mechanism the acceptance suite's `AttemptOutOfBandChange` uses) | `{"verdict":"Books balance: NO","imbalance_minor":500,"entry_count":2,"elapsed_ms":2,"drifted":[{"account_id":"alice-demo","stored":"100.00","computed":"105.00","delta":"5.00"}],...}` |
+| US-5 — Trace a balance to its entries | `curl /accounts/alice-demo/entries` | `{"entries":[{"amount":"105.00","counterparty":"treasury-demo","recorded_at":"2026-08-24T14:39:16.293753Z","running_balance":"105.00","transaction_id":"txn_1b575c10-..."}]}` — running balance (105.00, reflecting the tampered entry) diverges visibly from the account's stored balance (100.00, shown in the US-4 drift output above), exactly as the pitch promises: "diverging visibly at the offending row" |
+
+Note honestly: US-4's literal pitch says "open `/console`" (implying a
+browser), but per DDR-2
+(`docs/feature/ledger-core/distill/upstream-issues.md`) the console SPA is
+out of scope this pass — the scenarios and this demo assert the verdict
+contract over the underlying HTTP JSON port (`GET /console/verdict`, which
+is the same VerifyBooks-backed handler as `GET /health/trial-balance`)
+rather than through an actual browser. This substitution is stated
+explicitly here rather than implying a browser was used.
+
+**Gate verdict: PASS.** Full acceptance suite green, both demos produced the
+exact "sees" outcome their pitch promises, stack was freshly built and torn
+down cleanly.
