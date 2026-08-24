@@ -1,11 +1,94 @@
 # Evolution — ledger-core
 
-**Status: PARTIALLY DELIVERED BY DECISION. This feature is NOT complete.**
-Every claim below about what shipped is scoped to slices 01-03 plus the
-platform layer. Slices 04 (proof of balance) and 05 (entry traceability),
-and the console SPA, were deliberately excluded from this DELIVER run and
-remain unbuilt. Read the whole "What did NOT ship" section before treating
-any part of this document as a completion record.
+**Status (updated 2026-08-24): PARTIALLY DELIVERED BY DECISION. Slices
+01-05 are DONE. Only the console SPA remains.**
+A second DELIVER pass (2026-08-24) shipped slice 04 (proof of balance) and
+slice 05 (entry traceability), closing the two gaps this document originally
+reported as unbuilt. See "Update — second DELIVER pass (2026-08-24)" below
+for that pass's evidence; it supersedes every "NOT shipped" claim this
+document originally made about slices 04/05. The console SPA (`web/console/`)
+is the one remaining piece of the original feature scope — everything below
+the update section is the **original 2026-08-21 record**, preserved as
+written, describing the state after the *first* DELIVER pass (walking
+skeleton + slices 01-03 only). Read the update section first.
+
+---
+
+## Update — second DELIVER pass (2026-08-24)
+
+**What changed since the record below was written**: slices 04 and 05 (US-4
+"prove the books balance", US-5 "trace a balance to its entries") were
+built, tested, and demonstrated in a second DELIVER pass. The stories table
+and "What did NOT ship" section further down are **historical** — accurate
+for 2026-08-21, stale as of 2026-08-24 — and are left unedited below as the
+first pass's own record. This section is the correction.
+
+| Story | Job | Invariant | Status as of 2026-08-24 |
+|---|---|---|---|
+| US-4 — Prove the books balance | J4 | I3 (stored balance matches entries) | **YES — slice 04, second pass** |
+| US-5 — Trace a balance to its entries | J5 | none (supports I3 investigation) | **YES — slice 05, second pass** |
+
+**Roadmap extension**: `docs/feature/ledger-core/deliver/roadmap.json` was
+extended with phase 06 (slice 04, 4 steps: 06-01..06-04) and phase 07
+(slice 05, 3 steps: 07-01..07-03) — 7 new steps, 25 total across the whole
+feature — reviewed and approved by `nw-acceptance-designer-reviewer`
+(APPROVED), then executed RED→GREEN→COMMIT.
+
+**Real bugs found and fixed in pre-authored acceptance-test infrastructure**
+(not production code), continuing the pattern named in this document's own
+retrospective below:
+
+1. `readBooks()` in `tests/acceptance/ledgercore/ledger_observations.go`
+   silently swallowed a `Refused` HTTP outcome instead of surfacing it —
+   fixed.
+2. The "Tampering is only possible for a privileged operator" scenario in
+   `milestone-04-proof-of-balance.feature` was missing its `When the
+   operator asks whether the books balance` step, so its `Then` had nothing
+   to check — fixed.
+3. `ThenTheDivergingRowIsTheAlteredOne` in `ledger_assertions.go` (slice 05)
+   was tautological — it recomputed production's own output and compared it
+   to itself, so it could never fail. Fixed to use independently-tracked
+   tamper state (`l.tamperedRow`/`l.tamperedBy`) instead.
+
+**Post-Merge Integration Gate: PASS.** Full acceptance suite, 70/70
+scenarios (49 prior + 21 new: 11 milestone-04 + 10 milestone-05), 543/543
+steps. Elevator-pitch demos for US-4 and US-5 both verified live against a
+freshly built `docker compose up -d --build` stack — evidence recorded in
+`docs/feature/ledger-core/feature-delta.md` §
+`Wave: DELIVER / [REF] Demo Evidence — slices 04/05 (2026-08-24)`,
+commit `e5c451c`.
+
+**L1-L6 refactor pass**: minor genuine cleanup only (shared `zeroMoney`
+helper, one readability fix), commit `ad18c4b`.
+
+**Adversarial review** (`nw-software-crafter-reviewer`): APPROVED, zero
+blockers, zero Testing Theater patterns.
+
+**Mutation testing**: skipped per project's `nightly-delta` strategy
+(CLAUDE.md), same as the first pass.
+
+**Integrity verification**: `des-verify-integrity
+docs/feature/ledger-core/deliver/` → all 25 steps have complete DES traces,
+exit 0.
+
+**Commits this pass** (in order): `f82a2a4`, `f06667e`, `167047e`,
+`542c652`, `33c6bc8`, `f3f7c7d`, `b059987`, `ec94d68`, `64971d4`, `e5c451c`,
+`ad18c4b` — 11 commits total.
+
+**What is still deferred after this pass**: the console SPA (`web/console/`)
+remains completely unbuilt — out of scope for both this pass and the first,
+per DDR-2 (`docs/feature/ledger-core/distill/upstream-issues.md`). The
+slice 04/05 scenarios assert the verdict/trace contract over HTTP JSON, not
+through a browser, and the SPA's rendering is a documented untested seam.
+This is the one remaining piece of the original feature scope; the KPI-1/
+KPI-4 trial-balance and corruption-detection measurements described as
+"not measurable" in the KPI table below are now live (see the demo evidence
+above) — only the SPA's own presentation layer has no coverage.
+
+**Roadmap/execution-log disposition**: `docs/feature/ledger-core/deliver/`
+(`roadmap.json`, `execution-log.json`) remains untracked in git, per the same
+discard precedent applied at the first pass — superseded by this evolution
+document plus git history.
 
 ---
 
