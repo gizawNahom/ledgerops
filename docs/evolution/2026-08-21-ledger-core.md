@@ -619,22 +619,29 @@ verification is independent of the reporting agent, not dependent on the
 bug being easy to find.
 
 **Framework-improvement suggestion — matching the style of upstream-issues.md
-finding R-1's "Worth propagating" note**: a tautological assertion (Branch C)
-is mechanically detectable before DELIVER by static analysis of each
-step-definition body that both *produces* and *checks* a derived value from
-the same source field with no independent second source. Concretely: grep
-step-definition files under `tests/acceptance/**/*_assertions.go` for a
-function whose only inputs to its pass/fail comparison are (a) a field read
-from the same struct that (b) the function itself just folded/recomputed —
-i.e. no second, independently-populated struct field (like the
-`tamperedRow`/`tamperedBy` pair the fix introduced) appears anywhere in the
-function body. This is a narrower, single-purpose sibling to
-`grep -c "@pending"`: not a general Testing-Theater linter (that needs
-judgment), but a cheap check for the single shape "recomputes its own oracle"
-that is fully mechanical because it only needs to count distinct data sources
-per assertion function, not understand what they mean. Worth adding as a
-`nw-acceptance-designer` self-review checklist item (alongside the missing
-contract-shape-tag item R-1 already recommends adding there) — it would not
-have caught Branch A or B (those need actual execution, not static
-inspection), but it is a real, cheap, non-judgment-requiring check for the
-one root cause (C) that static inspection can reach.
+finding R-1's "Worth propagating" note, revised after peer review**: an
+initial draft of this note claimed a tautological assertion (Branch C) is
+"fully mechanical" to detect via a simple grep-style count of distinct data
+sources. Peer review (`nw-troubleshooter-reviewer`) correctly flagged that as
+overstated: detecting that a comparison's two operands both trace back to
+`row.RunningBalance`/`l.lastTrace` — one side folded locally in the function,
+the other read off the same struct field the fold consumed — is a dataflow
+question (does operand X's def-use chain terminate at the same source as
+operand Y's), not a lexical count. `grep -c "@pending"` is mechanical because
+`@pending` is a literal string; this is not that. The honest framing: a
+single-purpose static-analysis heuristic — walk each `Then*` function's AST,
+and flag any comparison where both operands' def-use chains resolve to the
+same struct field one level up the call — is *implementable* (this is an
+ordinary def-use/dataflow pass, the kind linters already do for e.g. unused
+writes) but is a small tool to build, not a grep one-liner, and it produces a
+**candidate list for human review**, not a pass/fail gate, since a
+self-referential fold is occasionally intentional (e.g. `ThenEachRowCarriesARunningBalance`,
+which legitimately re-derives running balance from raw amounts because *that
+recomputation itself* is the property under test — see line ~477 of
+`ledger_assertions.go`). Worth naming as a `nw-acceptance-designer`
+self-review checklist candidate (alongside the missing contract-shape-tag
+item R-1 already recommends adding there), scoped correctly as a heuristic
+pre-filter, not a mechanical gate — it would not have caught Branch A or B
+(those need actual execution, not static inspection), and even for Branch C
+it needs a human to confirm each flagged candidate is actually tautological
+rather than a legitimate self-fold.
