@@ -10,8 +10,11 @@
 // 02-01, narrowly: it returns enough (transaction id, counterparty, amount,
 // recorded-at) to prove a transfer's two legs settled under one transaction
 // id; the full traceability wire shape, including running balance and
-// unknown-account refusal, is milestone-05's job. GET /console/verdict and
-// GET /metrics remain scaffolds: no active scenario exercises them yet.
+// unknown-account refusal, is milestone-05's job. GET /console/verdict is
+// real as of step 06-02: it shares verdictHandler with
+// GET /health/trial-balance, so the two surfaces cannot disagree by
+// construction. GET /metrics remains a scaffold: no active scenario
+// exercises it yet.
 package http
 
 import (
@@ -46,8 +49,8 @@ func NewRouter(deps Deps) http.Handler {
 	router.Get("/accounts/{id}", getBalanceHandler(ledger))
 	router.Get("/accounts/{id}/entries", getEntriesHandler(ledger))
 	router.Post("/transfers", postTransferHandler(ledger))
-	router.Get("/health/trial-balance", trialBalanceHandler(ledger))
-	router.Get("/console/verdict", scaffold("console verdict"))
+	router.Get("/health/trial-balance", verdictHandler(ledger))
+	router.Get("/console/verdict", verdictHandler(ledger))
 	router.Get("/metrics", scaffold("metrics exposition"))
 
 	return router

@@ -277,11 +277,14 @@ func writeRefusal(w http.ResponseWriter, status int, kind string, extra map[stri
 	writeJSON(w, status, body)
 }
 
-// trialBalanceHandler answers the operator's one question over the whole
-// ledger by full scan (D9), through app.Ledger.VerifyBooks — the same verdict
-// the console surface reads (milestone-04, "the console and the health check
-// give the operator the same answer").
-func trialBalanceHandler(ledger *app.Ledger) http.HandlerFunc {
+// verdictHandler answers the operator's one question over the whole ledger by
+// full scan (D9), through app.Ledger.VerifyBooks. It is the single handler
+// wired to BOTH GET /health/trial-balance and GET /console/verdict
+// (milestone-04, "the console and the health check give the operator the
+// same answer") — sharing one function body is what guarantees the two
+// surfaces can never drift apart, rather than two call sites independently
+// reproducing the same verdict-before-figures rendering.
+func verdictHandler(ledger *app.Ledger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		report, err := ledger.VerifyBooks(r.Context())
 		if err != nil {

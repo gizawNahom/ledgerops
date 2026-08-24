@@ -43,14 +43,14 @@ Feature: Prove the books balance
     Then the trial balance is 0.00
     And no account is listed as drifted
 
-  @pending @env-populated @kpi-1 @contract-shape:unbounded-preservation
+  @env-populated @kpi-1 @contract-shape:unbounded-preservation
   Scenario: The verdict reports what it scanned and how long it took
     Given a ledger carrying 3 settled transfers
     When the operator asks whether the books balance
     Then the verdict reports 6 entries scanned
     And the verdict reports how long the scan took
 
-  @pending @env-populated @contract-shape:unbounded-preservation
+  @env-populated @contract-shape:unbounded-preservation
   Scenario: The console and the health check give the operator the same answer
     Given a ledger carrying 3 settled transfers
     When the operator asks whether the books balance on the console surface
