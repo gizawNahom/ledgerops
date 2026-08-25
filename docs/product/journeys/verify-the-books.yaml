@@ -70,3 +70,27 @@ error_paths:
     recovery: >
       Operator falls back to the API. The console must not be the only path to
       the verdict -- GET /health/trial-balance returns the same answer.
+
+changelog:
+  - date: "2026-08-25"
+    feature: ledger-core-console
+    change: >
+      Formalized S1-S4 into the ledger-core-console feature's user stories
+      (US-1..US-4). No step content changed -- this journey already fully
+      specified the console before that feature existed. S1's "console
+      unreachable" error path was narrowed at story level to the buildable
+      case (page loads, data fetch fails); a fully unreachable page is an
+      operational concern outside any SPA story's reach, recorded in that
+      feature's slice-04 brief rather than here.
+  - date: "2026-08-25"
+    feature: ledger-core-console
+    change: >
+      Corrected orchestrator decision-point rerun (UX research depth:
+      comprehensive, not lightweight). This journey's S1-S4 happy path and
+      dip-and-recover arc were re-interrogated, not discarded -- they hold
+      up. Console-specific states this document never had to consider
+      (loading, verdict staleness, a second failure branch on the entries
+      fetch, routine-vs-reactive trigger variants) are now elaborated in
+      docs/feature/ledger-core-console/discuss/journey-console.yaml and
+      journey-console-visual.md, which extend rather than replace this
+      file. No S1-S4 field here was altered.

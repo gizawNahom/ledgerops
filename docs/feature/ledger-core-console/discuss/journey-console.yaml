@@ -1,0 +1,183 @@
+schema_version: 1
+
+# Comprehensive Phase 2 redo (corrected Decision 3). Extends
+# docs/product/journeys/verify-the-books.yaml S1-S4 with console-specific
+# states a browser page has and a curl-shaped journey document did not
+# capture: loading, staleness, and a second failure branch. Does not
+# replace or contradict the SSOT journey — see its own changelog entry
+# for the pointer back here.
+
+journey:
+  name: "Verify the books, from the console"
+  goal: "Answer 'does this add up?' from a browser, and explain any drift without a terminal"
+  persona: "P2 (docs/product/personas/platform-operator.yaml)"
+
+  emotional_arc:
+    start: "calm/dutiful (routine trigger) or anxious/urgent (reactive trigger) -- see trigger_variants"
+    middle: "dip at NO verdict (alarm) -> focused concern at drift table -> tense anticipation at entry click-through"
+    end: "understanding (peak) on successful trace; OR a deeper dip on entries-fetch failure (new failure branch, worse than the S1 failure because it strikes mid-investigation"
+
+  trigger_variants:
+    - id: routine
+      description: "Habitual start-of-day check, no external prompt"
+      starting_emotion: "calm, dutiful"
+    - id: reactive
+      description: "Triggered by an external signal (customer complaint, DB access turned up something odd)"
+      starting_emotion: "anxious, urgent"
+      design_note: >
+        A clean YES verdict may not fully resolve reactive-trigger anxiety
+        (vindication/skepticism, not pure relief). Flagged for DESIGN
+        awareness; DDR-2 keeps this out of automated-test scope.
+
+steps:
+  - id: 1
+    name: "Open the console"
+    command: "GET /console (browser navigation)"
+    tui_mockup: |
+      +-- Console -----------------------------------------------------+
+      | (page shell loads)                                              |
+      +-------------------------------------------------------------------+
+    shared_artifacts: []
+    emotional_state:
+      entry: "calm or anxious, per trigger_variants"
+      exit: "brief suspense entering loading state"
+    integration_checkpoint: "Page shell must render before any fetch completes -- no blank-until-fetch behavior"
+    failure_modes:
+      - "Console page itself unreachable (server hosting web/console/ down) -- no in-app fix, operator falls back to GET /health/trial-balance directly (out of story-reach, operational concern)"
+    gherkin: |
+      Scenario: Opening the console renders the page shell immediately
+        Given the operator navigates to the console URL
+        When the page loads
+        Then a page shell renders within 100ms, independent of the verdict fetch
+
+  - id: 1a
+    name: "Loading (NEW this pass)"
+    command: "n/a -- GET /console/verdict in flight"
+    tui_mockup: |
+      +-- Console -----------------------------------------------------+
+      |   Checking the books...                                         |
+      +-------------------------------------------------------------------+
+    shared_artifacts: []
+    emotional_state:
+      entry: "brief suspense"
+      exit: "resolves to verdict or failure"
+    integration_checkpoint: "Must show a neutral in-progress state, never a blank page, while the fetch is outstanding"
+    failure_modes:
+      - "Fetch fails or times out -- see step 2 failure_modes (US-4)"
+    gherkin: |
+      Scenario: A neutral checking state is shown while the verdict loads
+        Given the console page has loaded and GET /console/verdict has not yet resolved
+        When the operator looks at the page during that window
+        Then the page shows "Checking the books..." rather than a blank page
+
+  - id: 2
+    name: "Read the verdict"
+    command: "none -- the page states it, sourced from GET /console/verdict"
+    tui_mockup: |
+      +-- Console -----------------------------------------------------+
+      |   Books balance: YES                                            |
+      |   as of 09:14:02 (moments ago)                                  |
+      +-------------------------------------------------------------------+
+    shared_artifacts:
+      - name: "verdict"
+        source: "GET /console/verdict JSON field 'verdict'"
+        displayed_as: "${verdict}"
+        consumers: ["step 2 sentence", "step 4 drift-table gate"]
+      - name: "fetched_at"
+        source: "client-side browser clock at fetch resolution (NOT server-supplied -- see shared-artifacts-registry.md)"
+        displayed_as: "${fetched_at}"
+        consumers: ["step 2 freshness label"]
+    emotional_state:
+      entry: "suspense"
+      exit: "relief (YES, routine) / vindication-tinged relief (YES, reactive) / alarm (NO)"
+    integration_checkpoint: "Verdict sentence must render before any table or figure, matching the JSON field exactly"
+    failure_modes:
+      - "Verdict fetch fails or times out -- bounded-time error naming GET /health/trial-balance as fallback (US-4)"
+      - "Verdict is stale (page left open, no auto-refresh) -- mitigated by ${fetched_at} label, not by auto-polling (explicitly out of scope, unproven complexity for single-operator tool)"
+    gherkin: |
+      Scenario: The console verdict is labeled with when it was fetched
+        Given the console has successfully fetched the verdict
+        When the operator reads the verdict
+        Then a freshness label shows how long ago it was fetched, client-side, not from the server
+
+  - id: 3
+    name: "Spot a drifted account"
+    command: "none -- rendered from the same GET /console/verdict response's 'drifted' array"
+    tui_mockup: |
+      +-- Console -----------------------------------------------------+
+      |   account_id      stored     computed    delta                |
+      |   alice-demo      100.00     105.00      5.00                 |
+      +-------------------------------------------------------------------+
+    shared_artifacts:
+      - name: "drifted"
+        source: "GET /console/verdict JSON field 'drifted'"
+        displayed_as: "${drifted}"
+        consumers: ["step 3 table rows", "step 4 account_id source"]
+    emotional_state:
+      entry: "alarm (post NO verdict)"
+      exit: "focused concern"
+    integration_checkpoint: "Drift table renders below the verdict sentence, never above it; empty drifted array means no table at all"
+    failure_modes: []
+    gherkin: |
+      Scenario: Drifted accounts are named with their numbers
+        Given alice-demo's recorded entry amount has been altered by 5.00 out of band
+        When the operator views the console
+        Then a table below the verdict lists alice-demo with stored, computed, and delta values
+
+  - id: 4
+    name: "Trace to entries"
+    command: "GET /accounts/{id}/entries (triggered by clicking a drift-table row)"
+    tui_mockup: |
+      +-- alice-demo entries ---------------------------------------------+
+      |   date        counterparty     amount    running balance         |
+      |   08-20       treasury-demo    +100.00   100.00                  |
+      |   08-24       (tampered)       +5.00     105.00 <-- diverges     |
+      +-------------------------------------------------------------------+
+    shared_artifacts:
+      - name: "account_id"
+        source: "the specific drift-table row clicked (itself sourced from ${drifted})"
+        displayed_as: "${account_id}"
+        consumers: ["step 4 entries fetch URL"]
+      - name: "entries / running_balance"
+        source: "GET /accounts/{id}/entries JSON response"
+        displayed_as: "${entries}"
+        consumers: ["step 4 table -- no client-side recomputation"]
+    emotional_state:
+      entry: "tense anticipation"
+      exit: "understanding (peak of the arc)"
+    integration_checkpoint: "account_id passed to the fetch must be the exact string clicked, never re-derived"
+    failure_modes:
+      - "Entries fetch fails after clicking a drifted account (NEW this pass) -- bounded-time error naming the direct endpoint as fallback, same pattern as step 2's failure handling but at a higher-stakes moment in the arc (operator is mid-investigation, already alarmed)"
+    gherkin: |
+      Scenario: Clicking a drifted account shows its entries
+        Given alice-demo is listed as drifted on the console
+        When the operator clicks alice-demo's row
+        Then the console shows alice-demo's entries, ordered, with a running balance column
+
+      Scenario: A failed entries fetch does not strand the operator mid-investigation
+        Given the operator has clicked alice-demo's drift-table row
+        When GET /accounts/alice-demo/entries fails or times out
+        Then the console shows a bounded-time error naming GET /accounts/alice-demo/entries as the direct fallback
+        And the operator is not left with a blank panel or an unending spinner
+
+integration_validation:
+  shared_artifact_consistency:
+    - artifact: "verdict + drifted"
+      must_match_across: [2, 3]
+      failure_message: "Verdict and drift table must come from the same fetch response, never two calls that could disagree"
+    - artifact: "account_id"
+      must_match_across: [3, 4]
+      failure_message: "The account_id used to fetch entries must be the exact value from the clicked drift-table row"
+    - artifact: "fetched_at"
+      must_match_across: [2]
+      failure_message: "fetched_at must remain client-sourced; if a server timestamp is later added, re-point this artifact rather than dual-sourcing"
+
+changelog:
+  - date: "2026-08-25"
+    feature: "ledger-core-console"
+    change: >
+      Created as the comprehensive Phase 2 redo (corrected Decision 3).
+      Extends docs/product/journeys/verify-the-books.yaml S1-S4 with
+      console-specific states (loading, freshness/staleness, a second
+      failure branch on the entries fetch) discovered by deeper mental-model
+      interrogation. Does not modify or contradict the SSOT journey.

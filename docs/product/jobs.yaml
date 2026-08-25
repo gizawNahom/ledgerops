@@ -102,6 +102,7 @@ jobs:
     satisfaction: 2
     opportunity: 14
     slice: "05"
+    consumed_by: [ledger-core (backend, GET /accounts/{id}/entries), ledger-core-console (browser trace UI, US-3)]
 
   - id: J4
     persona: P2
@@ -122,6 +123,7 @@ jobs:
     satisfaction: 1
     opportunity: 13
     slice: "04"
+    consumed_by: [ledger-core (backend, GET /console/verdict, GET /health/trial-balance), ledger-core-console (browser verdict + drift UI, US-1/US-2/US-4)]
 
 deferred:
   - id: J6
