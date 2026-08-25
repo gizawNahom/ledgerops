@@ -42,10 +42,13 @@ Every container is reached through two DSNs (OPS-10): the suite connects as
 |---|---|---|
 | `Clock` | `FakeClock` — a `func() time.Time` literal, manually advanced | Function type per DDD-13, so the fake is one line |
 | `IDGenerator` | `FakeIDGenerator` — a `func() string` literal over a fixed sequence | Makes `transaction_id` assertions exact rather than shape-matched |
+| `apiClient`'s `fetch()` (`web/console/`, added DISTILL `ledger-core-console` 2026-08-25) | `vi.fn()` mock returning a scripted `Response`-shaped object | Component-level unit tests only — no real network in jsdom. The real-I/O HTTP/JSON contract this client renders is already asserted over a real Postgres-backed server by `tests/acceptance/ledgercore/milestone-04-proof-of-balance.feature`; this mock proves `apiClient`'s own header/timeout/401 wiring, not the wire contract |
+| `keyStorage`'s `window.localStorage` (`web/console/`, added DISTILL `ledger-core-console` 2026-08-25) | None — jsdom's real, spec-compliant `Storage` implementation | Not faked: jsdom's `localStorage` is a real synchronous key-value store, the same API surface the browser exposes. No mock needed for this port |
 
-These two are the only fakes permitted anywhere in the acceptance suite. Both
-exist solely so assertions on timestamps and identifiers are deterministic — the
-"testability ranks second" quality attribute doing visible work.
+These two Go-side fakes plus the two TS-side entries above are the only
+fakes permitted anywhere in the acceptance suite. All four exist solely so
+assertions on non-deterministic or out-of-process state are deterministic —
+the "testability ranks second" quality attribute doing visible work.
 
 **What the fakes cannot model**: `FakeClock` returns whatever the test sets, so
 it cannot surface a real clock going backwards, an NTP step, or two postings

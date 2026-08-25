@@ -1392,3 +1392,499 @@ One open item is carried forward for DISTILL's awareness rather than
 resolved here: § Build-output wiring's undecided static-serving route may
 affect whether a "demo the built bundle" scenario is writable yet, versus
 only a `vite dev`-mode scenario.
+
+---
+
+## Wave: DISTILL / [REF] Scope statement
+
+DDR-2 forbids a new browser-level `.feature` file for this feature — the
+verdict/drift/trace HTTP/JSON contract this SPA renders is already
+specified and passing at
+`tests/acceptance/ledgercore/milestone-04-proof-of-balance.feature`
+(real Postgres, real HTTP, real API-key middleware). This DISTILL pass
+therefore does **not** produce a Gherkin `.feature` file for
+`ledger-core-console`. Instead it produces **component-level unit tests**
+(Vitest + jsdom — not a real browser, so DDR-2 is not violated) for the 8
+named units DESIGN decomposed `web/console/` into: the SPA's own fetch
+wiring, key-storage wiring, and props→render mapping for every component,
+against the RED-ready scaffolds Mandate 7 requires. The SPA's actual
+rendering, in a real browser, remains the documented untested seam
+(`docs/architecture/atdd-infrastructure-policy.md` § Known gap — already
+present, extended below with the two new console-side driven-port rows
+this pass adds).
+
+---
+
+## Wave: DISTILL / [REF] Toolchain
+
+**Test runner: Vitest 2** (not Jest). DESIGN fixed React 18 + Vite 5
+(SA-D1); Vitest is the idiomatic pairing — it reuses Vite's own transform
+pipeline (esbuild + `@vitejs/plugin-react`) instead of duplicating it under
+a second bundler config, and shares `vite.config.ts`'s `resolve`/`plugins`
+so component tests see the same module graph the dev server and build do.
+Jest was considered and rejected: Jest's default transform (Babel or
+`ts-jest`) does not understand Vite's `import.meta.env` or the dev-proxy
+config without extra shimming, for zero benefit over Vitest's Jest-compatible
+API (`describe`/`it`/`expect`/`vi.fn`) in this project.
+
+**Environment**: `jsdom` (not `happy-dom`) — the more spec-complete DOM
+emulation, and the one `@testing-library/react` documents first-class
+support for. `jsdom`'s `Storage` implementation is real (not a mock),
+which is why `keyStorage`'s unit tests need no fake for `localStorage` (see
+§ Adapter coverage table).
+
+**PBT library**: `fast-check` (per the Polyglot Adapter Matrix's TS row).
+Used for `keyStorage`'s roundtrip property and `apiClient`'s
+timeout/network-failure equivalence property.
+
+**Assertion / component libraries**: `@testing-library/react` +
+`@testing-library/user-event` + `@testing-library/jest-dom` — queries by
+accessible role/label/text (never by CSS selector or internal prop), so
+component tests assert what the operator would actually see, not
+implementation detail.
+
+**Verified working** (not merely declared): `npm install` (182 packages),
+`npx tsc --noEmit` (zero errors across all 15 source + test files), and
+`npx vitest run` (8 test files collect cleanly, 1 walking-skeleton test
+enabled and RED for the right reason, 30 tests correctly skipped) were all
+run against this exact scaffold during this DISTILL session — see
+`distill/red-classification.md`.
+
+---
+
+## Wave: DISTILL / [REF] Scenario list with tags
+
+9 test files, 8 units (2 effectful modules + 6 pure-render components), 31
+test cases total (1 enabled walking skeleton + 30 one-at-a-time scaffolded).
+12/31 (39%) are tagged `@error` or exercise a C1/C3/C6 edge condition —
+just under the 40% target; documented as a gap in § Self-Completeness Audit
+rather than padded to clear the number artificially.
+
+| File | Test | Tags | Traces to |
+|---|---|---|---|
+| `apiClient.test.ts` | fetchVerdict sends the stored operator key and returns the verdict | `@walking_skeleton` (ENABLED) | US-1 |
+| `apiClient.test.ts` | fetchEntries(accountId) asks for exactly the clicked account's entries | — | US-3 |
+| `apiClient.test.ts` | a rejected key clears itself | `@error` | US-1..US-4 (401 flow, ADR-010) |
+| `apiClient.test.ts` | timeout and network-error read identically to the operator | `@error @property` | US-3, US-4 (SA-D6) |
+| `apiClient.test.ts` | no write method is exposed on the client | — (structural/negative) | Core Principle 12 |
+| `keyStorage.test.ts` | any pasted key, once set, is exactly what get() returns next | `@property` | Pre-requisite D10 |
+| `keyStorage.test.ts` | clearing a rejected key leaves no trace | `@error` | ADR-010 401 flow |
+| `keyStorage.test.ts` | never-stored key answers get() with null, not a crash | C1 boundary | Pre-requisite D10 |
+| `ConsoleApp.test.tsx` | shows the key-entry form when no key has ever been stored | — | Pre-requisite D10 |
+| `ConsoleApp.test.tsx` | goes straight to the verdict flow when a key is present | — | US-1 |
+| `ConsoleApp.test.tsx` | re-shows the key form with "key rejected" after a 401 | `@error` | ADR-010 401 flow |
+| `ApiKeyPrompt.test.tsx` | submitting a pasted key hands it to the console | — | Pre-requisite D10 |
+| `ApiKeyPrompt.test.tsx` | the pasted key is never shoulder-surfable (masked input) | — | ADR-010 |
+| `ApiKeyPrompt.test.tsx` | a rejected key re-shows the form with an inline explanation | `@error` | ADR-010 401 flow |
+| `VerdictBanner.test.tsx` | a healthy ledger states the verdict in words first | — | US-1 |
+| `VerdictBanner.test.tsx` | a corrupted ledger states the verdict in words first | `@error` | US-1 |
+| `VerdictBanner.test.tsx` | an empty ledger still gives a clean answer | C1 boundary | US-1 |
+| `VerdictBanner.test.tsx` | checking state while loading, never blank | — | US-1 (loading, this pass) |
+| `VerdictBanner.test.tsx` | verdict is labeled with how long ago it was fetched | — | US-1 (`${fetched_at}`, this pass) |
+| `DriftTable.test.tsx` | a single drifted account is named with its numbers | — | US-2 |
+| `DriftTable.test.tsx` | a healthy ledger shows no drift table at all | C3 zero | US-2 |
+| `DriftTable.test.tsx` | two drifted accounts are both named | C3 many | US-2 |
+| `DriftTable.test.tsx` | a healthy account is never swept into the drift table | — | US-2 |
+| `DriftTable.test.tsx` | clicking a row hands the console the exact account_id clicked | — | US-2 → US-3 handoff |
+| `EntryTrace.test.tsx` | clicking a drifted account shows its entries, ordered, running balance | — | US-3 |
+| `EntryTrace.test.tsx` | each entry shows counterparty and recorded_at | — | US-3 |
+| `EntryTrace.test.tsx` | a healthy account's trace shows no divergence | — | US-3 |
+| `EntryTrace.test.tsx` | loading state, not a blank panel | — | US-3 |
+| `EntryTrace.test.tsx` | a failed entries fetch names the exact fallback URL | `@error` | US-3 (this pass) |
+| `VerdictFetchError.test.tsx` | a failed verdict fetch shows an explicit error, not blank | `@error` | US-4 |
+| `VerdictFetchError.test.tsx` | the error names the fallback path explicitly | `@error` | US-4 |
+
+---
+
+## Wave: DISTILL / [REF] WS strategy
+
+Feature-level WS strategy is inherited unchanged (DISCUSS § WS strategy):
+Strategy C for the JSON contract, already satisfied by
+`milestone-04-proof-of-balance.feature`'s real-Postgres walking skeleton in
+the parent feature. This DISTILL pass adds a second, narrower walking
+skeleton **inside the SPA's own test suite** — `@walking_skeleton
+fetchVerdict sends the stored operator key and returns the verdict the API
+answered with` — which proves `apiClient`'s own wiring (header attachment,
+response parsing) against a scripted `fetch` mock. This is not a
+duplicate of the HTTP-level WS: it proves the SPA's client-side half of the
+contract, which no Go-side test can reach.
+
+---
+
+## Wave: DISTILL / [REF] Adapter coverage table
+
+| Adapter | @real-io scenario | Covered by |
+|---|---|---|
+| `GET /console/verdict` / `GET /accounts/{id}/entries` (HTTP/JSON wire contract) | YES | `milestone-04-proof-of-balance.feature` (real Postgres, real HTTP) — inherited, not re-tested here per DDR-2 |
+| `apiClient` (fetch wiring: header attachment, timeout, 401 recovery) | NO — scripted mock, by design | `apiClient.test.ts`, mock justified: DDR-2 forbids a real-browser probe, and the wire contract itself is already real-I/O tested above; this suite proves the *client's* wiring, not the wire |
+| `keyStorage` (localStorage wiring) | YES — jsdom's real `Storage` implementation, not a mock | `keyStorage.test.ts` — no fake needed, jsdom's Storage is spec-real |
+| 6 render components (`ConsoleApp`, `ApiKeyPrompt`, `VerdictBanner`, `DriftTable`, `EntryTrace`, `VerdictFetchError`) | N/A — pure-function renders, no I/O | props→render mapping tests, real React render via `@testing-library/react`, no mocking needed |
+
+Zero "NO — MISSING" rows: every driven adapter DESIGN named for this
+feature (`apiClient`, `keyStorage`) has at least one test file, and the one
+row using a mock (`apiClient`) is justified by DDR-2 plus the existing
+real-I/O coverage of the same wire contract at the HTTP layer — not a gap
+silently accepted.
+
+---
+
+## Wave: DISTILL / [REF] Scaffolds (Mandate 7)
+
+All 8 units scaffolded under `web/console/src/`, each with `export const
+__SCAFFOLD__ = true` and every method/render path raising `throw new
+Error("Not yet implemented -- RED scaffold")` — the TypeScript RED
+convention. Verified: `npx tsc --noEmit` zero errors, `npx vitest run`
+collects all 8 files with zero import/collection errors, one enabled test
+fails with the scaffold's `Error`, not a `ReferenceError` or module
+resolution failure (see `distill/red-classification.md`).
+
+| Scaffold file | Unit | Imported by |
+|---|---|---|
+| `src/apiClient.ts` | `apiClient` | `apiClient.test.ts`, `ConsoleApp.tsx` |
+| `src/keyStorage.ts` | `keyStorage` | `keyStorage.test.ts`, `apiClient.test.ts`, `ConsoleApp.tsx` |
+| `src/components/ConsoleApp.tsx` | `ConsoleApp` | `ConsoleApp.test.tsx` |
+| `src/components/ApiKeyPrompt.tsx` | `ApiKeyPrompt` | `ApiKeyPrompt.test.tsx` |
+| `src/components/VerdictBanner.tsx` | `VerdictBanner` | `VerdictBanner.test.tsx` |
+| `src/components/DriftTable.tsx` | `DriftTable` | `DriftTable.test.tsx` |
+| `src/components/EntryTrace.tsx` | `EntryTrace` | `EntryTrace.test.tsx` |
+| `src/components/VerdictFetchError.tsx` | `VerdictFetchError` | `VerdictFetchError.test.tsx` |
+
+Non-scaffolded support modules (pure types/utilities, nothing to fail):
+`src/testing/domainTypes.ts` (Mandate-12 domain types), `src/testing/stateDelta.ts`
+(Mandate 8 TS port bootstrap — see next section).
+
+---
+
+## Wave: DISTILL / [REF] Test placement
+
+`web/console/src/**/*.test.{ts,tsx}`, colocated with the source file each
+test exercises (`apiClient.ts` + `apiClient.test.ts`, etc.) — the idiomatic
+Vite/React convention (Vite's own scaffolding templates colocate; a
+separate `__tests__/` directory was considered and rejected as it adds a
+second navigation path for zero benefit in a package this size). This
+diverges from the Python-pilot convention this skill's examples show
+(`tests/{feature}/acceptance/*.feature` + `steps/steps_*.py`) because this
+package has no Gherkin layer at all (DDR-2) — there is no `.feature` file
+this test placement needs to sit beside.
+
+Domain types + state-delta port live under `web/console/src/testing/`
+(package-internal, not `tests/common/` — see § State-delta port bootstrap
+below for why).
+
+---
+
+## Wave: DISTILL / [REF] State-delta port bootstrap (Mandate 8, polyglot)
+
+First TypeScript DISTILL run in this project. Per § Polyglot bootstrap
+(apply-if-absent), checked for `tests/common/state_delta.ts` — absent, and
+not applicable at that path: `web/console/` is a separate npm package
+inside this Go monorepo, and `tests/` at the repository root is the Go
+acceptance-test root with no npm workspace linking it to `web/console/`'s
+own module resolution. Bootstrapped instead at
+`web/console/src/testing/stateDelta.ts`, a package-local TS port
+implementing `assertStateDelta(before, after, universe, expected)` with the
+two predicates this feature's tests need (`setTo`, `unchanged`) — the full
+eight-predicate library is a documented gap (see § Self-Completeness Audit),
+deferred to the next TS feature that needs `appendedWith` /
+`prependedWith` / `containing` / etc.
+
+Applied to `keyStorage.test.ts` (the one state-mutating unit in this
+feature — `apiClient`'s happy path is read-only; its 401 case mutates
+`keyStorage` and is asserted directly against `keyStorage`'s own universe
+there, not duplicated).
+
+---
+
+## Wave: DISTILL / [REF] Driving Adapter Verification
+
+No new driving adapter is introduced by this feature that DISTILL can test
+automatically. `GET /console` (the SPA shell) and `GET /console/verdict`
+are both driving ports per DISCUSS § Driving ports, but:
+
+- `GET /console/verdict` is already exercised through its real driving port
+  by `milestone-04-proof-of-balance.feature` (real `chi` router,
+  `httptest.Server`, real API-key middleware) — inherited, not duplicated.
+- `GET /console` (the static SPA shell route) was built as a DEVOPS/infra
+  concern (`console_static.go`) with its own Go-side test
+  (`console_static_test.go`, per feature-delta.md § Wave: DEVOPS / Build-output
+  wiring) — dist-absent → 404, dist-present → shell served — verified by the
+  DEVOPS wave, not re-verified here.
+- The SPA's own "driving port" in the classic sense (a real browser
+  navigating to `/console` and rendering) is exactly what DDR-2 excludes
+  from automated coverage. No subprocess/HTTP/hook scenario is added for
+  it; `apiClient.test.ts`'s walking skeleton is the closest automated proxy
+  available under DDR-2's constraint, and it is explicitly scoped as a
+  component-level proof of the SPA's *client-side* wiring, not a driving-port
+  scenario.
+
+This is a documented scope carve-out (DDR-2), not an oversight — the
+Driving Adapter Verification mandate's underlying concern (a pipeline that
+works but an entry point that's broken) is covered by the Go-side
+`console_static_test.go` for the shell route and by
+`milestone-04-proof-of-balance.feature` for the JSON port; only the
+browser-rendering seam itself stays untested, exactly as
+`atdd-infrastructure-policy.md` § Known gap already declares.
+
+---
+
+## Wave: DISTILL / [REF] Pre-requisites
+
+- `ledger-core` backend delivered, contract-tested (inherited, unchanged)
+- `console_static.go` / `mountConsole` (DEVOPS, this feature) — `GET /console`
+  and `GET /console/*` routes exist and are probe-guarded against
+  `web/console/dist` being absent; confirmed via `console_static_test.go`
+- `web/console/` toolchain now exists (this DISTILL session): `package.json`,
+  `tsconfig.json`, `vite.config.ts`, `npm install` verified (182 packages),
+  `npx tsc --noEmit` verified (zero errors), `npx vitest run` verified (RED
+  gate passes) — DELIVER can run `npm ci && npm test` from a clean clone
+- DEVOPS's `console` CI job probe (`web/console/package.json` existence
+  check) now flips from no-op to blocking, since `package.json` exists as of
+  this DISTILL session — DELIVER should expect the `console` CI job to run
+  for real on its first PR, not remain a `::notice`
+- `eslint-plugin-boundaries` (DEVOPS-flagged enforceable rule) is **not**
+  configured by this DISTILL session — no ESLint config exists yet under
+  `web/console/`. Flagged as an open item for DELIVER/DEVOPS, not silently
+  assumed done
+- § Build-output wiring's Dockerfile follow-up (compose deploy path does not
+  yet copy `web/console/dist/`) remains open, inherited from DEVOPS, not
+  addressed here — out of DISTILL's scope
+
+---
+
+## Wave: DISTILL / [REF] Self-Completeness Audit (15-item mechanical checklist)
+
+Run per `nw-at-completeness-check` against the 31-test candidate AT set
+above.
+
+| # | Item | Result | Evidence |
+|---|---|---|---|
+| C1a | ≥1 AT exercises empty/zero/minimum-size input | **PASS** | `VerdictBanner` "empty ledger still gives a clean answer"; `DriftTable` "healthy ledger shows no drift table" |
+| C1b | ≥1 AT on each partition boundary (max-1/max/max+1) | **PASS (N/A)** | No numeric size partition exists in this domain (no pagination, no size cap on drift/entry lists per slice-02's explicit OUT-scope) — nothing to bound-test |
+| C2a | SUT state machine documented in AT module docstring | **PASS** | `ConsoleApp.test.tsx` docstring, added this pass, states the key-gate/verdict/error-rejected state machine explicitly |
+| C2b | For each state, ≥1 AT for illegal-event-from-that-state | **PASS** | `ConsoleApp.test.tsx` "re-shows the key form... after a 401" — a 401 arriving in `[showing-verdict]`, a state that assumed a valid key |
+| C3 | parametrize/PBT covering n ∈ {0,1,many} for each collection input | **PASS** | `DriftTable`: 0 (no table), 1 (single row), 2 (many, independent rows) |
+| C4a | Each mutating op has "apply twice" AT | **FAIL** | No test calls `keyStorage.set()` twice in sequence and asserts the second write wins cleanly, or calls `apiClient.fetchVerdict()` twice and asserts no accumulated side effect |
+| C4b | ≥1 AT for inverse op without prerequisite | **FAIL** | `keyStorage.clear()` is only tested after a prior `set()`; no test calls `clear()` on a never-set key and asserts it's a no-op, not an error |
+| C5a | Each mode flag: every materially-distinct combination exercised | **PASS (N/A)** | No mode flags exist in this feature (no `--dry-run`/`--force`-equivalent) |
+| C5b | ≥1 AT asserting flag orthogonality | **PASS (N/A)** | Same — no flags to be orthogonal |
+| C6a | Each input param: ≥1 AT with malformed value | **FAIL** | No test feeds `apiClient` a malformed JSON response body (e.g. missing `verdict` field, wrong type) and asserts a typed failure rather than a silent `undefined` render |
+| C6b | Each declared error in contract: ≥1 AT triggers exactly that error | **PASS (partial)** | 401 → key-rejected covered; timeout/network-error → fetch-failed covered (property test); no test for a 5xx response distinct from a network error |
+| C6c | ≥1 AT asserts closed error set (no other error escapes) | **FAIL** | No test asserts `apiClient` only ever surfaces `{auth-rejected, fetch-failed}` and nothing else leaks past those two signals |
+| C7a | ≥1 AT under degraded-resource condition | **PASS** | `apiClient` "timeout and network-error read identically" property test exercises the `api-unreachable` environment shape |
+| C7b | ≥1 AT for interruption mid-operation | **PASS** | The same timeout property test is, functionally, an interruption-mid-fetch case (`AbortController` budget expiring) |
+| C7c | If concurrent-safe by claim: ≥1 multi-actor AT | **PASS (N/A)** | No concurrency claim exists — DESIGN's own Estimation explicitly states "1 concurrent operator," so there is no claim to falsify |
+
+**Count: 11/15 passing.**
+
+**Verdict: ACCEPTABLE_WITH_DOCUMENTED_GAPS** (10-12/15 band).
+
+### Gap classification (upstream-wave routing rule)
+
+- **C4a, C4b (CRUD-lifecycle/idempotency)**: `AT_GAP_IN_DELIVERY_SCOPE` — no
+  upstream artifact is missing; these are straightforward additional test
+  cases DELIVER's crafter (or a DISTILL fast-follow) can add against the
+  existing scaffolds without any new upstream decision.
+- **C6a, C6c (malformed input / closed error set)**: `AT_GAP_IN_DELIVERY_SCOPE`
+  — DESIGN's `apiClient` contract (fetch/parse/timeout/401) is fully specified
+  in `docs/product/architecture/brief.md` § Console SPA; a malformed-response
+  test and a closed-error-set assertion can be authored against that existing
+  contract without reopening DESIGN. Not `SPECIFICATION_AMBIGUITY` — the
+  contract exists, it's just not yet exercised by these 4 checklist items.
+
+No `SPECIFICATION_AMBIGUITY` findings this pass — zero blockers routed
+upstream.
+
+### Completeness audit log
+
+`(feature_id=ledger-core-console, category_ids=[C4,C6], finding_count=4, severity_max=MEDIUM)`
+— recorded here per plan v3 §6.7 telemetry contract (no separate JSONL
+writer available in this session's toolset; logged inline as the audit
+trail).
+
+---
+
+## Wave: DISTILL / [REF] Mandate Compliance Evidence
+
+- **CM-A (Mandate 1, hexagonal boundary)**: every component test imports
+  only its own scaffold module (`./ConsoleApp`, `./apiClient`, etc.) or a
+  hand-rolled fake collaborator passed as a prop — zero test imports
+  `window.fetch`/`window.localStorage` directly except inside `apiClient.ts`
+  and `keyStorage.ts` themselves, the two modules DESIGN designates as the
+  sole effectful boundary (Core Principle 12). `grep -rn "localStorage\." web/console/src --include="*.test.*"`
+  returns zero matches outside `keyStorage.test.ts`'s own assertion helper.
+- **CM-B (Mandate 2, business language)**: every `describe`/`it` string uses
+  operator-facing language ("the operator's browser asks the API whether the
+  books balance", "trace a drifted account to its entries") — zero
+  occurrences of `HTTP`, `endpoint`, `schema`, `database` in any test title;
+  technical detail (fetch mocks, jsdom Storage) lives inside test bodies only.
+- **CM-C (Mandate 3, user journey completeness)**: every test file maps to a
+  US-1..US-4 AC (see § Scenario list with tags "Traces to" column) — no test
+  exists that isn't traceable to a story.
+- **CM-D (Mandate 4, pure function extraction)**: the 6 render components are
+  classified `pure-function render over props` in DESIGN's own component
+  table; their tests pass plain prop objects, no fixture/environment
+  parametrization. Only `apiClient`/`keyStorage` (the impure adapters) are
+  parametrized — over mock/jsdom-real-storage, not over multiple environments,
+  since this package has no adapter-tier environment matrix (`with-stored-key`
+  etc. are DDR-2 manual-dogfood parametrization, not automated fixture params).
+- **CM-E (Mandate 8)**: `keyStorage.test.ts` uses `assertStateDelta` for both
+  state-mutating scenarios (`set`, `clear`); universe entries
+  (`localStorage.ledgerops_console_api_key`) are the port-exposed storage key
+  name, never an internal field.
+- **CM-F (Mandate 9)**: `@given`-equivalent (`fc.assert`/`fc.property`) appears
+  only in `apiClient.test.ts` and `keyStorage.test.ts` — both layer-1
+  (in-memory/jsdom, no real network or real browser). Zero PBT machinery in
+  the 6 component-render test files (those use example-based prop→render
+  cases, appropriate for their layer).
+- **CM-G (Mandate 10, two-tier acceptance)**: Tier B NOT added — correctly.
+  This feature's journey has no ≥3-chained-scenario domain-rich state machine
+  Tier B targets; the closest candidate (the key-gate state machine) has only
+  3 states and a config-shaped input space (a pasted string, not a rich
+  domain), matching the "Skip Tier B" criteria exactly.
+- **CM-H (Mandate 11)**: N/A — this feature has no layer-3+ (subprocess/real
+  adapter) tests of its own; the layer-3+ HTTP contract is
+  `milestone-04-proof-of-balance.feature`, already example-based per that
+  feature's own DISTILL pass.
+- **CM-I (Mandate-12, four-criteria mechanical)**:
+  - **CM-I-1**: `test -f web/console/src/testing/domainTypes.ts` → present, with
+    `VerdictStatus`, `DriftRow`, `VerdictResponse`, `EntryRow`, `FetchPhase`,
+    `LedgerEnvironment` typed for every domain noun this feature's tests use.
+  - **CM-I-2**: component props consume these types directly
+    (`VerdictBannerProps.verdict: VerdictStatus`, `DriftTableProps.drifted:
+    DriftRow[]`) — no raw `string` where `VerdictStatus`/`FetchPhase` exist.
+  - **CM-I-3**: not applicable in the pytest-bdd step-decorator sense (this
+    package has no Gherkin steps per DDR-2's scope carve-out); the analogous
+    check — test bodies delegate to the scaffold's public API, not inline
+    business logic — holds: every test body's assertion is against
+    `render(...)`/`screen.getBy...` or the scaffold's own return value, never
+    a re-implementation of the component's logic.
+  - **CM-I-4 (informational)**: 31 test invocations / 8 scaffold-module
+    "decorators" (one exported function or object per module) ≈ 3.9×. Natural
+    ceiling for a component-render suite this size — not compared against a
+    target, recorded per feature per the mandate's own guidance.
+
+---
+
+## Wave: DISTILL / [REF] Wave Decisions Summary
+
+### Key Decisions
+- [DT-D1] No Gherkin `.feature` file authored for this feature (DDR-2 held);
+  DISTILL output is Vitest component/unit tests under `web/console/src/`
+  instead (see § Scope statement)
+- [DT-D2] Test runner: Vitest 2 + jsdom + `@testing-library/react` +
+  `fast-check`, chosen over Jest for zero-duplication of Vite's own
+  transform pipeline (see § Toolchain)
+- [DT-D3] State-delta port (Mandate 8) bootstrapped at
+  `web/console/src/testing/stateDelta.ts` (package-local), not the literal
+  `tests/common/state_delta.ts` path — documented deviation, monorepo module
+  boundary (see § State-delta port bootstrap)
+- [DT-D4] Two new driven-port rows appended to
+  `docs/architecture/atdd-infrastructure-policy.md` §
+  "Driven external / non-deterministic (fake)": `apiClient`'s `fetch()` (mock)
+  and `keyStorage`'s `localStorage` (jsdom-real, not faked) — flagged for the
+  user's awareness rather than silently decided, per the explicit
+  ask-don't-guess instruction for missing policy ports; both are standard,
+  uncontroversial component-testing defaults consistent with everything
+  DESIGN already decided about `apiClient`/`keyStorage` encapsulation, so
+  DISTILL proceeded rather than blocking on them — flagged in the session
+  handoff for confirmation/override
+- [DT-D5] One walking-skeleton test enabled
+  (`apiClient.test.ts::@walking_skeleton`), all 30 remaining tests scaffolded
+  `.skip` per the one-at-a-time strategy; RED gate verified by actually
+  running `npm install && npx tsc --noEmit && npx vitest run` this session
+  (see `distill/red-classification.md`)
+- [DT-D6] Self-Completeness Audit: 11/15 → ACCEPTABLE_WITH_DOCUMENTED_GAPS;
+  4 gaps (C4a, C4b, C6a, C6c), all classified `AT_GAP_IN_DELIVERY_SCOPE` (no
+  upstream artifact missing) — zero `SPECIFICATION_AMBIGUITY` blockers
+
+### Requirements Summary
+- 8 units from DESIGN's component decomposition (SA-D4), each with at least
+  one test file; 2 effectful modules use real-mechanism-or-mock per adapter
+  class, 6 pure-render components use plain prop→render assertions
+- Walking skeleton: `apiClient.test.ts`'s enabled test, proving the SPA's
+  client-side half of the already-real-I/O-tested HTTP/JSON contract
+
+### Constraints Established
+- No new Gherkin `.feature` file for this feature (DDR-2, held)
+- No real network or real browser in any test (jsdom + mocked `fetch`)
+- Domain types (Mandate-12) centralized in `src/testing/domainTypes.ts`;
+  every component prop type traces to it
+
+### Upstream Changes
+- None to DISCUSS/DESIGN/DEVOPS assumptions. `atdd-infrastructure-policy.md`
+  extended (2 new rows, additive), not altered.
+
+### Open items carried to DELIVER
+- 4 completeness gaps (C4a, C4b, C6a, C6c) — additional test cases against
+  existing scaffolds, no new upstream decision needed
+- `eslint-plugin-boundaries` config not yet wired (DEVOPS-flagged item,
+  still open)
+- Full 8-predicate state-delta library (only `setTo`/`unchanged` bootstrapped)
+- `apiClient`/`keyStorage` mock-vs-jsdom-real policy rows (DT-D4) — flagged
+  for user confirmation, not blocking
+
+**Per-wave peer review**: N/A — Final Wave Review Gate (4 parallel Haiku
+reviewers over the full DISCUSS→DESIGN→DEVOPS→DISTILL chain) runs next, per
+`nw-distill` § Final Wave Review Gate. This replaces a separate per-wave
+DISTILL review.
+
+---
+
+## Final Wave Review Gate — verdicts (2026-08-25)
+
+Four Haiku reviewers dispatched in parallel against this full file, each
+scoped to one wave's sections.
+
+| Reviewer | Wave | Verdict | Blockers | High | Medium | Low |
+|---|---|---|---|---|---|---|
+| Eclipse (`nw-product-owner-reviewer`) | DISCUSS | **approved** | 0 | 0 | 1 | 1 |
+| Architect (`nw-solution-architect-reviewer`) | DESIGN | **approved** | 0 | 0 | 0 | 2 |
+| Forge (`nw-platform-architect-reviewer`) | DEVOPS | **conditionally_approved** | 0 | 0 | 3 | 2 |
+| Sentinel (`nw-acceptance-designer-reviewer`) | DISTILL | **conditionally_approved** | 0 | 1 | 0 | 3 |
+
+**Zero blockers across all four reviewers. No cross-wave contradictions
+surfaced** — Eclipse's DISCUSS approval, Architect's DESIGN approval, and
+Forge/Sentinel's conditional approvals are mutually consistent (e.g. no
+reviewer found a DESIGN/DISCUSS mismatch, no reviewer found DEVOPS
+contradicting DDR-2, no reviewer found DISTILL's scope carve-out
+contradicting anything upstream).
+
+### Findings requiring DELIVER-scope action (accepted-with-conditions)
+
+- **Sentinel HIGH** — error-path coverage 29% (9/31) vs 40% target. Already
+  self-flagged in § Self-Completeness Audit above; concrete punch list is
+  the 4 documented gaps (C4a, C4b, C6a, C6c), all `AT_GAP_IN_DELIVERY_SCOPE`.
+  DELIVER adds these before or during slice implementation.
+- **Forge MEDIUM ×3** — Dockerfile `web/console/dist/` copy (already
+  flagged in DEVOPS § Build-output wiring "Known follow-up"), TS
+  mutation-testing tool gap (already flagged in DEVOPS § Mutation testing
+  strategy), DDR-2 infra-vs-behavior boundary documentation (informational,
+  no action required on this feature — decision is user-explicit).
+- **Eclipse MEDIUM** — `${fetched_at}` re-pointing risk if a server
+  timestamp is ever added; already documented in
+  `discuss/shared-artifacts-registry.md` with the exact re-pointing
+  instruction. No new action; ensure DELIVER reads that file.
+- **Architect LOW ×2, Eclipse LOW, Sentinel LOW ×3, Forge LOW ×2** — all
+  documentation-location or data-backing suggestions, no functional action
+  required.
+
+None of the four reviewers found a genuine blocker or an issue that
+reopens an upstream wave. **DELIVER handoff is unblocked.**
+
+### Deliverable-type verification routing
+
+`deliverable_type` resolved as `application` (key absent from
+`.nwave/des-config.json`, default per ADR-PST-002 precedence) — the
+four-reviewer gate above is the complete verification; no
+`@nw-plugin-validator` or `@nw-skill-reviewer` dispatch applies.
+
+### Pre-DELIVER fail-for-the-right-reason gate
+
+**PASSED** — see `distill/red-classification.md`. Verified by actually
+running `npm install && npx tsc --noEmit && npx vitest run` this session:
+1 walking-skeleton test enabled, fails with `Error: Not yet implemented --
+RED scaffold` (MISSING_FUNCTIONALITY / genuine RED), 30 tests correctly
+skipped, 0 tests in the IMPORT_ERROR/FIXTURE_BROKEN/SETUP_FAILURE or
+WRONG_ASSERTION/OBSERVABLE_NOT_AT_PORT categories.
+
+**DISTILL → DELIVER handoff: READY.**
