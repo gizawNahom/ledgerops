@@ -14,7 +14,7 @@
 // keyStorage; asserted directly against keyStorage's own universe there.
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import fc from "fast-check";
-import { createApiClient } from "./apiClient";
+import { createApiClient, AuthRejectedError, FetchFailedError } from "./apiClient";
 import { createKeyStorage } from "./keyStorage";
 import { STORAGE_KEY } from "./testing/domainTypes";
 
@@ -64,7 +64,7 @@ describe("apiClient -- the operator's browser asks the API whether the books bal
     expect(result.verdict).toBe("YES");
   });
 
-  it.skip("fetchEntries(accountId) asks for exactly the clicked account's entries, with the same operator key attached", async () => {
+  it("fetchEntries(accountId) asks for exactly the clicked account's entries, with the same operator key attached", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       status: 200,
@@ -83,7 +83,7 @@ describe("apiClient -- the operator's browser asks the API whether the books bal
     );
   });
 
-  it.skip("@error a rejected key clears itself so the operator is not stuck retrying a key that will never work", async () => {
+  it("@error a rejected key clears itself so the operator is not stuck retrying a key that will never work", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: false,
       status: 401,
@@ -98,7 +98,7 @@ describe("apiClient -- the operator's browser asks the API whether the books bal
     expect(window.localStorage.getItem(STORAGE_KEY)).toBeNull();
   });
 
-  it.skip("@property a request that times out and a request that fails outright read identically to the operator -- both become the same fetch-failed signal", async () => {
+  it("@property a request that times out and a request that fails outright read identically to the operator -- both become the same fetch-failed signal", async () => {
     await fc.assert(
       fc.asyncProperty(fc.constantFrom("timeout", "network-error"), async (failureMode) => {
         globalThis.fetch =
@@ -113,11 +113,123 @@ describe("apiClient -- the operator's browser asks the API whether the books bal
       }),
       { numRuns: 2 }
     );
-  });
+  }, 20_000); // real 8s AbortController budget (SA-D6, fixed constant) x up to
+  // 2 fast-check runs -- extends vitest's default 5s test timeout to match;
+  // does not change what the test asserts.
 
-  it.skip("no write method is exposed on the client -- the console can only ever ask, never change, the books (Core Principle 12 read/write port-splitting)", () => {
+  it("no write method is exposed on the client -- the console can only ever ask, never change, the books (Core Principle 12 read/write port-splitting)", () => {
     const client = createApiClient({ keyStorage: createKeyStorage() });
     expect((client as unknown as Record<string, unknown>).postTransfer).toBeUndefined();
     expect((client as unknown as Record<string, unknown>).createAccount).toBeUndefined();
+  });
+
+  // --- Gap-closure tests (feature-delta.md Self-Completeness Audit) ---
+
+  it("@gap repeated fetchVerdict() calls cause no accumulated side effect (C4a)", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => fakeVerdictWireShape(),
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const client = createApiClient({ keyStorage: createKeyStorage() });
+    const firstResult = await client.fetchVerdict();
+    const secondResult = await client.fetchVerdict();
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const [firstCall, secondCall] = fetchMock.mock.calls;
+    expect(firstCall).toEqual(secondCall);
+    expect(secondResult).toEqual(firstResult);
+  });
+
+  it("@gap @property a malformed verdict response yields a typed failure, never a silent undefined (C6a)", async () => {
+    const malformedVerdictBody = fc.oneof(
+      // missing `verdict` entirely
+      fc.record({
+        imbalance_minor: fc.integer(),
+        entry_count: fc.integer(),
+        elapsed_ms: fc.integer(),
+        drifted: fc.constant([]),
+      }),
+      // `verdict` present but wrong type
+      fc.record({
+        verdict: fc.oneof(fc.integer(), fc.boolean(), fc.constant(null)),
+        imbalance_minor: fc.integer(),
+        entry_count: fc.integer(),
+        elapsed_ms: fc.integer(),
+        drifted: fc.constant([]),
+      }),
+      // `verdict` present but not one of the two legal values
+      fc.record({
+        verdict: fc.constantFrom("MAYBE", "unknown", ""),
+        imbalance_minor: fc.integer(),
+        entry_count: fc.integer(),
+        elapsed_ms: fc.integer(),
+        drifted: fc.constant([]),
+      }),
+      fc.constant(null),
+      fc.constant("not-even-an-object")
+    );
+
+    await fc.assert(
+      fc.asyncProperty(malformedVerdictBody, async (body) => {
+        globalThis.fetch = vi.fn().mockResolvedValue({
+          ok: true,
+          status: 200,
+          json: async () => body,
+        }) as unknown as typeof fetch;
+
+        const client = createApiClient({ keyStorage: createKeyStorage() });
+        const outcome = await client.fetchVerdict().then(
+          (value) => ({ settled: "resolved" as const, value }),
+          (error) => ({ settled: "rejected" as const, error })
+        );
+
+        expect(outcome.settled).toBe("rejected");
+        if (outcome.settled === "rejected") {
+          expect(outcome.error).toBeInstanceOf(FetchFailedError);
+        }
+      }),
+      { numRuns: 15 }
+    );
+  });
+
+  it("@gap only auth-rejected or fetch-failed signals ever escape the client -- no third error class leaks (C6c)", async () => {
+    const arrangements: Array<() => void> = [
+      () => {
+        globalThis.fetch = vi.fn().mockResolvedValue({
+          ok: false,
+          status: 401,
+          json: async () => ({ error: "unidentified_caller" }),
+        }) as unknown as typeof fetch;
+      },
+      () => {
+        globalThis.fetch = vi.fn().mockRejectedValue(new TypeError("network error")) as unknown as typeof fetch;
+      },
+      () => {
+        globalThis.fetch = vi.fn().mockResolvedValue({
+          ok: true,
+          status: 200,
+          json: async () => ({ not: "a verdict" }),
+        }) as unknown as typeof fetch;
+      },
+    ];
+
+    for (const arrangeFetch of arrangements) {
+      window.localStorage.setItem(STORAGE_KEY, "a-valid-operator-key");
+      arrangeFetch();
+
+      const client = createApiClient({ keyStorage: createKeyStorage() });
+      let caught: unknown;
+      try {
+        await client.fetchVerdict();
+      } catch (error) {
+        caught = error;
+      }
+
+      expect(caught).toBeDefined();
+      expect(caught instanceof AuthRejectedError || caught instanceof FetchFailedError).toBe(true);
+    }
   });
 });
