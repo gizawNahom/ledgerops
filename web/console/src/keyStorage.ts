@@ -1,8 +1,5 @@
 // keyStorage -- the sole module permitted to touch window.localStorage
-// (DESIGN SA-D4, Core Principle 12 capability injection). RED scaffold
-// created by DISTILL per Mandate 7.
-export const __SCAFFOLD__ = true;
-
+// (DESIGN SA-D4, Core Principle 12 capability injection).
 import { STORAGE_KEY } from "./testing/domainTypes";
 
 export interface KeyStorage {
@@ -14,13 +11,13 @@ export interface KeyStorage {
 export function createKeyStorage(): KeyStorage {
   return {
     get(): string | null {
-      throw new Error("Not yet implemented -- RED scaffold");
+      return window.localStorage.getItem(STORAGE_KEY);
     },
-    set(_key: string): void {
-      throw new Error("Not yet implemented -- RED scaffold");
+    set(key: string): void {
+      window.localStorage.setItem(STORAGE_KEY, key);
     },
     clear(): void {
-      throw new Error("Not yet implemented -- RED scaffold");
+      window.localStorage.removeItem(STORAGE_KEY);
     },
   };
 }
