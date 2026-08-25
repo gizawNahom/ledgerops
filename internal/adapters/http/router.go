@@ -12,7 +12,11 @@
 // unknown-account refusal. GET /console/verdict is real as of step 06-02: it
 // shares verdictHandler with GET /health/trial-balance, so the two surfaces
 // cannot disagree by construction. GET /metrics remains a scaffold: no active
-// scenario exercises it yet.
+// scenario exercises it yet. GET /console and GET /console/* are wired as of
+// ledger-core-console's DEVOPS wave (build-output wiring, resolved as an
+// infra concern -- see feature-delta.md § Wave: DEVOPS / Build-output
+// wiring): they serve the built SPA shell and its assets, deliberately
+// outside the operator-API-key middleware group -- see console_static.go.
 package http
 
 import (
@@ -37,19 +41,31 @@ type Deps struct {
 }
 
 // NewRouter builds the production router. Real routes, real auth middleware.
+//
+// The operator-API-key middleware is scoped to a group, not the whole
+// router: every JSON endpoint -- including GET /console/verdict, the one the
+// console SPA itself calls -- requires the key, but GET /console and its
+// static assets (mounted by mountConsole below) deliberately do not. The
+// HTML shell has to load before any key can be presented; the key is
+// enforced at the JSON boundary it actually protects.
 func NewRouter(deps Deps) http.Handler {
 	router := chi.NewRouter()
-	router.Use(requireOperatorKey(deps.OperatorKey))
 
 	ledger := app.NewLedger(deps.Store, deps.Clock, deps.IDGenerator)
 
-	router.Post("/accounts", createAccountHandler(ledger))
-	router.Get("/accounts/{id}", getBalanceHandler(ledger))
-	router.Get("/accounts/{id}/entries", getEntriesHandler(ledger))
-	router.Post("/transfers", postTransferHandler(ledger))
-	router.Get("/health/trial-balance", verdictHandler(ledger))
-	router.Get("/console/verdict", verdictHandler(ledger))
-	router.Get("/metrics", scaffold("metrics exposition"))
+	router.Group(func(protected chi.Router) {
+		protected.Use(requireOperatorKey(deps.OperatorKey))
+
+		protected.Post("/accounts", createAccountHandler(ledger))
+		protected.Get("/accounts/{id}", getBalanceHandler(ledger))
+		protected.Get("/accounts/{id}/entries", getEntriesHandler(ledger))
+		protected.Post("/transfers", postTransferHandler(ledger))
+		protected.Get("/health/trial-balance", verdictHandler(ledger))
+		protected.Get("/console/verdict", verdictHandler(ledger))
+		protected.Get("/metrics", scaffold("metrics exposition"))
+	})
+
+	mountConsole(router, consoleDistDir)
 
 	return router
 }

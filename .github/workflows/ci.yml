@@ -90,6 +90,50 @@ jobs:
           name: property-test-failure-log
           path: property-test-output.log
 
+  console:
+    # ledger-core-console DEVOPS (2026-08-25): commit-stage gate for
+    # web/console/, the React 18 + Vite 5 SPA. Guarded rather than assumed —
+    # web/console/ does not exist yet (DELIVER for this feature has not
+    # landed), so the probe step below makes every subsequent step a no-op
+    # until it does, instead of red-CI-by-absence. No PostgreSQL/Testcontainers
+    # dependency: the SPA is a pure client (DESIGN § System-Level Scope
+    # Confirmation), so this job has no `needs:` on the database-backed jobs
+    # below and no service block.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Probe for web/console (no-op until ledger-core-console DELIVER lands)
+        id: probe
+        run: |
+          if [ -f web/console/package.json ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=console::web/console/package.json not found -- ledger-core-console DELIVER has not landed yet. This job is a no-op until it does."
+          fi
+      - uses: actions/setup-node@v4
+        if: steps.probe.outputs.present == 'true'
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: web/console/package-lock.json
+      - name: npm ci
+        if: steps.probe.outputs.present == 'true'
+        working-directory: web/console
+        run: npm ci
+      - name: "ESLint (incl. eslint-plugin-boundaries: apiClient/keyStorage sole-accessor rule)"
+        if: steps.probe.outputs.present == 'true'
+        working-directory: web/console
+        run: npm run lint
+      - name: TypeScript type-check (tsc --noEmit)
+        if: steps.probe.outputs.present == 'true'
+        working-directory: web/console
+        run: npx tsc --noEmit
+      - name: Vite build
+        if: steps.probe.outputs.present == 'true'
+        working-directory: web/console
+        run: npm run build
+
   # --- database-backed gates, fan out after build ---------------------------
 
   integration:

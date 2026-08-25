@@ -729,3 +729,666 @@ System Constraints) · Elevator Pitch mandate · the 4 core stories (US-1
 through US-4) and their `job_id` traceability to J4/J5 · JTBD bridge (D4,
 unchanged) · framework-neutrality (D8) · overall scope verdict (PASS, no
 split).
+
+---
+
+## Wave: DESIGN / [REF] System-Level Scope Confirmation
+
+*Owner: nw-system-designer · interaction mode: Guide me*
+
+The user's direct answer, asked before this section was written: the console
+SPA introduces no new system-level architecture concern — no scaling,
+caching, distributed state, or message-queue need; it is a single client of
+the existing single-service backend. Verified below rather than
+rubber-stamped, against three concrete risks named in the DESIGN task brief.
+
+| Risk checked | Finding | Changes system architecture? |
+|---|---|---|
+| Does serving a static SPA bundle change the deployment shape? | No. `docs/product/architecture/brief.md` § System Architecture already states "Single Go binary plus a static asset bundle for the SPA, plus one PostgreSQL instance" — written during `ledger-core`'s own DESIGN wave, before this feature existed, specifically anticipating this bundle. `ledger-core-console` adds zero new deployables, hosts, or database roles | No |
+| Does ADR-006's "separate SPA" decision imply a second deployment topology (SPA hosted independently of the Go binary)? | No. "Separate" in `adr-006-separate-spa-console.md` is a toolchain/rendering decision — client-rendered TypeScript app vs. Go-templated HTML — not a deployment-topology one. Production still serves the built bundle from the existing single-service shape; neither the ADR's Decision nor its Consequences section proposes a second production host, CDN, or reverse proxy | No |
+| Does the SPA dev server need anything system-level (reverse proxy, gateway) in local dev? | Real, and already flagged by ADR-006 § Consequences: "CORS or a dev proxy is now a real concern in local development." But it is **build tooling** — a dev-server proxy entry or CORS headers scoped to the `clean` environment — not a new infrastructure component: no new server process, no load balancer, no persistent state, no rung on the scaling ladder. Recorded as an open item for DELIVER below, not designed here | No |
+
+**Estimation** (numbers before intuition, even when the answer is "no
+change" — per `nw-sd-framework`): P2 is a single seeded operator; § Persona
+ID confirms no second user of the console. Peak load: low single-digit
+requests/minute during a dogfood session. This does not reach the scaling
+ladder's first rung (a load balancer, justified only once a single server
+saturates) — nowhere close. No QPS/storage/bandwidth table is produced
+because there is no scale axis to estimate against; the number that matters
+here is "1 concurrent operator," not throughput.
+
+**Conclusion: the user's answer is confirmed, not overridden.** No scaling,
+caching, distributed-state, or message-queue concern is introduced by this
+feature. No ADR is written at the system level for `ledger-core-console` —
+there is no infrastructure decision to record, only a confirmation that none
+was needed (Core Principle 3: never introduce a component without a
+bottleneck to justify it — the inverse holds too, absence of a bottleneck is
+itself the finding).
+
+---
+
+## Wave: DESIGN / [REF] Decisions
+
+| ID | Decision | Verdict |
+|---|---|---|
+| SD-D1 | Console SPA adds no new system-level architecture concern | CONFIRMED — see § System-Level Scope Confirmation |
+| SD-D2 | Deployment shape unchanged from `ledger-core`'s DESIGN: one Go binary + static bundle + one PostgreSQL instance | CONFIRMED — no new deployable |
+| SD-D3 | No new infrastructure component (cache, queue, load balancer, CDN, shard) justified by this feature | CONFIRMED — no bottleneck exists to justify one |
+
+---
+
+## Wave: DESIGN / [REF] Open questions
+
+None of these are system-level infrastructure decisions; none block the
+Full-stack DESIGN handoff to `nw-ddd-architect` and `nw-solution-architect`:
+
+- **Dev-time CORS/proxy mechanism** (ADR-006 § Consequences) — dev-proxy
+  config vs. CORS headers on the `clean` environment, for the SPA-dev-server
+  → Go-API cross-origin call. Build-tooling choice, decided alongside
+  framework selection. Owner: DELIVER, informed by DEVOPS's `clean`
+  environment definition
+- **Operator API key delivery mechanism** (env-baked build vs.
+  dev-proxy-injected header, per § Pre-requisites) — an application-level
+  config decision, not an infrastructure one; no new component either way.
+  Owner: `nw-solution-architect` or DELIVER
+- **SPA framework selection** (ADR-006, D8) — explicitly deferred to
+  DELIVER; framework-neutral throughout DESIGN
+
+---
+
+## Wave: DESIGN / [REF] Reuse Analysis
+
+| Existing Component | File | Overlap | Decision | Justification |
+|---|---|---|---|---|
+| Deployment shape (single Go binary + static bundle + PostgreSQL) | `docs/product/architecture/brief.md` § System Architecture | Already anticipates serving the console's static bundle | EXTEND (documentation cross-reference only — no code or infra change) | Written during `ledger-core`'s DESIGN specifically to include "a static asset bundle for the SPA"; this feature's SPA is that bundle. Nothing to create at the system level |
+
+No new system-level component is created. Greenfield only at the
+application level (`web/console/` itself), which is `nw-solution-architect`'s
+Reuse Analysis to state in its own section.
+
+---
+
+## Wave: DESIGN / [REF] Domain Model Scope Confirmation
+
+*Owner: nw-ddd-architect · interaction mode: Guide me*
+
+The user's direct answer, asked before this section was written: the console
+SPA introduces no new domain model or bounded-context concern — no new
+aggregate, invariant, or bounded context; it is a pure client of existing
+domain concepts. Verified below against three concrete checks, rather than
+rubber-stamped.
+
+| Check | Finding | New domain concept / invariant? |
+|---|---|---|
+| Does anything the SPA newly displays deserve modelling, even client-side? | Two candidates scrutinized. `${fetched_at}` (`discuss/shared-artifacts-registry.md`) is a browser-clock timestamp labelling freshness — no invariant depends on it, it is never persisted or compared by the core, and the registry itself flags it must be re-pointed (not dual-sourced) if a server timestamp ever appears. The drift table row (`account_id`, `stored`, `computed`, `delta`) is a field-for-field rendering of the existing Drift concept and the `drifted` array already returned by `GET /console/verdict` — not a new shape. Both stay presentation state | No |
+| Does the Ubiquitous Language table need a new term for console vocabulary? | "Verdict" was checked against the existing table (`docs/product/architecture/brief.md` § Domain Model). It was **missing**, but it is not console-invented: it is already load-bearing in `ledger-core`'s own domain modelling (DDD-21, "the verdict withholds; it never accuses", `docs/feature/ledger-core/feature-delta.md`) and its HTTP contract (`GET /console/verdict`). This is a glossary backfill closing a pre-existing gap, not a new domain-modelling decision this feature introduces | Backfill only — added to the existing table |
+| Is any new invariant introduced? | No. US-3's AC is explicit — "no client-side recomputation of balance" — and every UAT scenario across US-1–US-4 renders fields verbatim from the two already-tested endpoints. I3 (`docs/product/architecture/brief.md` § Invariants) remains the sole deliberately-unenforced invariant, unchanged by this feature; there is nothing for a client-side domain core to guard, because there is no client-side domain core | No |
+
+**Conclusion: the user's answer is confirmed, not overridden.** No bounded
+context, aggregate, or invariant is added by `ledger-core-console`. One
+glossary backfill ("Verdict") is recorded, sourced from a pre-existing
+backend decision (DDD-21), not a new one made here. Full detail, including
+the extended Ubiquitous Language table and the presentation-state
+determination for both scrutinized candidates:
+`docs/product/architecture/brief.md` § Domain Model → "Console SPA
+(`ledger-core-console`, confirmed 2026-08-25)".
+
+---
+
+## Wave: DESIGN / [REF] Decisions
+
+| ID | Decision | Verdict |
+|---|---|---|
+| DDD-D1 | Console SPA adds no new bounded context, aggregate, or invariant | CONFIRMED — see § Domain Model Scope Confirmation |
+| DDD-D2 | `${fetched_at}` and the drift table row are presentation state, not domain concepts | CONFIRMED — neither carries an invariant or is persisted/compared by the domain core |
+| DDD-D3 | "Verdict" added to the Ubiquitous Language glossary, backfilling a gap from `ledger-core`'s own DDD-21, not introducing a new domain concept (the term is new to this table; the concept it names is not new to the domain) | CONFIRMED — see `docs/product/architecture/brief.md` § Domain Model → Ubiquitous language |
+
+---
+
+## Wave: DESIGN / [REF] Reuse Analysis
+
+| Existing Component | File | Overlap | Decision | Justification |
+|---|---|---|---|---|
+| Ledger bounded context, Account/Entry/Transaction aggregates, Ubiquitous Language table | `docs/product/architecture/brief.md` § Domain Model | Console renders Account, Entry, Trial balance, Drift, and (now-catalogued) Verdict exactly as already modelled | EXTEND (glossary backfill only — "Verdict" row added; no aggregate or invariant touched) | The console is a pure downstream consumer; no new bounded context or tactical pattern is warranted for a read-only rendering surface over an already-tested contract |
+
+No new bounded context or aggregate is created. Handoff to
+`nw-solution-architect` for application-level design (component
+decomposition, API-key delivery mechanism, dev-proxy/CORS) is unblocked —
+nothing here constrains its choices beyond what `docs/product/architecture/brief.md`
+§ Domain Model already states.
+
+---
+
+## Wave: DESIGN / [REF] Application Architecture
+
+*Owner: nw-solution-architect · interaction mode: Guide me · third and final
+architect in this feature's Full-stack DESIGN sequence*
+
+The three open questions § Pre-requisites named for this wave are now
+settled — the user answered all three directly, in Guide mode, before this
+section was written (React; client-side paste/localStorage key; Vite
+dev-proxy). Full design lives in `docs/product/architecture/brief.md` §
+Application Architecture → "Console SPA (`ledger-core-console`, confirmed
+2026-08-25)"; this section is the pointer plus the decision table DISTILL
+and DEVOPS read from `feature-delta.md` directly.
+
+**SPA framework and toolchain**: React 18, built with Vite 5 +
+`@vitejs/plugin-react`. CRA was checked and correctly not defaulted to — it
+is deprecated. Next.js and Parcel were considered and rejected (Next's
+server/routing machinery is unused complexity for a single client-rendered
+page; Parcel has a thinner React-proxy-config ecosystem for the exact
+dev-server-to-Go-API need this feature has). Full rationale:
+`docs/product/architecture/brief.md` § Technology choices.
+
+**Key delivery mechanism**: `ApiKeyPrompt` component gates first load when
+no key is stored; `keyStorage` (the sole `localStorage` accessor) persists
+it under `ledgerops_console_api_key`; `apiClient` (the sole `fetch()`
+caller) attaches `Authorization: Bearer <key>` — the exact header/scheme
+read from `internal/adapters/http/router.go:60-73`, not assumed — to every
+request. A `401 unidentified_caller` response clears the stored key and
+re-prompts with an inline "key rejected" message rather than retrying
+silently. Full flow, including the rejected env-baked and proxy-injected
+alternatives: `adr-010-console-client-side-api-key.md`.
+
+**Fetch timeout (concrete value)**: slice-03 and slice-04 both require a
+"bounded-time" error state but explicitly deferred the concrete number to
+DESIGN. Settled: `apiClient` applies a single 8-second `AbortController`
+timeout to every request, treated identically to a network failure (no
+separate "timed out" error class the operator has to distinguish). 8s
+rationale: single local operator, co-located Go binary, expected
+millisecond round-trips per § System-Level Scope Confirmation — generous
+enough to absorb a cold start, still reads as "immediate" against US-4's
+pitch. Fixed constant, not configurable this release. Full detail:
+`docs/product/architecture/brief.md` § Console SPA → "Fetch timeout".
+
+**Dev-time proxy**: Vite dev server proxies exactly three path prefixes
+(`/console/verdict`, `/accounts`, `/health`) to the local Go binary — no
+catch-all. Confirmed local-dev-tooling-only: there is no hosted environment
+(`clean`/`ci` are the entire matrix, per `docs/product/architecture/brief.md`
+§ Deployment shape), so "production" here is the built static bundle served
+by the same Go binary at the same origin, where neither CORS nor the proxy
+applies. No CORS headers were added to the Go API — that was the option
+DDR-2 exists to rule out.
+
+**Component decomposition** (`web/console/`): `ConsoleApp` (orchestrator),
+`ApiKeyPrompt` (US pre-requisite), `VerdictBanner` (US-1, with loading/error/
+freshness states), `DriftTable` (US-2), `EntryTrace` (US-3, three states —
+loading/loaded/error, mirroring `VerdictBanner`'s S1/S1a pattern per
+`discuss/journey-console-visual.md` S3a/S4a), `VerdictFetchError` (US-4),
+`apiClient` (driven port — sole `fetch()` caller, GET-only, no write methods
+exposed per Core Principle 12's read/write port-splitting rule, single 8s
+timeout on every request), `keyStorage` (sole `localStorage` accessor). Full
+table with contract-shape classification per component:
+`docs/product/architecture/brief.md` § Console SPA → "Component
+decomposition".
+
+**C4 diagrams**: System Context and Container (updated: concrete React
+label + auth-flow annotation, zero topology change) inherited from §
+System Architecture; a new Component-level (L3) diagram for `web/console/`
+internals is added, since the SPA now has 8 named components — see
+`docs/product/architecture/brief.md` § Console SPA.
+
+**Enforceable rule**: `apiClient`/`keyStorage` as sole `fetch`/`localStorage`
+accessors, recommended enforcement via `eslint-plugin-boundaries` or a
+directory-scoped `no-restricted-imports` rule in the CI lint job — the
+console-side equivalent of the Go side's `exhaustive`-linter obligation
+(DDD-12/DDD-17).
+
+**External integrations**: none. The console's only integration is the
+same-org Go API, already contract-tested. No contract-testing annotation
+added to the DEVOPS handoff.
+
+**Earned Trust**: DDR-2 forbids a new automated browser-level probe for
+`apiClient`'s network dependency. The manual dogfood demo US-4's UAT and
+this feature's Definition of Done item 4 already require (stop the API
+mid-session, confirm the named fallback appears) *is* that probe, executed
+per-release rather than in CI — an explicit trade-off given DDR-2, not a
+silent gap. `localStorage`-unavailable is flagged as an accepted, unbuilt
+gap (see brief.md for the fallback design if it ever becomes a real dogfood
+failure).
+
+---
+
+## Wave: DESIGN / [REF] Decisions
+
+| ID | Decision | Verdict |
+|---|---|---|
+| SA-D1 | SPA framework: React 18, toolchain: Vite 5 | CONFIRMED — user's direct answer; CRA deprecated, Next.js/Parcel rejected with rationale |
+| SA-D2 | Operator API key: client-side paste, `localStorage`, `Authorization: Bearer` header | CONFIRMED — see `adr-010-console-client-side-api-key.md` |
+| SA-D3 | Dev-time CORS/proxy: Vite dev-server proxy over exactly 3 path prefixes, local-dev-only | CONFIRMED — no CORS headers added to the Go API; no hosted environment exists to make "production" mean anything but the same-origin built bundle |
+| SA-D4 | 8-component decomposition for `web/console/`, mapped US-1–US-4 | CONFIRMED — see brief.md § Console SPA → Component decomposition |
+| SA-D5 | No new bounded context/aggregate/system component; console is a pure client | CONFIRMED — inherited from SD-D1–D3 and DDD-D1–D3, unchanged by application-level design |
+| SA-D6 | Fetch timeout: 8s, single constant applied to every `apiClient` request, treated as a network failure on expiry | CONFIRMED — closes the concrete-timeout obligation slice-03/slice-04 AC left open for DESIGN |
+
+---
+
+## Wave: DESIGN / [REF] Reuse Analysis
+
+| Existing Component | File | Overlap | Decision | Justification |
+|---|---|---|---|---|
+| *(none — `web/`, `web/console/` verified absent via `Glob web/**`)* | — | — | CREATE NEW | Genuinely greenfield at DESIGN time; no prior frontend code, toolchain, or dev-server config anywhere in the repo |
+| `requireOperatorKey` auth middleware | `internal/adapters/http/router.go:60-73` | Defines the exact contract (`Authorization: Bearer`, `401 unidentified_caller`) the console's key-delivery mechanism is designed against | EXTEND (contract reuse only, zero backend code touched) | Read directly from source, not assumed — the header scheme and refusal shape driving `ApiKeyPrompt`/`apiClient` are exact |
+| `GET /console/verdict`, `GET /accounts/{id}/entries`, `GET /health/trial-balance` wire shapes | `docs/product/outcomes/registry.yaml` OUT-4, OUT-5 | Console renders these shapes verbatim, no new field, no client-side derivation | EXTEND (consumption only) | Matches "no client-side recomputation of balance" AC across US-1–US-3 |
+
+Full application-level Reuse Analysis (identical content, SSOT copy):
+`docs/product/architecture/brief.md` § Application Architecture → Reuse
+Analysis → "Console SPA reuse pass".
+
+---
+
+## Wave: DESIGN / [REF] Outcome Collision Check
+
+`nwave-ai outcomes check-delta` could not be run directly — this agent
+invocation has no `Bash` tool available, and a prior session already
+recorded `nwave-ai outcomes register` failing with `FileNotFoundError` on
+its own packaged `schema.json` (memory: `nwave-outcomes-register-cli-broken`,
+2026-08-18). Rather than silently skip, `docs/product/outcomes/registry.yaml`
+(10 rows, OUT-1–OUT-10, all `feature: ledger-core`) was read and manually
+cross-checked against this feature's design instead.
+
+**Finding: no collision, and no new candidate outcome to register.**
+`ledger-core-console` introduces no new HTTP endpoint, no new
+operation/specification/invariant — it is a pure client of OUT-4 (`GET
+/accounts/{id}/entries`) and OUT-5 (`GET /console/verdict` /
+`GET /health/trial-balance`), rendering their existing shapes verbatim. Per
+the collision-check's own gate-scoping (D-6, "code-feature pipelines only")
+and its skip condition for features with "no new typed contract surface",
+this feature's DESIGN output does not add a row to the registry. Owner
+(DEVOPS or a later session with `Bash` access) should still attempt the CLI
+directly once the packaging bug is fixed, to confirm this manual finding
+rather than let it stand unverified indefinitely.
+
+---
+
+## Wave: DESIGN / [REF] Open questions — resolved
+
+All three items § Pre-requisites flagged for this wave are now closed:
+
+| Item | Resolution |
+|---|---|
+| SPA framework selection | React 18 (SA-D1) |
+| Operator API key delivery mechanism | Client-side paste/`localStorage` (SA-D2, ADR-010) |
+| Dev-time CORS/proxy setup | Vite dev-server proxy, local-dev-only (SA-D3) |
+
+No open question remains blocking DEVOPS or DELIVER for this feature.
+
+---
+
+## Wave: DESIGN / [REF] Wave Decisions Summary
+
+### Key Decisions
+- [SA-D1] React 18 + Vite 5 toolchain — CRA deprecated, Next.js/Parcel
+  rejected (see: `docs/product/architecture/brief.md` § Technology choices)
+- [SA-D2] Client-side paste/`localStorage` API key delivery, `Authorization:
+  Bearer` header, 401-triggers-reprompt flow (see:
+  `adr-010-console-client-side-api-key.md`)
+- [SA-D3] Vite dev-server proxy (3 exact path prefixes), confirmed
+  local-dev-tooling-only — no hosted environment exists, no CORS headers
+  added to the Go API (see: `docs/product/architecture/brief.md` § Console
+  SPA → Dev-time proxy)
+- [SA-D4] 8-component decomposition (`ConsoleApp`, `ApiKeyPrompt`,
+  `VerdictBanner`, `DriftTable`, `EntryTrace`, `VerdictFetchError`,
+  `apiClient`, `keyStorage`), each mapped to US-1–US-4 and classified by
+  contract shape (see: `docs/product/architecture/brief.md` § Console SPA →
+  Component decomposition)
+- [SA-D6] 8-second fetch timeout, single constant, closes the concrete-value
+  obligation slice-03/slice-04 AC deferred to DESIGN (see:
+  `docs/product/architecture/brief.md` § Console SPA → "Fetch timeout")
+
+### Architecture Summary
+- Pattern: same modular monolith / ports-and-adapters as `ledger-core`; the
+  console is a pure driving-side client, no new backend port
+- Paradigm: console-internal render layer is functional (pure-function
+  components); `apiClient`/`keyStorage` are the only two effectful modules,
+  isolated by design (Core Principle 12)
+- Key components: see § Reuse Analysis and § Application Architecture above
+
+### Reuse Analysis
+See § Reuse Analysis above (identical content mirrored into
+`docs/product/architecture/brief.md`).
+
+### Technology Stack
+- React 18: user's direct DESIGN answer; MIT-licensed, largest OSS
+  ecosystem among the multi-paradigm-TS options
+- Vite 5 + `@vitejs/plugin-react`: MIT-licensed, 2026 default for new React
+  SPAs, not CRA (deprecated), not Next.js (unused server machinery), not
+  Parcel (thinner proxy-config ecosystem for this feature's exact need)
+
+### Constraints Established
+- Zero backend code changes (DDR-2, held — no CORS headers added to the Go
+  API, no auth middleware change)
+- `apiClient`/`keyStorage` are the sole effectful modules; every other
+  component is a pure render function (enforced by ESLint boundary rule,
+  recommended to DEVOPS)
+- No contract-testing annotation needed — no external/third-party
+  integration introduced
+
+### Upstream Changes
+- None. This wave confirms and builds on SD-D1–D3 (system, no change) and
+  DDD-D1–D3 (domain, no change); no DISCUSS assumption is altered.
+
+**Handoff to `nw-platform-architect` (DEVOPS)**: ready. No external
+integrations requiring contract tests. Open items for DEVOPS: recommend
+wiring the `eslint-plugin-boundaries` (or equivalent) rule into the existing
+CI lint job; confirm the Vite build output path (`web/console/dist/`, or
+equivalent) is what the Go binary's static-asset embedding step serves at
+`/console` in the `clean`/`ci` environments.
+
+---
+
+## Wave: DEVOPS / [REF] Infrastructure inheritance
+
+*Owner: nw-platform-architect (Apex) · interaction mode: user's explicit
+choice — inherit, not re-decide*
+
+The user chose not to re-run the full 9-decision DEVOPS walkthrough for this
+feature. Every infrastructure decision below is inherited from `ledger-core`'s
+own DEVOPS wave (`docs/feature/ledger-core/feature-delta.md` § Wave: DEVOPS,
+and `docs/product/architecture/brief.md` § Deployment shape), extended only
+where this feature's TypeScript SPA genuinely adds surface area:
+
+| Decision | Inherited value | Extended for this feature? |
+|---|---|---|
+| Deployment target | None — no hosted environment exists (`brief.md` § Deployment shape) | No — this feature does not change that |
+| Container orchestration | Docker Compose (`docker-compose.yml`) | No new service added |
+| CI/CD platform | GitHub Actions (`.github/workflows/ci.yml`, `nightly.yml`) | Yes — one new job, `console`, added to `ci.yml` (see § CI/CD pipeline outline) |
+| Existing infrastructure | Yes, both infra and CI/CD exist (brownfield extension) | Confirmed — `ci.yml` read in full before extending, `web/` verified absent (DESIGN § Reuse Analysis) |
+| Observability/logging | None — all outcome KPIs are CI assertions or manual, no Prometheus/Datadog/ELK | No new stack; this feature's 3 KPIs are manual/self-report only (§ Monitoring contracts below) |
+| Deployment strategy | Recreate | Unchanged — no deployable exists to strategize a rollout for |
+| Continuous learning | No — no monitoring/alerting infra to extend | Unchanged, not applicable to a single-operator dogfood tool |
+| Git branching strategy | Trunk-based development | Unchanged — the new `console` job runs on the same `push`/`pull_request` triggers as every other job |
+| Mutation testing strategy | `nightly-delta` (`CLAUDE.md` § Mutation Testing Strategy, project-wide) | Applies project-wide; see § Mutation testing strategy below for the concrete gap this creates for TS code |
+
+---
+
+## Wave: DEVOPS / [REF] Environment matrix
+
+Full detail: `docs/feature/ledger-core-console/environments.yaml`.
+
+| Environment | Purpose | CI-gated? |
+|---|---|---|
+| `clean` | Fresh clone, `web/console/` built from zero | Indirectly — feeds the `ci` job |
+| `ci` | GitHub Actions ubuntu-latest — `npm ci`, ESLint, `tsc --noEmit`, `vite build` | Yes — new `console` job |
+| `with-stored-key` | Browser already holds a valid operator API key | No — manual dogfood parametrization only (DDR-2) |
+| `without-stored-key` | First load, `ApiKeyPrompt` gate | No — manual dogfood parametrization only |
+| `api-unreachable` | Go API stopped/unreachable mid-session | No — manual dogfood parametrization only |
+
+**Path convention note**: this file lives at
+`docs/feature/ledger-core-console/environments.yaml`, not under a `devops/`
+subdirectory — `ledger-core`'s own `environments.yaml` used
+`docs/feature/ledger-core/devops/environments.yaml` (pre-lean-v3.14
+precedent), but the current `nw-devops` skill's Outputs contract states the
+no-subdirectory path for lean v3.14. This feature's `feature-delta.md` is
+already written in that style, so the current convention was followed and the
+divergence from the sibling precedent is flagged here rather than silently
+introduced.
+
+---
+
+## Wave: DEVOPS / [REF] CI/CD pipeline outline
+
+New job `console` added to `.github/workflows/ci.yml`, in the commit-stage
+section (parallel with `lint`/`build`/`unit`/`property` — no database
+dependency, matching DESIGN's confirmation that the SPA is a pure client with
+no Testcontainers need):
+
+| Step | What | Gate |
+|---|---|---|
+| Probe | Checks for `web/console/package.json` | Guards every later step — this feature's DELIVER has not landed yet, so the job is a `::notice`-only no-op until it does, rather than red-CI-by-absence |
+| `npm ci` | Installs pinned deps from `package-lock.json` | Blocking once `web/console/` exists |
+| ESLint (incl. `eslint-plugin-boundaries`) | Enforces `apiClient`/`keyStorage` as sole `fetch()`/`localStorage` accessors — DESIGN's flagged item, now wired | Blocking |
+| `tsc --noEmit` | Type-check without emitting build output | Blocking — added as a separate step, mirroring the Go side's `go vet` / `golangci-lint` separation, since ESLint's TS rules alone do not guarantee full type-checker coverage |
+| `vite build` | Production bundle | Blocking |
+
+Trigger rules: same `on: [push, pull_request]` as every other job — no new
+trigger logic, consistent with trunk-based development (main is expected
+always releasable, so the gate runs on every push, not just release
+branches).
+
+**Local quality gates**: no pre-commit/pre-push hook framework exists yet in
+this repo (`environments.yaml`'s `coexistence_matrix` for `ledger-core`
+already flags `pre-commit` as "not yet installed"). No new local-gate
+obligation is added by this feature beyond what a developer's own `npm run
+lint`/`npm run build` already provides ad hoc — introducing a hook framework
+for one feature's frontend code, when the Go side has none either, would be
+scope creep past what DESIGN or DISCUSS asked for.
+
+---
+
+## Wave: DEVOPS / [REF] Build-output wiring — resolved
+
+DESIGN's second flagged item for DEVOPS: confirm where the Go binary serves
+the static bundle. At the point this was flagged, nothing served `/console`
+— `NewRouter` registered only API routes, no `http.FileServer`, no
+`embed.FS`, no static-asset route of any kind, and `web/` did not exist in
+the repository.
+
+**Decision (2026-08-25, user, explicit)**: treat the static-file-serving
+route as a DEVOPS/infra concern, not a fifth console user story. Rationale
+accepted: a minimal static-file-serving route is infrastructure — like the
+health endpoint — not console feature business logic. DDR-2's and this
+feature's Definition of Done's "no backend changes" language is scoped to
+US-1..US-4's *behavior* (the four SPA-rendering stories), not to the infra
+wiring required to serve the SPA's own HTML shell at all. This resolves the
+two options the open item left on the table in favor of option 1
+(DEVOPS/infra concern, in scope for this DEVOPS wave).
+
+**What was built** (`internal/adapters/http/`):
+
+- `router.go` — the operator-API-key middleware moved from the whole router
+  onto a `chi.Router.Group` scoped to the JSON API routes only
+  (`/accounts`, `/transfers`, `/health/trial-balance`, `/console/verdict`,
+  `/metrics`). `GET /console/verdict` still requires the key — nothing about
+  its own auth changed. What changed is that the key is no longer implicitly
+  required for paths that were never JSON endpoints to begin with.
+- `console_static.go` (new) — `mountConsole` registers `GET /console` (the
+  SPA shell, served via `http.ServeFile`) and `GET /console/*` (built
+  assets, e.g. `/console/assets/index-XXXX.js`, via
+  `http.StripPrefix` + `http.FileServer(http.Dir(...))`) against
+  `web/console/dist` — Vite's `build.outDir`, confirmed still the right path
+  (unchanged from the design-only recommendation, matches `brief.md` §
+  Deployment shape's "a static asset bundle for the SPA"). Both routes sit
+  **outside** the operator-API-key group: the HTML shell and its JS/CSS have
+  to load before any key can be presented, and DESIGN's own key-delivery
+  flow (`ApiKeyPrompt`) depends on the shell being reachable key-free.
+- **Absence handling**: `mountConsole` probes for
+  `web/console/dist/index.html` at `NewRouter` construction time (once, at
+  process startup) — the same probe-guarded posture the `console` CI job
+  already established for this exact "doesn't exist yet" problem
+  (`.github/workflows/ci.yml`, `console` job's own `if [ -f
+  web/console/package.json ]` step). If the file is absent, **no /console
+  route is registered at all**; the path 404s through chi's ordinary
+  unmatched-route handling, `cmd/api/` starts normally, and no existing test
+  is affected. This is true today (`web/console/` does not exist — DELIVER
+  for this feature has not landed) and remains true after DELIVER lands and
+  the dist files are actually present.
+- Tests: `console_static_test.go` pins both states with `t.TempDir` +
+  `os.Chdir` (no dependency on the repository's actual working tree) —
+  dist-absent → 404, dist-present → shell and asset served with no
+  `Authorization` header required, and `/console/verdict` still answers 401
+  without one. `go build ./...`, `go vet ./...`, and the full `internal/...`
+  and `tests/...` suites pass unchanged.
+
+**Known follow-up, not addressed by this change**: `Dockerfile`'s final
+stage copies only the compiled binary, not `web/console/dist/` — the
+compose-based deployment path (`brief.md` § Deployment shape) will not
+actually serve the console until the image build also copies the built
+bundle in. Deferred rather than edited here: `web/console/` does not exist
+yet, so wiring an unconditional `COPY --from=build .../web/console/dist
+./web/console/dist` now would need either a committed placeholder directory
+or a build-time conditional Docker does not natively support without a
+verified `docker build` run, which is outside this change's verification
+surface (`go build`/`go test`, per the task that requested this). Flagged
+here rather than silently left implicit, for whoever wires Docker before
+this feature is genuinely deployable end-to-end.
+
+---
+
+## Wave: DEVOPS / [REF] Monitoring contracts
+
+Full detail: `docs/product/kpi-contracts.yaml` (KPI-C1, KPI-C2, KPI-C3).
+
+| KPI | Measured by | Operational requirement |
+|---|---|---|
+| KPI-C1 (leading) — books-balance check without a terminal | Manual dogfood observation during demo; self-report first week of use | A demo checklist item, not a dashboard: operator opens the console with a stored key (`with-stored-key` environment) and confirms zero `curl` calls were needed to answer "does this add up?" |
+| KPI-C2 (leading) — drift explanation without a terminal | Manual dogfood observation during corruption demo | Same checklist, corruption-demo variant: confirm zero `curl /accounts/{id}/entries` calls were needed |
+| KPI-C3 (guardrail) — console/health-check verdict agreement | Manual comparison during each demo | Structural guardrail, not a metric — holds because `GET /console/verdict` and `GET /health/trial-balance` share `verdictHandler` (`router.go`); the checklist item is a design-review trip-wire ("did this PR add client-side verdict logic?"), not a runtime check |
+
+**Why no telemetry infrastructure is built**: DISCUSS's own Outcome KPIs
+table states all three as "Manual dogfood observation" / "self-report",
+explicitly not automated telemetry — consistent with the parent feature's
+framing (no hosted environment exists to emit from, DEVOPS D1) and with
+DDR-2 (no new automated browser probe). Building event collection, a
+dashboard, or alerting for KPIs DISCUSS itself scoped as manual would be
+over-engineering against Core Principle 3's own logic (no bottleneck exists
+here — there is no running production surface to instrument). The demo
+checklist above is the entire "instrumentation."
+
+---
+
+## Wave: DEVOPS / [REF] Deployment strategy
+
+Recreate — inherited unchanged from `ledger-core` (`brief.md` § Deployment
+shape). No new deployable exists for this feature to strategize a rollout
+for; the console ships as part of the same single Go binary + static bundle
+`ledger-core` already established, once § Build-output wiring above is
+resolved. Rollback contract: identical to `ledger-core`'s — redeploy the
+previous image tag. No frontend-specific rollback concern exists (no
+database migration, no schema) beyond ensuring the previous bundle is still
+buildable from the previous commit, which trunk-based development's
+always-releasable-main discipline already guarantees.
+
+---
+
+## Wave: DEVOPS / [REF] Mutation testing strategy
+
+**Selected**: `nightly-delta`, unchanged — already declared project-wide in
+`CLAUDE.md` § Mutation Testing Strategy and re-confirmed here rather than
+re-decided, per the user's inherit-existing-infrastructure choice.
+
+**The concrete gap this creates for TypeScript**, flagged rather than
+silently assumed away: `nightly.yml`'s existing `mutation-delta` job scopes
+itself to `*.go` files only (`git log --name-only ... -- '*.go'`) and is
+already honest that no mutation-testing tool is vendored for Go
+(`go.mod`/`go.sum` carry none). No JavaScript/TypeScript mutation-testing
+tool (e.g. Stryker Mutator) is vendored in this repo either, and none is
+added by this DEVOPS wave. Once `web/console/` exists, `nightly-delta`
+mutation testing does not extend to it automatically — the `mutation-delta`
+job's file-glob would need a second branch (`*.ts`/`*.tsx`) and a vendored
+tool before the project-wide `nightly-delta` strategy is actually true for
+the TS code, not merely declared to be. Recorded as an open item for
+whichever DEVOPS pass first touches `web/console/`'s CI wiring in earnest
+(likely this feature's own DELIVER, or a fast-follow) — not silently
+deferred past visibility.
+
+---
+
+## Wave: DEVOPS / [REF] Observability stack
+
+None — inherited unchanged. No Prometheus/Datadog/ELK/OpenTelemetry is
+introduced for this feature. `kpi-contracts.yaml`'s existing
+`runtime_instrumentation` section (logs/metrics/traces, all scoped to the Go
+service) is untouched; the console has no server-side runtime to instrument,
+and its 3 outcome KPIs are manual per § Monitoring contracts above. Logs,
+metrics, and traces sections of `kpi-contracts.yaml` remain `ledger-core`
+Go-service-only.
+
+---
+
+## Wave: DEVOPS / [REF] Branching strategy
+
+Trunk-based development — inherited unchanged (`brief.md` § Domain Model
+note on DDD-12: "required on every push per trunk-based branch protection").
+The new `console` CI job uses the identical `on: [push, pull_request]`
+trigger as every existing job; no branch-specific pipeline logic is
+introduced for this feature.
+
+---
+
+## Wave: DEVOPS / [REF] Coexistence matrix
+
+Full detail: `docs/feature/ledger-core-console/environments.yaml` §
+`coexistence_matrix`. Summary: the new `console` CI job and
+`eslint-plugin-boundaries` dependency are confined to `web/console/` and must
+not require any change to the Go `lint` job, `golangci-lint` config, or
+`nightly.yml`'s `mutation-delta` job (beyond the open item § Mutation testing
+strategy already names). `make demo-01`..`make demo-05` and `docker compose`
+remain unaffected until § Build-output wiring is resolved and implemented.
+
+---
+
+## Wave: DEVOPS / [REF] Pre-requisites
+
+- `ledger-core` backend delivered, running, contract-tested — confirmed
+  (inherited, unchanged by this wave)
+- `web/console/` does not yet exist — this DEVOPS wave's CI job and
+  `environments.yaml` are written defensively (probe-guarded) against that
+  fact, not assuming DELIVER has already landed
+- **Open, blocking DELIVER's end-to-end dogfoodability, not this wave's CI
+  gate**: § Build-output wiring above must be resolved (in scope for this
+  feature vs. deferred) before the console can be demoed from a built
+  binary rather than only `vite dev`
+- **Open, tracked, non-blocking**: § Mutation testing strategy's TS-coverage
+  gap
+
+---
+
+## Wave: DEVOPS / [REF] Wave Decisions Summary
+
+### Key Decisions
+- [D1] All 9 DEVOPS decision points inherited from `ledger-core`'s own
+  DEVOPS wave rather than re-run, per the user's explicit choice (see: §
+  Infrastructure inheritance)
+- [D2] One new CI job (`console`) added to `.github/workflows/ci.yml`,
+  probe-guarded against `web/console/` not yet existing (see: § CI/CD
+  pipeline outline)
+- [D3] `eslint-plugin-boundaries` wired into the new job per DESIGN's
+  flagged enforceable-architecture-rule item (see: § CI/CD pipeline outline)
+- [D4] Build-output wiring (static-file-serving route) is flagged, not
+  decided — genuine ambiguity against DDR-2's "zero backend changes"
+  constraint, left for the user or `nw-solution-architect` (see: § Build-output
+  wiring)
+- [D5] All 3 outcome KPIs confirmed manual/self-report per DISCUSS; no
+  telemetry infrastructure built (see: § Monitoring contracts)
+- [D6] `nightly-delta` mutation testing re-confirmed project-wide; TS-side
+  gap (no vendored tool, no file-glob branch) flagged as an open item, not
+  silently assumed covered (see: § Mutation testing strategy)
+
+### Infrastructure Summary
+- Deployment: none (no hosted environment) + Recreate strategy, both
+  inherited unchanged
+- CI/CD: GitHub Actions, trunk-based triggers, one new probe-guarded job
+- Observability: none — 3 outcome KPIs are manual dogfood checklist items
+- Mutation testing: `nightly-delta`, project-wide, TS-coverage gap flagged
+
+### Constraints Established
+- The `console` CI job must stay a no-op until `web/console/package.json`
+  exists — no red CI from this wave's change alone
+- No Prometheus/Datadog/ELK/OpenTelemetry introduced
+- No pre-commit/pre-push hook framework introduced for this feature alone
+- Static-file-serving wiring is explicitly undecided, not silently deferred
+
+### Upstream Changes
+- None to DISCUSS or DESIGN assumptions. § Build-output wiring surfaces a
+  genuine open question DESIGN's own Open Questions section did not fully
+  close (it named the mechanism as TBD but not the DDR-2 boundary question
+  this wave found on inspecting `router.go` directly) — recorded as an open
+  item for the user/architect, not written back as a changed assumption,
+  since nothing here overrides what DESIGN decided.
+
+**Per-wave peer review**: skipped. No trigger applies — deployment target,
+CI/CD platform, and observability stack are all inherited/unchanged; no
+security posture change; no novel deployment target. Per `nw-devops` SKILL.md
+§ Peer Review Gate, default is skip absent a trigger, and none of the four
+listed triggers (novel deployment target, new CI/CD framework, observability
+rewrite, security posture change) apply here.
+
+**Handoff to `nw-acceptance-designer` (DISTILL)**: ready.
+`docs/feature/ledger-core-console/environments.yaml` is written and
+parses the 5 target environments DISTILL should parametrize US-1's loading
+state (`without-stored-key`), US-3's entries-fetch-failure scenario
+(`api-unreachable`), and US-4's fallback scenario (`api-unreachable`) over.
+One open item is carried forward for DISTILL's awareness rather than
+resolved here: § Build-output wiring's undecided static-serving route may
+affect whether a "demo the built bundle" scenario is writable yet, versus
+only a `vite dev`-mode scenario.

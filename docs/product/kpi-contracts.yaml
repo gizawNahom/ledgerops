@@ -119,6 +119,67 @@ kpis:
       and a CI pass as necessary-but-not-sufficient. The KPI's stated
       measurement ("timed on a clean machine") stays a periodic manual check.
 
+  - id: KPI-C1
+    name: Books-balance check without a terminal
+    feature: ledger-core-console
+    target: "100% of routine checks resolved from the console alone, 0 curl calls"
+    class: manual
+    collected_by:
+      surface: "manual dogfood checklist — see docs/feature/ledger-core-console/feature-delta.md § Wave: DEVOPS / Monitoring contracts"
+      fields: ["curl_calls_avoided (self-report)"]
+      environment: [with-stored-key]
+    assertion: "none — self-report during demo and first week of use, not CI-gated"
+    emitted_as:
+      ci_job: none
+      summary_line: "n/a — no dashboard; recorded as a checklist item per demo"
+    fails_build: false
+    note: >
+      DISCUSS's Outcome KPIs section (feature-delta.md) explicitly scopes this
+      as "Manual dogfood observation during demo; self-report" — no hosted
+      environment exists to emit production telemetry from (inherited DEVOPS
+      D1), and DDR-2 forbids a new automated browser probe. Building
+      instrumentation infrastructure for a KPI DISCUSS scoped as manual would
+      be over-engineering, not thoroughness.
+
+  - id: KPI-C2
+    name: Drift explanation without a terminal
+    feature: ledger-core-console
+    target: "100% of corruption incidents identified via console UI alone, 0 curl calls to /accounts/{id}/entries"
+    class: manual
+    collected_by:
+      surface: "manual dogfood checklist — see docs/feature/ledger-core-console/feature-delta.md § Wave: DEVOPS / Monitoring contracts"
+      fields: ["curl_calls_avoided (self-report)"]
+      environment: [with-stored-key]
+    assertion: "none — self-report during corruption demo, not CI-gated"
+    emitted_as:
+      ci_job: none
+      summary_line: "n/a — no dashboard"
+    fails_build: false
+    note: "Same manual-observation framing as KPI-C1; see that entry's note."
+
+  - id: KPI-C3
+    name: Console/health-check verdict agreement (guardrail)
+    feature: ledger-core-console
+    target: "100% agreement between console verdict and GET /health/trial-balance, every demo run"
+    class: manual
+    collected_by:
+      surface: "manual comparison during each demo; no client-side reconciliation logic exists to audit"
+      fields: []
+      environment: [with-stored-key, api-unreachable]
+    assertion: "none — guardrail is structural (apiClient never recomputes a verdict; DESIGN § Component decomposition), not measured by a metric"
+    emitted_as:
+      ci_job: none
+      summary_line: "n/a"
+    fails_build: false
+    note: >
+      Guardrail already holds at the HTTP contract level
+      (milestone-04-proof-of-balance.feature, "The console and the health
+      check give the operator the same answer"), since GET /console/verdict
+      and GET /health/trial-balance share verdictHandler
+      (internal/adapters/http/router.go). This KPI's job is to catch a future
+      regression where the SPA adds client-side verdict logic that could
+      diverge — a code-review/design-review concern, not a runtime metric.
+
   - id: KPI-6
     name: Slice cycle time
     feature: ledger-core

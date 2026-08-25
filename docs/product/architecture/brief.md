@@ -101,6 +101,19 @@ checkpointed verification, period closing, and hash-chain tamper evidence. None
 are built. `GET /health/trial-balance` reports `entry_count` and `elapsed_ms` so
 degradation is measured rather than guessed.
 
+### Console SPA (`ledger-core-console`, confirmed 2026-08-25)
+
+Verified during `ledger-core-console`'s DESIGN wave, not assumed: the console
+SPA introduces no new system-level architecture concern. It is one more client
+of the existing single-service backend, already anticipated by the deployment
+shape above ("a static asset bundle for the SPA") and the Container diagram's
+`SPA` box — no new deployable, host, cache, queue, or scaling-ladder rung is
+added. The one real system-adjacent item ADR-006 flags — a dev-time CORS/proxy
+between the SPA dev server and the Go API — is build tooling, not
+infrastructure, and stays with DELIVER. Full verification:
+`docs/feature/ledger-core-console/feature-delta.md` § Wave: DESIGN /
+System-Level Scope Confirmation.
+
 ---
 
 ## Domain Model
@@ -124,6 +137,7 @@ was deferred (D8), and there is no second context to integrate with.
 | Drift | A stored balance that disagrees with the sum of its entries |
 | Wallet account | May never go negative (I4) |
 | System account | The counterparty value enters from. May go negative by design |
+| Verdict | The YES/NO statement of whether the ledger balances: "Books balance: YES" when no account has drifted, "NO" when at least one has. Not a new concept — already load-bearing in `ledger-core`'s own domain modelling (DDD-21, "the verdict withholds; it never accuses") and its HTTP contract (`GET /console/verdict`), but never previously entered into this table. Added here, backfilling a glossary gap `ledger-core-console`'s DESIGN surfaced, not introducing a new domain concept |
 
 ### Aggregates
 
@@ -262,6 +276,42 @@ Not applied. Event sourcing was considered and rejected — see
 facts, which delivers most of the auditability benefit without the projection
 machinery.
 
+### Console SPA (`ledger-core-console`, confirmed 2026-08-25)
+
+Verified during `ledger-core-console`'s DESIGN wave, not rubber-stamped: the
+console introduces no new bounded context, aggregate, or invariant. It is a
+pure client of Account, Entry, Transaction, Trial balance, Drift, and Verdict
+as already modelled above. Two console-only notions were checked explicitly
+and found to be presentation state, not domain concepts:
+
+- **`${fetched_at}`** — the client-observed browser-clock timestamp labelling
+  verdict freshness (`discuss/shared-artifacts-registry.md`). Stays
+  presentation state: it names no invariant, is never persisted or compared
+  by the domain core, and is explicitly *not* a server field — the registry
+  entry itself instructs that if a future backend timestamp appears, this
+  artifact must be re-pointed there, not dual-sourced. Nothing to model.
+- **The drift table row** (`account_id`, `stored`, `computed`, `delta`) — this
+  is a rendering of the existing Drift concept and the `GET /console/verdict`
+  `drifted` array field-for-field, not a new shape. No aggregate or value
+  object is introduced by displaying it in a table.
+
+No new invariant is introduced: the console never recomputes a balance
+client-side (US-3 AC, "no client-side recomputation of balance"), so there is
+nothing for the domain core to guard on the client. I3 stays the only
+deliberately-unenforced invariant, and stays enforced (by not being enforced)
+in exactly one place — the domain core / slice-04 verification — as before.
+
+One glossary gap was found and closed, not introduced: **Verdict** was
+already a load-bearing backend concept (DDD-21,
+`docs/feature/ledger-core/feature-delta.md`) before this feature existed, but
+had never been entered into the Ubiquitous language table above. Added as a
+backfill, not a new domain-modelling decision — see table above.
+
+**Conclusion: the user's answer is confirmed, not overridden.** No new
+bounded context, aggregate, or invariant. Full verification:
+`docs/feature/ledger-core-console/feature-delta.md` § Wave: DESIGN / Domain
+Model Scope Confirmation.
+
 ---
 
 ## Application Architecture
@@ -303,7 +353,16 @@ insertion).
 | `GET /accounts/{id}` | HTTP | 01 |
 | `GET /accounts/{id}/entries` | HTTP | 05 |
 | `GET /health/trial-balance` | HTTP | 04 |
+| `GET /console`, `GET /console/*` | HTTP, static (unauthenticated) | `ledger-core-console` DEVOPS |
 | Console SPA | Browser | 04, 05 |
+
+`GET /console` and `GET /console/*` serve the built SPA shell and its assets
+from `web/console/dist` (Vite's `build.outDir`), added by
+`ledger-core-console`'s DEVOPS wave (`internal/adapters/http/console_static.go`,
+feature-delta.md § Wave: DEVOPS / Build-output wiring). Deliberately outside
+the operator-API-key middleware group — the shell has to load before any key
+can be presented. `GET /console/verdict` (below) is unaffected: it stays a
+separate, authenticated JSON port the SPA calls after the shell has loaded.
 
 ### Driven ports (outbound) and adapters
 
@@ -409,7 +468,8 @@ it proves nothing about the database this binary is pointed at.
 | Migrations | `golang-migrate` | Plain SQL migrations, reviewable |
 | Property testing | `rapid` | Go's mature PBT library; invariant tests need generators |
 | TypeScript | 5.x | Console SPA |
-| SPA framework | *deferred to DELIVER* | Not architecturally significant; one page with a verdict |
+| SPA framework | **React 18** (`ledger-core-console`, confirmed 2026-08-25) | User's direct answer during `ledger-core-console` DESIGN (Guide mode). Largest OSS community/ecosystem of the multi-paradigm-TS options, no runtime license cost (MIT), team already has TypeScript+JSX familiarity from the domain-type work. No architectural weight beyond ADR-006's original framing — still one page with a verdict and two tables; framework choice does not change component boundaries |
+| Build toolchain | **Vite 5** + `@vitejs/plugin-react` | CRA is deprecated (no longer maintained as of 2025) and was explicitly not defaulted to. Vite (OSS, MIT) is the de facto 2026 default for new React SPAs: native ESM dev server, sub-second HMR, minimal config, first-class React plugin. Rejected alternatives: **Next.js** — brings SSR/file-based routing/server runtime the console has no use for (DDR-2: zero backend changes, single client-rendered page — Next's server machinery would be unused complexity, violating simplest-solution-first); **Parcel** — viable OSS alternative but smaller React-specific plugin ecosystem and less battle-tested `proxy` config for the dev-server-to-Go-API use case this feature specifically needs (see § Console SPA below) |
 
 ### Reuse Analysis
 
@@ -420,6 +480,253 @@ it proves nothing about the database this binary is pointed at.
 This table is trivially satisfied for slice 01 and stops being trivial from
 slice 02 onward, when the posting path already exists and must be extended
 rather than duplicated.
+
+**Console SPA reuse pass** (`ledger-core-console`, confirmed 2026-08-25):
+
+| Existing Component | File | Overlap | Decision | Justification |
+|---|---|---|---|---|
+| *(none — `web/` and `web/console/` verified absent)* | — | — | CREATE NEW | Filesystem search (`Glob web/**`) returned zero matches at DESIGN time. Genuinely greenfield: no prior frontend code, no build toolchain, no dev-server config exists anywhere in the repo. The Component decomposition table already anticipated this path (`web/console/`, CREATE NEW) during `ledger-core`'s own DESIGN — this pass confirms nothing was built against it yet |
+| HTTP driving-adapter auth middleware (`requireOperatorKey`) | `internal/adapters/http/router.go:60-73` | Defines the exact contract the console's key-delivery mechanism must satisfy: `Authorization: Bearer <key>` header, `401 {"error":"unidentified_caller"}` on mismatch | EXTEND (contract reuse only — zero backend code touched, per DDR-2) | The console does not reimplement or bypass this; it is designed *against* it. Read directly from source rather than assumed, so the header name/scheme (`Authorization: Bearer`) and refusal shape (`unidentified_caller`, 401) driving the ApiKeyPrompt flow below are exact, not guessed |
+| `GET /console/verdict`, `GET /accounts/{id}/entries`, `GET /health/trial-balance` wire shapes | `docs/product/outcomes/registry.yaml` OUT-4, OUT-5 | Console renders these JSON shapes verbatim, no new field, no client-side derivation | EXTEND (consumption only) | Matches US-1–US-3 AC ("no client-side recomputation of balance"); no new outcome candidate introduced — see § Outcome Collision Check below |
+
+### Console SPA (`ledger-core-console`, confirmed 2026-08-25)
+
+*Application-level design for `web/console/`, the third and final architect in
+this feature's Full-stack DESIGN sequence (system → domain → application).
+System-level and domain-level scope were both confirmed "no change" upstream
+(see § System Architecture and § Domain Model, both dated 2026-08-25); this
+subsection is the real design work those confirmations unblocked.*
+
+#### Component decomposition (`web/console/`)
+
+| Component | Responsibility | Traces to | Contract shape |
+|---|---|---|---|
+| `ConsoleApp` | Root orchestrator. Holds page-level state (authenticated? / loading / verdict / error), decides which of the components below to render, sequences the key-gate before any data fetch | US-1–US-4 (shell) | bounded-change (owns exactly the page-level UI state it declares; no other module mutates it) |
+| `ApiKeyPrompt` | The paste-in UI (see § Key delivery flow). Renders when no key is stored, or when a stored key is rejected. On submit, hands the pasted string to `keyStorage` and signals `ConsoleApp` to retry | Pre-requisite (D10), cross-cutting AC | pure-function render; the one effect (`keyStorage.set`) is delegated, not inlined |
+| `VerdictBanner` | Renders "Books balance: YES/NO" as the first sentence, the "Checking the books..." loading state, and the `${fetched_at}` freshness label | US-1 | pure-function render over `{verdict, loading, fetchedAt}` props |
+| `DriftTable` | Renders one row per `drifted[]` entry (`account_id`, `stored`, `computed`, `delta`); renders nothing when the array is empty; each row is clickable | US-2 | pure-function render over `drifted: DriftRow[]` |
+| `EntryTrace` | Fetches and renders `GET /accounts/{id}/entries` for a clicked `account_id`. Three states, mirroring `VerdictBanner`'s S1/S1a pattern rather than inventing a second design language: **loading** ("Loading entries for {account_id}...", same neutral-non-blank shape as US-1's "Checking the books..."), **loaded** (ordered rows: amount, counterparty, `recorded_at`, running balance), **error** (bounded-time error naming the exact failed `GET /accounts/{id}/entries` URL, per `journey-console-visual.md` S3a/S4a and slice-03's added AC) | US-3 | render is pure over fetched state; the fetch itself is delegated to `apiClient`, never inlined |
+| `VerdictFetchError` | Renders when `GET /console/verdict` fails or times out; names `GET /health/trial-balance` explicitly as the fallback | US-4 | pure-function render |
+| `apiClient` | The **only** module that calls `fetch()`. Attaches `Authorization: Bearer <key>` (read via `keyStorage.get()`) to every request; on any `401 unidentified_caller` response, calls `keyStorage.clear()` and surfaces an "auth rejected" signal to `ConsoleApp` rather than retrying silently; exposes `fetchVerdict()`, `fetchEntries(accountId)` — both GET-only, no write methods, matching Core Principle 12's read/write port-splitting rule even though there is nothing to write | Driven port for US-1–US-4 | unbounded-preservation is N/A (no mutation target exists); classified **bounded-change**: the only side effect is the outbound HTTP GET plus a possible `keyStorage.clear()` call, both declared, no hidden writes |
+| `keyStorage` | The **only** module that touches `window.localStorage`. `get()`, `set(key)`, `clear()`. No other component imports `localStorage` directly (capability injection, Core Principle 12 — a restricted `KeyStorage` capability is passed to `apiClient` and `ApiKeyPrompt`, never the ambient `window.localStorage` object) | Key delivery flow (below) | bounded-change: the declared mutation set is exactly one browser storage key, `ledgerops_console_api_key` |
+
+No component recomputes a balance or a verdict client-side (US-3 AC), which is
+why every render-layer component above is classified pure-function or
+bounded-change and never unbounded-preservation — there is no "plan" being
+previewed here, only a read-only rendering of an already-decided server
+answer.
+
+#### Key delivery flow (ApiKeyPrompt / `keyStorage`)
+
+Settled per the user's direct answer (Pre-requisites, DESIGN): the operator
+pastes the key client-side; it is stored in `localStorage` and sent as a
+header on every fetch. Exact header contract read from
+`internal/adapters/http/router.go:60-73` (`requireOperatorKey`), not assumed:
+`Authorization: Bearer <key>`, refused with `401 {"error":"unidentified_caller"}`
+on mismatch or missing key.
+
+- **Storage key name**: `ledgerops_console_api_key` (namespaced to avoid
+  collision with any future `localStorage` use by this or another
+  same-origin app served off the same Go binary).
+- **On page load**: `ConsoleApp` calls `keyStorage.get()` before any data
+  fetch.
+  - **Key present** → proceed straight to `VerdictBanner`'s normal US-1 flow
+    (`apiClient.fetchVerdict()` with the header attached).
+  - **Key absent** → render `ApiKeyPrompt` full-page, *before* any fetch is
+    attempted. This is a first-load gate, not an inline prompt reacting to a
+    failed request, because there is no valid request to attempt yet — an
+    unauthenticated fetch would only manufacture a 401 the UI would have to
+    special-case anyway. `ApiKeyPrompt` is a single text input (`type="password"`
+    so the pasted key is not shoulder-surfable) plus a submit button; on submit
+    it calls `keyStorage.set(value)` then signals `ConsoleApp` to retry the
+    normal load flow.
+- **On a 401 `unidentified_caller` from any endpoint** (verdict, entries, or
+  a re-check): `apiClient` calls `keyStorage.clear()` and surfaces a
+  distinct "key rejected" signal — `ConsoleApp` re-renders `ApiKeyPrompt`
+  with an inline message ("Key rejected — enter a valid operator API key")
+  rather than the blank first-load prompt, so the operator knows *why* they
+  are seeing the form again. The stored key is never silently retried or
+  left in place after a 401 — a rejected key staying in `localStorage` would
+  mean every subsequent fetch fails identically with no path to recovery
+  short of the operator guessing to clear it manually.
+- **This is the ApiKeyPrompt/ConfigPanel decision, resolved**: a dedicated
+  settings view was considered and rejected in favor of the inline first-load
+  gate — a separate settings route would require routing (React Router or
+  equivalent) for a single operator who sets the key once per browser and
+  rarely revisits it; the 401-triggered re-prompt already covers the
+  rotation case without a persistent settings surface. If a future feature
+  needs key rotation as a first-class action (not just recovery-from-401),
+  promote `ApiKeyPrompt` to a reachable settings view then — not speculated
+  on here.
+
+#### UX note carried forward, not a design obligation (Trigger-B skepticism)
+
+`discuss/journey-console-visual.md` flags that a YES verdict may not fully
+resolve a Trigger-B (reactive/already-suspicious) operator's anxiety — the
+sentence alone may read as insufficiently reassuring when the operator
+already suspects a problem. The journey doc itself frames this as "a design
+note for DESIGN, not a new story," and DDR-2 keeps it out of scope for
+automated testing. No component or AC is added for it here — `VerdictBanner`
+already states the verdict as the first sentence with a freshness label,
+which is the full extent of what US-1's AC asks for. Recorded so a future
+feature (e.g. showing *when* the last drift was found, not just *that*
+none exists now) has a documented starting point rather than rediscovering
+this nuance from scratch.
+
+#### Fetch timeout (concrete value — DESIGN obligation per slice-04/slice-03 AC)
+
+Both `slice-04-console-failure-does-not-strand-the-operator.md` and
+`slice-03-console-traces-a-drifted-account.md` require a "bounded-time"
+error state but explicitly leave the concrete number to DESIGN
+("define a concrete timeout in DESIGN — this brief does not prescribe
+one"). Settled here rather than left for DELIVER to invent ad hoc:
+
+- **`apiClient` applies an 8-second timeout (`AbortController`) to every
+  request** — `fetchVerdict()`, `fetchEntries(accountId)` alike, one
+  constant, not per-call tuning. On expiry, `apiClient` treats it
+  identically to a network failure (surfaces the same "fetch failed"
+  signal `VerdictFetchError`/`EntryTrace`'s error branch already handles),
+  not as a distinct error class — the operator does not need to know
+  *why* the request didn't return, only that it didn't.
+- **Rationale for 8s**: System-Level Scope Confirmation already established
+  this is a single local operator hitting a co-located Go binary at
+  single-digit requests/minute — the expected round-trip is milliseconds.
+  8 seconds is generous enough to absorb a slow cold start or a momentary
+  local hiccup without a false-positive error flash, while still reading
+  as "immediate" against US-4's pitch ("sees an explicit error message"
+  rather than an indefinite wait) — long unresponsiveness past 8s is
+  itself useful signal that something is actually wrong, not development
+  jitter.
+- Not configurable in this release — a fixed constant is simplest-solution-first
+  for a single-operator dogfood tool; revisit only if dogfood use surfaces
+  a real need to tune it.
+
+**Earned Trust note (Core Principle 13)**: `apiClient` is a driven adapter
+over two external dependencies — the network (Go API reachability) and the
+browser's `localStorage` (which can be disabled, full, or cleared out from
+under the app by the operator or browser privacy settings). DDR-2 forbids
+adding a new automated browser-level test to probe these mechanically. The
+probe that exists instead is the manual dogfood demo already required by
+US-4's UAT and this feature's Definition of Done item 4: deliberately
+stopping the API mid-session and confirming the named fallback appears. That
+scenario **is** the fault-injection probe for the network dependency,
+executed manually per release rather than in CI, which is the correct
+trade-off given DDR-2's explicit constraint rather than a silent omission of
+Earned Trust. `localStorage`-unavailable is not separately probed — flagged
+as an accepted gap, not a discovery: if it becomes a real dogfood failure
+mode, `keyStorage` should degrade to an in-memory-only fallback with a
+visible warning, not fail silently. Not built now; no evidence yet that it
+is needed for a single operator on one machine.
+
+#### Dev-time proxy (build tooling only — not a system/infra change)
+
+Confirms and makes concrete what § System Architecture already flagged as
+build tooling, not infrastructure (see that section's Console SPA
+subsection). Vite's dev server proxies exactly the three API path prefixes
+this feature consumes to the Go binary running locally — no catch-all
+proxy, so a typo'd path fails fast instead of silently reaching the wrong
+target:
+
+```ts
+// web/console/vite.config.ts (illustrative shape, not implementation)
+server: {
+  proxy: {
+    "/console/verdict": "http://localhost:8080",
+    "/accounts":        "http://localhost:8080",
+    "/health":          "http://localhost:8080",
+  },
+},
+```
+
+**This affects local dev tooling only.** There is no hosted environment
+(`clean`/`ci` are the entire matrix — § Deployment shape above); "production"
+for this feature means the built static bundle (`web/console/dist/`) served
+by the same Go binary that exposes the API, at the same origin. Same-origin
+in the built-and-served case means CORS and the dev proxy both become
+inapplicable outside `vite dev` — the proxy exists solely to make the *split*
+dev-server-on-one-port / Go-API-on-another-port topology look same-origin to
+the browser during development. This is exactly the item ADR-006 §
+Consequences flagged ("CORS or a dev proxy is now a real concern in local
+development") and the item the System-Level Scope Confirmation explicitly
+declined to treat as infrastructure. No CORS headers are added to the Go
+API — that was the rejected option, specifically to hold DDR-2's "zero
+backend changes" line.
+
+#### C4 — Component (`web/console/` internals)
+
+```mermaid
+graph TB
+    subgraph console["web/console/ (React SPA)"]
+        App["ConsoleApp<br/><i>orchestrator</i>"]
+        Prompt["ApiKeyPrompt<br/><i>first-load gate / 401 recovery</i>"]
+        Verdict["VerdictBanner<br/><i>US-1</i>"]
+        Drift["DriftTable<br/><i>US-2</i>"]
+        Trace["EntryTrace<br/><i>US-3</i>"]
+        FetchErr["VerdictFetchError<br/><i>US-4</i>"]
+        Client["apiClient<br/><i>only fetch() caller</i>"]
+        Storage["keyStorage<br/><i>only localStorage caller</i>"]
+    end
+
+    API["Go HTTP API<br/><i>internal/adapters/http/</i>"]
+
+    App -->|"renders when no key stored"| Prompt
+    Prompt -->|"stores pasted key"| Storage
+    App -->|"renders on fetch success"| Verdict
+    Verdict -->|"renders when drifted[] non-empty"| Drift
+    Drift -->|"click account_id, renders"| Trace
+    App -->|"renders on verdict-fetch failure"| FetchErr
+    App -->|"calls fetchVerdict / fetchEntries"| Client
+    Trace -->|"calls fetchEntries"| Client
+    Client -->|"reads key for Authorization header"| Storage
+    Client -->|"clears key on 401 unidentified_caller"| Storage
+    Client -->|"GET /console/verdict, GET /accounts/{id}/entries<br/>Authorization: Bearer &lt;key&gt;"| API
+```
+
+#### Updated C4 — Container (reflects concrete framework + key flow)
+
+```mermaid
+graph TB
+    subgraph client["Client side"]
+        SPA["Operations console<br/><i>React 18 SPA, Vite build</i><br/>verdict, drift list, entry drill-down<br/>key stored client-side (localStorage)"]
+    end
+
+    subgraph server["ledgerops deployable"]
+        API["HTTP API<br/><i>Go, net/http + chi</i><br/>transfers, accounts, health"]
+        APP["Application layer<br/><i>Go — use cases</i><br/>PostTransfer, VerifyBooks"]
+        DOM["Domain core<br/><i>Go — pure, no I/O</i><br/>Money, Entry, Transaction, posting rules"]
+    end
+
+    DB[("PostgreSQL 16")]
+
+    SPA -->|"JSON over HTTPS<br/>Authorization: Bearer &lt;operator key&gt;<br/>401 unidentified_caller triggers re-prompt"| API
+    API --> APP
+    APP --> DOM
+    APP -->|"ports"| DB
+```
+
+This supersedes the framework-neutral Container diagram above only in the
+`SPA` box's label and the auth-flow arrow annotation; no box, arrow, or
+topology is added or removed — confirming § System-Level Scope Confirmation's
+finding that this feature adds no new deployable.
+
+#### Enforceable architecture rule
+
+`apiClient` and `keyStorage` are the sole modules permitted to reference
+`fetch` and `window.localStorage` respectively. Recommended enforcement:
+`eslint-plugin-boundaries` (OSS, MIT) or a `no-restricted-globals` /
+`no-restricted-imports` ESLint rule scoped by directory, wired into the same
+CI lint job DEVOPS already runs for the Go side — so a component reaching
+around `apiClient` to call `fetch` directly fails CI, not review. This is
+the console-side equivalent of DDD-12/DDD-17's `exhaustive` linter
+obligation: a rule without enforcement erodes.
+
+#### External integration note
+
+No third-party/external API is introduced by this feature — the console's
+only integration point is the same-org Go API it has always been designed
+against, already contract-tested (`milestone-04-proof-of-balance.feature`,
+`milestone-05-entry-traceability.feature`). No contract-testing annotation
+is added to the DEVOPS handoff for this reason.
 
 ### Test strategy (testability as ranked driver)
 

@@ -1,0 +1,121 @@
+# environments.yaml — ledger-core-console
+# Consumed by DISTILL for Mandate 4 (Environmental Realism).
+#
+# Path convention note: this file lives directly under docs/feature/{id}/,
+# not docs/feature/{id}/devops/. ledger-core's own environments.yaml used
+# the devops/ subdirectory (pre-lean-v3.14 precedent); the nw-devops skill's
+# current Outputs contract states docs/feature/{feature-id}/environments.yaml
+# with no separate devops/ directory (lean v3.14 — environments.yaml is the
+# one machine artifact that survives outside feature-delta.md). This feature's
+# feature-delta.md is already written in the lean v3.14 Tier-1 [REF] style, so
+# this file follows the current skill convention rather than the older sibling
+# precedent. Flagged here rather than silently diverging.
+#
+# ledger-core-console is a pure client of an already-tested backend (DESIGN §
+# System-Level Scope Confirmation) with DDR-2 in force: no new automated
+# browser-level test may be added. The environments below therefore serve two
+# different consumers:
+#   - `clean` and `ci` are genuine CI-gate environments (the console job in
+#     .github/workflows/ci.yml runs npm ci / lint / tsc / build against them).
+#   - `with-stored-key`, `without-stored-key`, and `api-unreachable` are NOT
+#     automated CI environments — DDR-2 forbids a new browser-level probe.
+#     They exist to parametrize the MANUAL dogfood demo scenarios DISTILL
+#     writes for US-1 (loading/freshness), US-4 (verdict-fetch failure), and
+#     US-3's added entries-fetch-failure scenario, so those scenarios are
+#     written against named, reproducible browser states instead of an
+#     implicit "just open it and see."
+
+schema_version: "0.1"
+feature_id: ledger-core-console
+
+target_environments:
+  - name: clean
+    description: "Fresh clone; web/console/ built from zero with npm ci; no prior node_modules or dist/"
+    platform: [linux, macos, wsl]
+    preconditions:
+      - "Node 20 LTS available"
+      - "no web/console/node_modules or web/console/dist from a prior run"
+    used_by: ["console CI job (npm ci / lint / tsc / build)", "make demo-NN once static-serving wiring lands"]
+
+  - name: ci
+    description: "GitHub Actions ubuntu-latest; npm ci, ESLint (incl. eslint-plugin-boundaries), tsc --noEmit, vite build"
+    platform: [linux]
+    preconditions:
+      - "web/console/package.json and package-lock.json present (guards the `console` CI job — no-op with a ::notice until DELIVER lands)"
+      - "eslint-plugin-boundaries configured to enforce apiClient/keyStorage as sole fetch()/localStorage accessors (DESIGN § Enforceable architecture rule)"
+    used_by: ["every push and pull_request, per trunk-based branch protection"]
+
+  - name: with-stored-key
+    description: "Browser has a valid operator API key already in localStorage (ledgerops_console_api_key) from a prior session"
+    platform: [linux, macos, wsl]
+    preconditions:
+      - "localStorage key ledgerops_console_api_key set to a key the running Go API accepts"
+      - "Go API reachable at the same origin (built bundle) or via the Vite dev proxy (dev mode)"
+    used_by: ["US-1 manual dogfood scenarios (verdict states)", "US-2, US-3 manual dogfood scenarios (drift table, entry trace)"]
+    rationale: >
+      Every UAT scenario in US-1..US-3 assumes the operator already holds a
+      valid key (DISCUSS § Out-of-scope / D10) — this environment makes that
+      assumption an explicit, reproducible precondition rather than an
+      implicit one DISTILL's manual scenario would otherwise have to restate
+      per scenario.
+
+  - name: without-stored-key
+    description: "First browser load, no key ever stored — ApiKeyPrompt first-load gate"
+    platform: [linux, macos, wsl]
+    preconditions:
+      - "localStorage has no ledgerops_console_api_key entry (private/incognito window, or explicit clear)"
+    used_by: ["ApiKeyPrompt first-load gate manual verification (DESIGN § Key delivery flow)"]
+    rationale: >
+      DESIGN's key-delivery flow has two distinct entry paths (key present vs.
+      absent) that render different first components (VerdictBanner's normal
+      flow vs. ApiKeyPrompt). Neither US-1..US-4's UAT nor the Definition of
+      Done separately names this precondition; without a named environment,
+      a dogfood pass could exercise only the with-stored-key path and never
+      demo the gate DESIGN spent a full subsection designing.
+
+  - name: api-unreachable
+    description: "Go API process stopped or unreachable mid-session (US-4's fallback, and US-3's entries-fetch-failure scenario)"
+    platform: [linux, macos, wsl]
+    preconditions:
+      - "Console page already loaded successfully at least once (has a valid key)"
+      - "Go API process stopped or network path severed after page load, before the fetch under test"
+    used_by: ["US-4 manual dogfood demo (verdict fetch failure, Definition of Done item 4)", "US-3's entries-fetch-failure scenario (EntryTrace error state)"]
+    rationale: >
+      This is the manual fault-injection probe DDR-2 substitutes for an
+      automated one (brief.md § Console SPA → Earned Trust note): "deliberately
+      stopping the API mid-session and confirming the named fallback appears."
+      Naming it as an environment here is what lets DISTILL write the US-4 and
+      US-3-failure scenarios as parametrized manual checks rather than prose
+      buried in a slice brief.
+
+coexistence_matrix:
+  - tool: "golangci-lint (lint job)"
+    must_not_break: true
+    note: "The new `console` CI job runs independently, no shared config file; must not be merged into the Go lint job's config."
+  - tool: "make demo-01 .. make demo-05"
+    must_not_break: true
+    note: "Inherited from ledger-core's environments.yaml. Once the static-asset-serving wiring (see feature-delta.md § Wave: DEVOPS / Build-output wiring) lands, demo-NN must still run unmodified on a clean clone; the console build must not become a precondition demo-NN silently depends on until that wiring is explicitly designed."
+  - tool: docker compose (local dev stack)
+    must_not_break: true
+    note: "Vite dev server and its proxy are local-dev-tooling-only (DESIGN, confirmed) and run outside docker compose; the compose stack's app/postgres/migrate services are unaffected by this feature."
+  - tool: eslint-plugin-boundaries (new, this feature)
+    must_not_break: true
+    note: "New dependency introduced by DEVOPS per DESIGN's flagged item. Confined to web/console/; must not require a change to the Go lint job or its config."
+  - tool: nightly.yml mutation-delta job (Go-only today)
+    must_not_break: true
+    note: "No JS/TS mutation-testing tool is vendored yet — see feature-delta.md § Wave: DEVOPS / Mutation testing strategy for the open item this creates, rather than silently assuming TS coverage that does not exist."
+
+platform_coverage:
+  Linux: ["Ubuntu 22.04", "Ubuntu 24.04"]
+  WSL: ["WSL2"]
+  macOS: ["13.x", "14.x"]
+  CI: ["GitHub Actions ubuntu-latest"]
+  Node: ["20 LTS"]
+  Browser: ["evergreen Chromium/Firefox — no specific version pinned; single-operator dogfood tool, not a supported-matrix product"]
+
+deployment_assumptions:
+  - "There is no hosted environment (inherited from ledger-core DEVOPS D1). clean and ci are the CI-gate matrix; with-stored-key/without-stored-key/api-unreachable are manual-dogfood parametrization only, not additional CI jobs."
+  - "The console CI job (.github/workflows/ci.yml, `console`) MUST remain a no-op (via the package.json probe) until web/console/ exists, so this DEVOPS change does not redden CI before DELIVER lands."
+  - "Vite's build.outDir MUST match whatever path the Go binary is wired to serve at /console — currently UNRESOLVED, see feature-delta.md § Wave: DEVOPS / Build-output wiring (flagged, not decided, by this wave)."
+  - "No CORS headers are added to the Go API for this feature (DDR-2 held); the Vite dev proxy is local-dev-tooling-only and must not leak into the ci or clean environment's build output."
+  - "npm ci MUST be idempotent and MUST NOT mutate package-lock.json (lockfile drift would silently change what CI and a developer's machine build)."
