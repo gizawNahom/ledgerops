@@ -46,17 +46,17 @@ function fakeApiClient(): ApiClient {
 }
 
 describe("ConsoleApp -- the console decides what the operator sees first", () => {
-  it.skip("shows the key-entry form when no operator key has ever been stored", () => {
+  it("shows the key-entry form when no operator key has ever been stored", () => {
     render(<ConsoleApp keyStorage={fakeKeyStorage(null)} apiClient={fakeApiClient()} />);
     expect(screen.getByLabelText(/operator api key/i)).toBeInTheDocument();
   });
 
-  it.skip("goes straight to the verdict flow when a stored key is already present", async () => {
+  it("goes straight to the verdict flow when a stored key is already present", async () => {
     render(<ConsoleApp keyStorage={fakeKeyStorage("a-stored-key")} apiClient={fakeApiClient()} />);
     expect(await screen.findByText(/books balance/i)).toBeInTheDocument();
   });
 
-  it.skip("@error re-shows the key form with a 'key rejected' message after a 401, instead of the blank first-load form", async () => {
+  it("@error re-shows the key form with a 'key rejected' message after a 401, instead of the blank first-load form", async () => {
     const rejectingClient: ApiClient = {
       fetchVerdict: vi.fn().mockRejectedValue(new Error("unidentified_caller")),
       fetchEntries: vi.fn(),
