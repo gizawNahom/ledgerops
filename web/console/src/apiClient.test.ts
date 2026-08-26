@@ -44,27 +44,40 @@ describe("apiClient -- the operator's browser asks the API whether the books bal
     vi.restoreAllMocks();
   });
 
-  it("@walking_skeleton fetchVerdict sends the stored operator key and returns the verdict the API answered with", async () => {
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      status: 200,
-      json: async () => fakeVerdictWireShape(),
-    });
-    globalThis.fetch = fetchMock as unknown as typeof fetch;
+  it("@walking_skeleton @gap fetchVerdict sends the stored operator key and returns the verdict the API answered with, with no accumulated side effect across repeated calls (C4a)", async () => {
+    for (const callCount of [1, 2, 5]) {
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => fakeVerdictWireShape(),
+      });
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
 
-    const client = createApiClient({ keyStorage: createKeyStorage() });
-    const result = await client.fetchVerdict();
+      const client = createApiClient({ keyStorage: createKeyStorage() });
+      const results = [];
+      for (let i = 0; i < callCount; i += 1) {
+        results.push(await client.fetchVerdict());
+      }
 
-    expect(fetchMock).toHaveBeenCalledWith(
-      "/console/verdict",
-      expect.objectContaining({
-        headers: expect.objectContaining({ Authorization: "Bearer a-valid-operator-key" }),
-      })
-    );
-    expect(result.verdict).toBe("YES");
+      expect(fetchMock).toHaveBeenCalledTimes(callCount);
+      for (const call of fetchMock.mock.calls) {
+        expect(call).toEqual(
+          expect.arrayContaining([
+            "/console/verdict",
+            expect.objectContaining({
+              headers: expect.objectContaining({ Authorization: "Bearer a-valid-operator-key" }),
+            }),
+          ])
+        );
+      }
+      for (const result of results) {
+        expect(result).toEqual(results[0]);
+        expect(result.verdict).toBe("YES");
+      }
+    }
   });
 
-  it("fetchEntries(accountId) asks for exactly the clicked account's entries, with the same operator key attached", async () => {
+  it("fetchEntries(accountId) asks for exactly the clicked account's entries, with the same operator key attached, and no write method is exposed on the client (Core Principle 12 read/write port-splitting)", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       status: 200,
@@ -81,6 +94,8 @@ describe("apiClient -- the operator's browser asks the API whether the books bal
         headers: expect.objectContaining({ Authorization: "Bearer a-valid-operator-key" }),
       })
     );
+    expect((client as unknown as Record<string, unknown>).postTransfer).toBeUndefined();
+    expect((client as unknown as Record<string, unknown>).createAccount).toBeUndefined();
   });
 
   it("@error a rejected key clears itself so the operator is not stuck retrying a key that will never work", async () => {
@@ -117,31 +132,10 @@ describe("apiClient -- the operator's browser asks the API whether the books bal
   // 2 fast-check runs -- extends vitest's default 5s test timeout to match;
   // does not change what the test asserts.
 
-  it("no write method is exposed on the client -- the console can only ever ask, never change, the books (Core Principle 12 read/write port-splitting)", () => {
-    const client = createApiClient({ keyStorage: createKeyStorage() });
-    expect((client as unknown as Record<string, unknown>).postTransfer).toBeUndefined();
-    expect((client as unknown as Record<string, unknown>).createAccount).toBeUndefined();
-  });
-
   // --- Gap-closure tests (feature-delta.md Self-Completeness Audit) ---
-
-  it("@gap repeated fetchVerdict() calls cause no accumulated side effect (C4a)", async () => {
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      status: 200,
-      json: async () => fakeVerdictWireShape(),
-    });
-    globalThis.fetch = fetchMock as unknown as typeof fetch;
-
-    const client = createApiClient({ keyStorage: createKeyStorage() });
-    const firstResult = await client.fetchVerdict();
-    const secondResult = await client.fetchVerdict();
-
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    const [firstCall, secondCall] = fetchMock.mock.calls;
-    expect(firstCall).toEqual(secondCall);
-    expect(secondResult).toEqual(firstResult);
-  });
+  // C4a (repeated fetchVerdict calls have no accumulated side effect) is
+  // covered above, folded into the walking-skeleton test as a parametrized
+  // loop over call counts.
 
   it("@gap @property a malformed verdict response yields a typed failure, never a silent undefined (C6a)", async () => {
     const malformedVerdictBody = fc.oneof(

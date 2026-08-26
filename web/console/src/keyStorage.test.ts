@@ -37,7 +37,7 @@ describe("keyStorage -- the operator's pasted API key survives a page reload", (
     );
   });
 
-  it("@error clearing a rejected key leaves no trace for the next fetch to reuse", () => {
+  it("@error @gap clearing a rejected key leaves no trace for the next fetch to reuse, and clear() on a never-set key is a clean no-op, not an error (C4b)", () => {
     const storage = createKeyStorage();
     storage.set("a-key-the-api-rejected");
     const before = captureUniverse();
@@ -49,26 +49,23 @@ describe("keyStorage -- the operator's pasted API key survives a page reload", (
       [`localStorage.${STORAGE_KEY}`]: setTo(null),
     });
     expect(storage.get()).toBeNull();
+
+    // C4b gap: clear() on an already-cleared (never-set) key must also be a
+    // clean no-op, not an error. Example-based per TASK_CONTEXT
+    // implementation_notes -- a single boolean no-op assertion is not
+    // usefully quantifiable as a property.
+    const beforeSecondClear = captureUniverse();
+    expect(() => storage.clear()).not.toThrow();
+    const afterSecondClear = captureUniverse();
+
+    assertStateDelta(beforeSecondClear, afterSecondClear, new Set([`localStorage.${STORAGE_KEY}`]), {
+      [`localStorage.${STORAGE_KEY}`]: setTo(null),
+    });
+    expect(storage.get()).toBeNull();
   });
 
   it("a browser that has never stored a key answers get() with null, not a crash (C1: boundary/empty)", () => {
     const storage = createKeyStorage();
-    expect(storage.get()).toBeNull();
-  });
-
-  // C4b gap: clear() on a never-set key must be a clean no-op, not an error.
-  // Example-based per TASK_CONTEXT implementation_notes -- a single boolean
-  // no-op assertion is not usefully quantifiable as a property.
-  it("clear() on a never-set key is a clean no-op, not an error", () => {
-    const storage = createKeyStorage();
-    const before = captureUniverse();
-
-    expect(() => storage.clear()).not.toThrow();
-    const after = captureUniverse();
-
-    assertStateDelta(before, after, new Set([`localStorage.${STORAGE_KEY}`]), {
-      [`localStorage.${STORAGE_KEY}`]: setTo(null),
-    });
     expect(storage.get()).toBeNull();
   });
 });
