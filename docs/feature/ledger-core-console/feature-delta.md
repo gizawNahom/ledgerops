@@ -1888,3 +1888,112 @@ skipped, 0 tests in the IMPORT_ERROR/FIXTURE_BROKEN/SETUP_FAILURE or
 WRONG_ASSERTION/OBSERVABLE_NOT_AT_PORT categories.
 
 **DISTILL → DELIVER handoff: READY.**
+
+---
+
+## Wave: DELIVER / [REF] Implementation summary
+
+All 8 DISTILL-scaffolded units (`keyStorage`, `apiClient`, `ConsoleApp`,
+`ApiKeyPrompt`, `VerdictBanner`, `DriftTable`, `EntryTrace`,
+`VerdictFetchError`) implemented via the 3-phase RED→GREEN→COMMIT canon,
+one roadmap step per unit (steps 01-01..04-01), plus two orchestrator-added
+gap-closure steps discovered at the Post-Merge Integration Gate (01-04,
+01-05 — see § Upstream Issues below). All 4 documented Self-Completeness
+gaps (C4a, C4b, C6a, C6c) closed as part of their owning unit's step.
+
+## Wave: DELIVER / [REF] Files modified
+
+**Production** (`web/console/src/`): `keyStorage.ts`, `apiClient.ts`,
+`components/{ConsoleApp,ApiKeyPrompt,VerdictBanner,DriftTable,EntryTrace,
+VerdictFetchError}.tsx`, plus `web/console/index.html` and
+`web/console/src/main.tsx` (new — see § Upstream Issues).
+**Tests**: matching `*.test.{ts,tsx}` for every production file above, all
+unskipped from DISTILL's `.skip` scaffolding and extended with gap-closing
+and (for `ConsoleApp`) integration-wiring cases.
+**Docs**: this file (`## Wave: DELIVER` sections).
+
+## Wave: DELIVER / [REF] Scenarios green count
+
+39 of 39 Vitest test cases green as of 2026-08-26 (31 DISTILL-scaffolded +
+4 completeness-gap cases + 4 `ConsoleApp` integration-wiring cases added at
+step 01-04). `tsc --noEmit`: 0 errors. `go build ./...`, `go vet ./...`,
+`go test ./internal/adapters/http/... -run Console`: all pass unchanged.
+
+## Wave: DELIVER / [REF] DoD check
+
+| # | DoD item | Status |
+|---|---|---|
+| 1 | All story AC checked and passing | PASS — 39/39 tests green |
+| 2 | Verdict sentence renders first, healthy/empty/corrupted | PASS (unit-verified); real-stack manual dogfood not run this session — no Postgres in this sandbox (see § Upstream Issues) |
+| 3 | Drift table / entry trace render with no client-side recomputation | PASS — verified in `DriftTable.test.tsx`/`EntryTrace.test.tsx`, props passed verbatim |
+| 4 | Fetch-failure fallback demoed by stopping the API mid-session | NOT RUN this session — same sandbox limitation as item 2 |
+| 5 | Peer review passed (haiku reviewer, standard rigor) | PENDING — Phase 4, next |
+| 6 | Refactor pass (L1-L4) | PENDING — Phase 3, next |
+| 7 | Zero backend changes introduced | PASS — this session touched only `web/console/`; `console_static.go`/router changes were DEVOPS-wave, prior session |
+| 8 | All four slices shipped and demoed within the release | Shipped (US-1..US-4 all wired and unit-tested); demoed = unit-level only this session |
+| 9 | Learning hypothesis confirmed/disproved per slice | Not re-visited this session — out of scope for this DELIVER pass, tracked as open |
+
+## Wave: DELIVER / [REF] Demo evidence
+
+No live-browser or live-Postgres demo was executed this session (sandbox
+has no running Postgres instance — `go run ./cmd/api` fails at
+`health.startup.refused` before binding a port). What WAS verified directly
+this session:
+- `cd web/console && npm run build` → exit 0, produces
+  `web/console/dist/index.html` (0.33 kB) + `dist/assets/index-*.js`
+  (148.96 kB / 48.06 kB gzip)
+- `go test ./internal/adapters/http/... -run Console -v` → 4/4 sub-tests
+  PASS (`TestConsoleRoute_DistAbsent_NoRouteRegistered`,
+  `TestConsoleRoute_DistPresent_ServesShellWithoutOperatorKey` ×3), now
+  exercised against the real `web/console/dist/` this step produced (this
+  test previously only ran against a synthetic `t.TempDir` fixture, since
+  `web/console/dist/` did not exist until this session)
+- `go build ./...`, `go vet ./...` — both clean
+
+Per DDR-2, the browser-rendering seam (an operator actually opening
+`http://localhost:8080/console` in a real browser against a live Postgres-
+backed binary) stays a documented, manually-verified gap — this session's
+sandbox cannot run Postgres, so DoD items 2 and 4's manual-dogfood
+verification is deferred to whoever next has a live environment, not
+silently marked done.
+
+## Wave: DELIVER / [REF] Quality gates
+
+| Gate | Outcome |
+|---|---|
+| Roadmap review (Phase 1) | CONDITIONAL_APPROVAL_PENDING_REVISION — one non-blocking sizing-flag finding on step 01-03 (13 scenarios, no `@sizing-review-needed` tag), explicitly waived by the user rather than fixed, since the reviewer itself called it non-blocking |
+| Per-step TDD cycle (Phase 2) | 8 steps, all RED→GREEN→COMMIT, all `EXECUTED`/`PASS` in `execution-log.json` |
+| Post-Merge Integration Gate (Phase 3.5) | Build/typecheck/unit/Go-side PASS; live-browser/live-Postgres demo deferred (sandbox limitation, see § Demo evidence) |
+| Refactor (Phase 3) | PENDING |
+| Adversarial review (Phase 4) | PENDING |
+| Mutation testing (Phase 5) | SKIPPED per `nightly-delta` project-wide strategy (`CLAUDE.md`) |
+| Integrity verification (Phase 6) | PENDING |
+
+## Wave: DELIVER / [WHY] Upstream Issues
+
+Two gaps were found only at the Post-Merge Integration Gate, not by any
+earlier wave or by the per-step TDD cycle, because each unit's own tests
+pass in isolation and neither gap has a DISTILL-authored scaffold covering
+it (DDR-2 puts the browser-mount seam outside automated scope):
+
+1. **`ConsoleApp` never wired `DriftTable`/`EntryTrace`/`VerdictFetchError`,
+   and collapsed `AuthRejectedError`/`FetchFailedError` into one state.**
+   Step 01-03's roadmap criteria (written by `nw-solution-architect` during
+   roadmap-fill) only specified the US-1 key-gate/verdict scenarios, not
+   the full orchestrator responsibility DESIGN's own component table
+   assigns `ConsoleApp` ("decides which of the components below to
+   render"). Closed by orchestrator-added step 01-04 — see git history for
+   `ConsoleApp.tsx`. Deviation from DESIGN: none — DESIGN's component
+   decomposition already specified this wiring, it was just under-scoped
+   in the DELIVER roadmap's step 01-03.
+2. **No Vite app entry point existed** (`index.html` / `src/main.tsx`) —
+   `vite build` failed outright. DISTILL's 8 scaffolds cover every
+   component/module DESIGN named, but DESIGN's component table does not
+   separately name the composition-root file every Vite/React app needs;
+   this is implicit infrastructure, not a DESIGN omission per se. Closed
+   by orchestrator-added step 01-05.
+
+Both are recorded here per the Document Update (Back-Propagation) contract;
+neither required reopening DISCUSS/DESIGN/DEVOPS/DISTILL decisions — both
+were additive, in-scope fixes consistent with what those waves already
+specified.

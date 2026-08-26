@@ -1,0 +1,187 @@
+{
+  "roadmap": {
+    "project_id": "ledger-core-console",
+    "created_at": "2026-08-25T13:47:16Z",
+    "total_steps": 8
+  },
+  "phases": [
+    {
+      "id": "01",
+      "name": "Foundational: effectful adapters + walking-skeleton shell (US-1)",
+      "steps": [
+        {
+          "id": "01-01",
+          "name": "keyStorage GREEN + C4b gap closure",
+          "criteria": [
+            "Pasted key, once set, is exactly what get() returns next (roundtrip property)",
+            "Clearing a rejected key leaves no trace for the next fetch to reuse",
+            "A never-stored key answers get() with null, not a crash",
+            "New: clear() on a never-set key is a clean no-op, not an error (C4b)"
+          ],
+          "test_file": "web/console/src/keyStorage.test.ts",
+          "scenario_name": "keyStorage -- the operator's pasted API key survives a page reload",
+          "files_to_modify": [
+            "web/console/src/keyStorage.ts"
+          ],
+          "implementation_notes": "TEST PARADIGM (TypeScript/Vitest project): keyStorage uses fast-check property tests (already scaffolded). New C4b gap test is example-based -- single boolean no-op assertion, not usefully quantifiable. STAGE CONTEXT: NEW code, Stage 0 (paradigm-from-day-zero), greenfield scaffold. Effect boundary: sole localStorage accessor (Core Principle 12 capability injection)."
+        },
+        {
+          "id": "01-02",
+          "name": "apiClient GREEN + C4a/C6a/C6c gap closure",
+          "criteria": [
+            "fetchVerdict sends the stored operator key and returns the verdict (walking skeleton, already enabled)",
+            "fetchEntries(accountId) requests exactly the clicked account's entries with the same key",
+            "A rejected (401) key clears itself; no write method is exposed on the client",
+            "Timeout and network-error read identically to the operator (fetch-failed signal)",
+            "New: repeated fetchVerdict() calls cause no accumulated side effect (C4a); malformed response yields typed failure, not silent undefined (C6a); only auth-rejected/fetch-failed ever escape (C6c)"
+          ],
+          "test_file": "web/console/src/apiClient.test.ts",
+          "scenario_name": "apiClient -- the operator's browser asks the API whether the books balance",
+          "files_to_modify": [
+            "web/console/src/apiClient.ts"
+          ],
+          "implementation_notes": "TEST PARADIGM (TypeScript/Vitest project): apiClient uses fast-check property tests (already scaffolded, e.g. timeout/network-error equivalence). New C4a/C6a/C6c gap tests also use fast-check where the input space is meaningfully quantifiable (malformed response shapes), example-based otherwise. STAGE CONTEXT: NEW code, Stage 0, greenfield scaffold. Sole fetch() caller, GET-only, 8s AbortController timeout (SA-D6), bounded-change contract shape."
+        },
+        {
+          "id": "01-03",
+          "name": "ConsoleApp, ApiKeyPrompt, VerdictBanner GREEN (US-1 skeleton)",
+          "criteria": [
+            "No stored key shows the key-entry form; a stored key goes straight to the verdict flow",
+            "A 401 re-shows the key form labeled 'key rejected', not the blank first-load form",
+            "Pasted key is masked (type=password) and handed to keyStorage on submit",
+            "Verdict sentence renders first, above any table, for healthy/empty/corrupted ledgers",
+            "While the fetch is outstanding, page shows 'Checking the books...', never blank; once resolved, verdict is labeled with client-observed fetchedAt"
+          ],
+          "test_file": "web/console/src/components/ConsoleApp.test.tsx",
+          "scenario_name": "ConsoleApp -- key-gate / verdict / error-rejected state machine",
+          "files_to_modify": [
+            "web/console/src/components/ConsoleApp.tsx",
+            "web/console/src/components/ApiKeyPrompt.tsx",
+            "web/console/src/components/VerdictBanner.tsx"
+          ],
+          "implementation_notes": "TEST PARADIGM (TypeScript/Vitest project): all three components use @testing-library/react example-based prop-to-render tests (already scaffolded); PBT adds no value over a pure-function render's small, enumerable prop space. STAGE CONTEXT: NEW code, Stage 0, greenfield scaffold. ConsoleApp is bounded-change (owns declared page-level UI state); ApiKeyPrompt and VerdictBanner are pure-function renders."
+        },
+        {
+          "id": "01-04",
+          "name": "ConsoleApp full wiring: DriftTable, EntryTrace, error-type-aware fetch failure",
+          "criteria": [
+            "On fetchVerdict success with non-empty drifted[], DriftTable renders below VerdictBanner listing each drifted account",
+            "Clicking a DriftTable row calls apiClient.fetchEntries(accountId) and renders EntryTrace for that account (loading -> loaded/error)",
+            "A FetchFailedError from fetchVerdict (network/timeout) renders VerdictFetchError naming GET /health/trial-balance, NOT the key-rejected prompt",
+            "An AuthRejectedError from fetchVerdict (401) still renders ApiKeyPrompt with rejected=true, unchanged from step 01-03",
+            "No client-side balance recomputation anywhere in the new wiring (props passed verbatim from apiClient responses)"
+          ],
+          "test_file": "web/console/src/components/ConsoleApp.test.tsx",
+          "scenario_name": "ConsoleApp -- full wiring: drift table, entry trace, and error-type-aware fetch failure (gap found at Post-Merge Integration Gate, not a DISTILL-authored scenario -- DDR-2 leaves top-level browser wiring an untested seam; this step ADDS integration-level unit tests against ConsoleApp to close the TBU gap component-level tests could not catch)",
+          "files_to_modify": [
+            "web/console/src/components/ConsoleApp.tsx",
+            "web/console/src/components/ConsoleApp.test.tsx"
+          ],
+          "implementation_notes": "GAP-CLOSURE STEP (orchestrator-added at Phase 3.5 Post-Merge Integration Gate, not part of original DISTILL scaffold roster): DriftTable, EntryTrace, VerdictFetchError were each GREEN in isolation (steps 02-01/03-01/04-01) but never wired into ConsoleApp, which only rendered ApiKeyPrompt/VerdictBanner. Additionally ConsoleApp.catch() collapsed AuthRejectedError and FetchFailedError into the same key-rejected state -- a real bug, not just missing wiring: a network failure would incorrectly show the key-entry prompt instead of VerdictFetchError. TEST PARADIGM: @testing-library/react example-based tests, extending ConsoleApp.test.tsx with new integration-shaped cases (mocking apiClient at the ConsoleApp boundary, as the existing tests already do)."
+        },
+        {
+          "id": "01-05",
+          "name": "Vite app entry point (index.html + src/main.tsx) mounting ConsoleApp",
+          "criteria": [
+            "npm run build (tsc --noEmit && vite build) succeeds and produces web/console/dist/index.html + assets",
+            "src/main.tsx mounts <ConsoleApp keyStorage={createKeyStorage()} apiClient={createApiClient({keyStorage})} /> into a DOM root via ReactDOM.createRoot",
+            "index.html has a root div matching the id main.tsx mounts against, and a <script type=module src=/src/main.tsx> (Vite convention)"
+          ],
+          "test_file": null,
+          "scenario_name": "Vite entry point -- documented untested seam per DDR-2 (browser-level mount is out of automated scope); verified by npm run build succeeding, not a unit test",
+          "files_to_modify": [
+            "web/console/index.html",
+            "web/console/src/main.tsx"
+          ],
+          "implementation_notes": "GAP-CLOSURE STEP (orchestrator-added at Phase 3.5 Post-Merge Integration Gate). No DISTILL scaffold or test covers this file -- DDR-2 explicitly carves the browser-rendering seam out of automated test scope, and this is exactly that seam: the file that actually calls ReactDOM.createRoot(...).render(<ConsoleApp .../>) against a real DOM element in a real browser. Without it,  fails (\"Could not resolve entry module index.html\") and internal/adapters/http/console_static.go (already built, DEVOPS wave) has nothing to serve at GET /console -- the whole feature is unreachable end-to-end without this file existing, even though every component passes its own unit tests. Verification is  succeeding + manual dogfood per DDR-2/DoD item 2, not a new automated test."
+        }
+      ]
+    },
+    {
+      "id": "02",
+      "name": "US-2: name the drifted accounts",
+      "steps": [
+        {
+          "id": "02-01",
+          "name": "DriftTable GREEN",
+          "criteria": [
+            "A single drifted account renders with stored, computed, and delta values",
+            "A healthy ledger renders no drift table at all (n=0)",
+            "Two drifted accounts are both named, each with its own numbers (n=many)",
+            "A healthy account is never swept into the drift table",
+            "Clicking a row hands the console the exact account_id clicked (US-2 -> US-3 handoff)"
+          ],
+          "test_file": "web/console/src/components/DriftTable.test.tsx",
+          "scenario_name": "DriftTable -- renders one row per drifted account",
+          "files_to_modify": [
+            "web/console/src/components/DriftTable.tsx"
+          ],
+          "implementation_notes": "TEST PARADIGM (TypeScript/Vitest project): @testing-library/react example-based prop-to-render tests (already scaffolded), covering n=0/1/many per Self-Completeness C3. STAGE CONTEXT: NEW code, Stage 0, greenfield scaffold. Pure-function render over drifted: DriftRow[]; no fetch, no localStorage."
+        }
+      ]
+    },
+    {
+      "id": "03",
+      "name": "US-3: trace a drifted account to its entries",
+      "steps": [
+        {
+          "id": "03-01",
+          "name": "EntryTrace GREEN",
+          "criteria": [
+            "Clicking a drifted account shows its entries, ordered, with a running balance column",
+            "Each entry shows counterparty and recorded_at alongside amount and running balance",
+            "A healthy account's trace shows no divergence at any row",
+            "Loading state renders a neutral non-blank panel, mirroring VerdictBanner's pattern",
+            "A failed or timed-out entries fetch names the exact GET /accounts/{id}/entries URL as fallback, no blank panel or indefinite spinner"
+          ],
+          "test_file": "web/console/src/components/EntryTrace.test.tsx",
+          "scenario_name": "EntryTrace -- fetches and renders entries for a clicked account",
+          "files_to_modify": [
+            "web/console/src/components/EntryTrace.tsx"
+          ],
+          "implementation_notes": "TEST PARADIGM (TypeScript/Vitest project): @testing-library/react example-based prop/fetched-state-to-render tests (already scaffolded). STAGE CONTEXT: NEW code, Stage 0, greenfield scaffold. Render is pure over fetched state; fetch itself delegated to apiClient (built in 01-02), never inlined. Three states mirror VerdictBanner's loading/loaded/error pattern."
+        }
+      ]
+    },
+    {
+      "id": "04",
+      "name": "US-4: console failure does not strand the operator",
+      "steps": [
+        {
+          "id": "04-01",
+          "name": "VerdictFetchError GREEN",
+          "criteria": [
+            "A failed or timed-out verdict fetch renders an explicit error, never a blank page or unending spinner",
+            "The error text names GET /health/trial-balance explicitly as the fallback, not a generic message"
+          ],
+          "test_file": "web/console/src/components/VerdictFetchError.test.tsx",
+          "scenario_name": "VerdictFetchError -- renders on verdict-fetch failure",
+          "files_to_modify": [
+            "web/console/src/components/VerdictFetchError.tsx"
+          ],
+          "implementation_notes": "TEST PARADIGM (TypeScript/Vitest project): @testing-library/react example-based prop-to-render tests (already scaffolded). STAGE CONTEXT: NEW code, Stage 0, greenfield scaffold. Pure-function render; no fetch, no localStorage. Names GET /health/trial-balance explicitly per US-4 AC."
+        }
+      ]
+    }
+  ],
+  "implementation_scope": {
+    "source_directories": [
+      "web/console/src/",
+      "web/console/src/components/"
+    ],
+    "test_directories": [
+      "web/console/src/",
+      "web/console/src/components/"
+    ],
+    "excluded_patterns": [
+      "web/console/src/testing/**",
+      "web/console/node_modules/**",
+      "web/console/dist/**"
+    ]
+  },
+  "validation": {
+    "status": "pending",
+    "reviewer": "nw-software-crafter-reviewer",
+    "approved_at": "TODO"
+  }
+}
