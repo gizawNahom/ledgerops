@@ -14,9 +14,11 @@ export interface DriftRow {
   delta: number;
 }
 
-// Verbatim field names from GET /console/verdict's JSON contract
-// (milestone-04-proof-of-balance.feature; slice-01 brief lists the exact
-// field set: verdict, imbalance_minor, entry_count, elapsed_ms, drifted).
+// Domain shape for GET /console/verdict's JSON contract -- wire-to-domain
+// translation lives in apiClient.ts (parseVerdictWireShape); the real
+// backend's wire struct is internal/adapters/http/handlers.go:315-320
+// (verdictBody), with the verdict sentence produced at handlers.go:332-336
+// (verdictBodyFor) and drifted rows shaped by driftWire at handlers.go:302-307.
 export interface VerdictResponse {
   verdict: VerdictStatus;
   imbalanceMinor: number;
@@ -25,8 +27,12 @@ export interface VerdictResponse {
   drifted: DriftRow[];
 }
 
-// Verbatim field names from GET /accounts/{id}/entries -- US-3 AC forbids
+// Domain shape for GET /accounts/{id}/entries -- US-3 AC forbids
 // client-side recomputation, so this shape is rendered, never derived.
+// Wire-to-domain translation lives in apiClient.ts (parseEntriesWireShape /
+// parseEntryRow); the real backend's wire shape is produced by
+// entriesToWire at internal/adapters/http/handlers.go:110-122, wrapped in
+// the {"entries": [...]} envelope built at handlers.go:104-106.
 export interface EntryRow {
   amount: number;
   counterparty: string;

@@ -46,83 +46,112 @@ export class FetchFailedError extends Error {
   }
 }
 
-function isVerdictStatus(value: unknown): value is VerdictStatus {
-  return value === "YES" || value === "NO";
+// verdictStatusFromWire -- the real backend emits the full sentence
+// (handlers.go:333-336, driven by verdictBody.Verdict at handlers.go:316),
+// not a bare "YES"/"NO" literal. Maps the exact sentence to the domain
+// VerdictStatus; anything else is not a legal wire value.
+function verdictStatusFromWire(value: unknown): VerdictStatus | undefined {
+  if (value === "Books balance: YES") {
+    return "YES";
+  }
+  if (value === "Books balance: NO") {
+    return "NO";
+  }
+  return undefined;
 }
 
-function isDriftRow(value: unknown): value is DriftRow {
-  if (typeof value !== "object" || value === null) {
-    return false;
+// parseDriftRow -- driftWire (handlers.go:302-307) carries a snake_case
+// account_id and decimal amounts serialized as strings. Validates the wire
+// shape, then constructs the domain DriftRow with accountId mapped from
+// account_id and stored/computed/delta converted to Number.
+function parseDriftRow(raw: unknown): DriftRow {
+  if (typeof raw !== "object" || raw === null) {
+    throw new FetchFailedError("malformed drift row");
   }
-  const candidate = value as Record<string, unknown>;
-  return (
-    typeof candidate.accountId === "string" &&
-    typeof candidate.stored === "number" &&
-    typeof candidate.computed === "number" &&
-    typeof candidate.delta === "number"
-  );
+  const candidate = raw as Record<string, unknown>;
+  if (
+    typeof candidate.account_id !== "string" ||
+    typeof candidate.stored !== "string" ||
+    typeof candidate.computed !== "string" ||
+    typeof candidate.delta !== "string"
+  ) {
+    throw new FetchFailedError("malformed drift row");
+  }
+  return {
+    accountId: candidate.account_id,
+    stored: Number(candidate.stored),
+    computed: Number(candidate.computed),
+    delta: Number(candidate.delta),
+  };
 }
 
 // parseVerdictWireShape -- translates the snake_case GET /console/verdict
-// wire shape into the domain's VerdictResponse. Any field missing or
-// wrong-typed folds into FetchFailedError (C6a) instead of producing a
-// partially-populated object.
+// wire shape (verdictBody, handlers.go:315-320) into the domain's
+// VerdictResponse. Any field missing or wrong-typed folds into
+// FetchFailedError (C6a) instead of producing a partially-populated object.
 function parseVerdictWireShape(raw: unknown): VerdictResponse {
   if (typeof raw !== "object" || raw === null) {
     throw new FetchFailedError("malformed verdict response body");
   }
   const body = raw as Record<string, unknown>;
+  const verdict = verdictStatusFromWire(body.verdict);
   const drifted = body.drifted;
 
   if (
-    !isVerdictStatus(body.verdict) ||
+    verdict === undefined ||
     typeof body.imbalance_minor !== "number" ||
     typeof body.entry_count !== "number" ||
     typeof body.elapsed_ms !== "number" ||
-    !Array.isArray(drifted) ||
-    !drifted.every(isDriftRow)
+    !Array.isArray(drifted)
   ) {
     throw new FetchFailedError("malformed verdict response body");
   }
 
   return {
-    verdict: body.verdict,
+    verdict,
     imbalanceMinor: body.imbalance_minor,
     entryCount: body.entry_count,
     elapsedMs: body.elapsed_ms,
-    drifted,
+    drifted: drifted.map(parseDriftRow),
   };
 }
 
+// parseEntryRow -- one row of entriesToWire (handlers.go:110-122): amount
+// and running_balance are decimal strings on the wire. Converts both to
+// Number for the domain EntryRow shape.
 function parseEntryRow(raw: unknown): EntryRow {
   if (typeof raw !== "object" || raw === null) {
     throw new FetchFailedError("malformed entry row");
   }
   const row = raw as Record<string, unknown>;
   if (
-    typeof row.amount !== "number" ||
+    typeof row.amount !== "string" ||
     typeof row.counterparty !== "string" ||
     typeof row.recorded_at !== "string" ||
-    typeof row.running_balance !== "number"
+    typeof row.running_balance !== "string"
   ) {
     throw new FetchFailedError("malformed entry row");
   }
   return {
-    amount: row.amount,
+    amount: Number(row.amount),
     counterparty: row.counterparty,
     recordedAt: row.recorded_at,
-    runningBalance: row.running_balance,
+    runningBalance: Number(row.running_balance),
   };
 }
 
-// parseEntriesWireShape -- entries arrive as a bare array (GET
-// /accounts/{id}/entries). An empty array is trivially valid (no rows to
-// validate); non-array bodies fold into FetchFailedError.
+// parseEntriesWireShape -- GET /accounts/{id}/entries wraps its rows in an
+// {"entries": [...]} envelope (handlers.go:104-106), not a bare array.
+// Unwraps the envelope, then maps each element through parseEntryRow.
 function parseEntriesWireShape(raw: unknown): EntryRow[] {
-  if (!Array.isArray(raw)) {
+  if (typeof raw !== "object" || raw === null) {
     throw new FetchFailedError("malformed entries response body");
   }
-  return raw.map(parseEntryRow);
+  const body = raw as Record<string, unknown>;
+  if (!Array.isArray(body.entries)) {
+    throw new FetchFailedError("malformed entries response body");
+  }
+  return body.entries.map(parseEntryRow);
 }
 
 // performGet -- the single fetch call site. Attaches the operator key,
