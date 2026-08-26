@@ -129,6 +129,10 @@ jobs:
         if: steps.probe.outputs.present == 'true'
         working-directory: web/console
         run: npx tsc --noEmit
+      - name: Vitest (component + unit tests)
+        if: steps.probe.outputs.present == 'true'
+        working-directory: web/console
+        run: npm test
       - name: Vite build
         if: steps.probe.outputs.present == 'true'
         working-directory: web/console
