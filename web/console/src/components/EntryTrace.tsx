@@ -21,39 +21,67 @@ function formatAmount(amount: number): string {
 
 function EntryTraceRow({ entry }: { entry: EntryRow }): JSX.Element {
   return (
-    <tr>
-      <td>{formatAmount(entry.amount)}</td>
-      <td>{entry.counterparty}</td>
-      <td>{entry.recordedAt}</td>
-      <td>{entry.runningBalance}</td>
+    <tr className="border-b border-line last:border-b-0">
+      <td
+        className={
+          "whitespace-nowrap px-4 py-3 text-right font-mono tabular-nums " +
+          (entry.amount >= 0 ? "text-good" : "text-bad")
+        }
+      >
+        {formatAmount(entry.amount)}
+      </td>
+      <td className="whitespace-nowrap px-4 py-3 font-mono text-ink">{entry.counterparty}</td>
+      <td className="whitespace-nowrap px-4 py-3 font-mono text-ink-muted">{entry.recordedAt}</td>
+      <td className="whitespace-nowrap px-4 py-3 text-right font-mono tabular-nums text-ink">
+        {entry.runningBalance}
+      </td>
     </tr>
   );
 }
 
 export function EntryTrace({ accountId, phase, entries }: EntryTraceProps): JSX.Element {
   if (phase === "loading") {
-    return <p>Loading entries for {accountId}...</p>;
+    return (
+      <div className="flex items-center gap-2.5 rounded-lg border border-line bg-surface-sunken px-4 py-6 text-sm text-ink-muted">
+        <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-line-strong border-t-accent motion-reduce:animate-none" />
+        <p className="m-0">Loading entries for {accountId}...</p>
+      </div>
+    );
   }
 
   if (phase === "error" || entries === null) {
-    return <p>Could not load entries. Fallback: {entriesFetchUrl(accountId)}</p>;
+    return (
+      <p className="m-0 rounded-lg border border-bad-border bg-bad-soft px-4 py-3 text-sm text-bad">
+        Could not load entries. Fallback: {entriesFetchUrl(accountId)}
+      </p>
+    );
   }
 
   return (
-    <table>
-      <thead>
-        <tr>
-          <th>Amount</th>
-          <th>Counterparty</th>
-          <th>Recorded At</th>
-          <th>Running Balance</th>
-        </tr>
-      </thead>
-      <tbody>
-        {entries.map((entry) => (
-          <EntryTraceRow key={`${entry.counterparty}-${entry.recordedAt}`} entry={entry} />
-        ))}
-      </tbody>
-    </table>
+    <div className="overflow-x-auto rounded-lg border border-line">
+      <table className="w-full border-collapse text-sm">
+        <thead>
+          <tr className="border-b border-line bg-surface-sunken">
+            <th className="whitespace-nowrap px-4 py-2.5 text-right text-[11px] font-semibold uppercase tracking-wide text-ink-faint">
+              Amount
+            </th>
+            <th className="whitespace-nowrap px-4 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wide text-ink-faint">
+              Counterparty
+            </th>
+            <th className="whitespace-nowrap px-4 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wide text-ink-faint">
+              Recorded At
+            </th>
+            <th className="whitespace-nowrap px-4 py-2.5 text-right text-[11px] font-semibold uppercase tracking-wide text-ink-faint">
+              Running Balance
+            </th>
+          </tr>
+        </thead>
+        <tbody>
+          {entries.map((entry) => (
+            <EntryTraceRow key={`${entry.counterparty}-${entry.recordedAt}`} entry={entry} />
+          ))}
+        </tbody>
+      </table>
+    </div>
   );
 }

@@ -132,18 +132,43 @@ export function ConsoleApp({ keyStorage, apiClient }: ConsoleAppProps): JSX.Elem
     case "fetch-failed":
       return <VerdictFetchError fallbackPath={FALLBACK_HEALTH_PATH} />;
     case "checking":
-      return <VerdictBanner loading={true} verdict={null} fetchedAt={null} />;
+      return (
+        <div className="mx-auto max-w-3xl px-6 py-10">
+          <VerdictBanner loading={true} verdict={null} fetchedAt={null} />
+        </div>
+      );
     case "showing-verdict":
       return (
-        <div>
+        <div className="mx-auto flex max-w-3xl flex-col gap-7 px-6 py-10">
           <VerdictBanner loading={false} verdict={state.verdict} fetchedAt={state.fetchedAt} />
-          <DriftTable drifted={state.drifted} onSelectAccount={selectAccount} />
+          <div>
+            <div className="mb-3 flex items-baseline justify-between">
+              <h2 className="m-0 text-xs font-semibold uppercase tracking-wide text-ink-faint">
+                Drift
+              </h2>
+              <span className="font-mono text-xs text-ink-faint">
+                {state.drifted.length} account{state.drifted.length === 1 ? "" : "s"}
+              </span>
+            </div>
+            {state.drifted.length > 0 ? (
+              <DriftTable drifted={state.drifted} onSelectAccount={selectAccount} />
+            ) : (
+              <p className="m-0 rounded-lg border border-dashed border-line-strong px-5 py-7 text-center text-sm text-ink-faint">
+                No drifted accounts — every ledger balances against its computed total.
+              </p>
+            )}
+          </div>
           {state.selection && (
-            <EntryTrace
-              accountId={state.selection.accountId}
-              phase={state.selection.phase}
-              entries={state.selection.entries}
-            />
+            <div>
+              <h2 className="m-0 mb-3 text-xs font-semibold uppercase tracking-wide text-ink-faint">
+                Entry trace
+              </h2>
+              <EntryTrace
+                accountId={state.selection.accountId}
+                phase={state.selection.phase}
+                entries={state.selection.entries}
+              />
+            </div>
           )}
         </div>
       );

@@ -6,6 +6,7 @@ import ReactDOM from "react-dom/client";
 import { ConsoleApp } from "./components/ConsoleApp";
 import { createKeyStorage } from "./keyStorage";
 import { createApiClient } from "./apiClient";
+import "./index.css";
 
 const keyStorage = createKeyStorage();
 const apiClient = createApiClient({ keyStorage });
