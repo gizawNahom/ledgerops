@@ -148,8 +148,18 @@ jobs:
           go-version-file: ${{ env.GO_VERSION_FILE }}
           cache: true
       - name: Install pact-go native library (libpact_ffi)
+        # -d /tmp (not $RUNNER_TEMP): pact-go's cgo LDFLAGS on linux,amd64
+        # hardcode the linker search path to -L/tmp -L/opt/pact/lib
+        # -L/usr/local/lib (see internal/native/lib.go upstream) -- these
+        # three are the ONLY directories the Go provider verification step
+        # below can link libpact_ffi.so against, and LD_LIBRARY_PATH cannot
+        # widen that set (it only affects runtime dlopen, not the
+        # build-time `ld -lpact_ffi` resolution cgo performs). /opt/pact/lib
+        # and /usr/local/lib are both root-owned on ubuntu-latest, so /tmp
+        # -- always present and writable -- is the only viable target; no
+        # GITHUB_ENV/LD_LIBRARY_PATH propagation is needed as a result.
         if: steps.probe.outputs.present == 'true'
-        run: go run github.com/pact-foundation/pact-go/v2 -l ERROR install
+        run: go run github.com/pact-foundation/pact-go/v2 -l ERROR install -d /tmp
       - name: Go provider verification (replays console's pinned Pact contract)
         if: steps.probe.outputs.present == 'true'
         run: go test ./internal/adapters/http/... -run TestPactProvider_HonorsConsoleContract -v
