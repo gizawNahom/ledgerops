@@ -18,15 +18,49 @@ import { createApiClient, AuthRejectedError, FetchFailedError } from "./apiClien
 import { createKeyStorage } from "./keyStorage";
 import { STORAGE_KEY } from "./testing/domainTypes";
 
-function fakeVerdictWireShape() {
-  // Verbatim GET /console/verdict wire shape (snake_case on the wire; the
-  // client's job is exactly this translation into VerdictResponse).
+function fakeVerdictWireShape(overrides: { verdict?: "YES" | "NO"; drifted?: unknown[] } = {}) {
+  // Verbatim GET /console/verdict wire shape (RCA-confirmed against the real
+  // backend, see confirmed-mismatch table in fix-console-wire-shape-contract
+  // step 01-01): `verdict` is the full sentence the server actually emits,
+  // not a bare "YES"/"NO" literal; drifted rows carry snake_case
+  // `account_id` and stringified decimal amounts, not camelCase numbers.
+  const status = overrides.verdict ?? "YES";
   return {
-    verdict: "YES",
+    verdict: status === "YES" ? "Books balance: YES" : "Books balance: NO",
     imbalance_minor: 0,
     entry_count: 6,
     elapsed_ms: 4,
-    drifted: [],
+    drifted: overrides.drifted ?? [],
+  };
+}
+
+function fakeDriftedRowWireShape() {
+  // Verbatim drifted[] row shape from the real backend (confirmed-mismatch
+  // table): account_id is snake_case; stored/computed/delta are decimal
+  // strings, not numbers.
+  return {
+    account_id: "acct-42",
+    stored: "5.00",
+    computed: "4.50",
+    delta: "0.50",
+  };
+}
+
+function fakeEntriesWireEnvelope(rows: unknown[]) {
+  // Verbatim GET /accounts/{id}/entries wire shape: the response is wrapped
+  // in an {"entries": [...]} envelope, not a bare array (confirmed-mismatch
+  // table).
+  return { entries: rows };
+}
+
+function fakeEntryRowWireShape() {
+  // Verbatim entries[] row shape: amount and running_balance are decimal
+  // strings on the wire (confirmed-mismatch table).
+  return {
+    amount: "12.34",
+    counterparty: "bob-demo",
+    recorded_at: "2026-08-20T10:00:00Z",
+    running_balance: "100.00",
   };
 }
 
@@ -77,11 +111,28 @@ describe("apiClient -- the operator's browser asks the API whether the books bal
     }
   });
 
+  it("@gap fetchVerdict translates snake_case drifted[] rows with stringified amounts into the domain DriftRow shape (confirmed-mismatch table)", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => fakeVerdictWireShape({ verdict: "NO", drifted: [fakeDriftedRowWireShape()] }),
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const client = createApiClient({ keyStorage: createKeyStorage() });
+    const result = await client.fetchVerdict();
+
+    expect(result.verdict).toBe("NO");
+    expect(result.drifted).toEqual([
+      { accountId: "acct-42", stored: 5.0, computed: 4.5, delta: 0.5 },
+    ]);
+  });
+
   it("fetchEntries(accountId) asks for exactly the clicked account's entries, with the same operator key attached, and no write method is exposed on the client (Core Principle 12 read/write port-splitting)", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       status: 200,
-      json: async () => [],
+      json: async () => fakeEntriesWireEnvelope([]),
     });
     globalThis.fetch = fetchMock as unknown as typeof fetch;
 
@@ -96,6 +147,22 @@ describe("apiClient -- the operator's browser asks the API whether the books bal
     );
     expect((client as unknown as Record<string, unknown>).postTransfer).toBeUndefined();
     expect((client as unknown as Record<string, unknown>).createAccount).toBeUndefined();
+  });
+
+  it("@gap fetchEntries unwraps the {entries: [...]} envelope and translates stringified amount/running_balance into the domain EntryRow shape (confirmed-mismatch table)", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => fakeEntriesWireEnvelope([fakeEntryRowWireShape()]),
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const client = createApiClient({ keyStorage: createKeyStorage() });
+    const result = await client.fetchEntries("bob-demo");
+
+    expect(result).toEqual([
+      { amount: 12.34, counterparty: "bob-demo", recordedAt: "2026-08-20T10:00:00Z", runningBalance: 100.0 },
+    ]);
   });
 
   it("@error a rejected key clears itself so the operator is not stuck retrying a key that will never work", async () => {

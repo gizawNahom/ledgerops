@@ -1,0 +1,162 @@
+{
+  "consumer": {
+    "name": "console"
+  },
+  "interactions": [
+    {
+      "description": "a request for alice-demo's entries",
+      "providerStates": [
+        {
+          "name": "account alice-demo has at least one entry"
+        }
+      ],
+      "request": {
+        "headers": {
+          "Authorization": "Bearer a-valid-operator-key"
+        },
+        "matchingRules": {
+          "header": {
+            "Authorization": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            }
+          }
+        },
+        "method": "GET",
+        "path": "/accounts/alice-demo/entries"
+      },
+      "response": {
+        "body": {
+          "entries": [
+            {
+              "amount": "12.34",
+              "counterparty": "bob-demo",
+              "recorded_at": "2026-08-20T10:00:00Z",
+              "running_balance": "100.00"
+            }
+          ]
+        },
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "matchingRules": {
+          "body": {
+            "$.entries": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type",
+                  "min": 1
+                }
+              ]
+            }
+          }
+        },
+        "status": 200
+      }
+    },
+    {
+      "description": "a request for the balance verdict",
+      "providerStates": [
+        {
+          "name": "the books are out of balance with one drifted account"
+        }
+      ],
+      "request": {
+        "headers": {
+          "Authorization": "Bearer a-valid-operator-key"
+        },
+        "matchingRules": {
+          "header": {
+            "Authorization": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            }
+          }
+        },
+        "method": "GET",
+        "path": "/console/verdict"
+      },
+      "response": {
+        "body": {
+          "drifted": [
+            {
+              "account_id": "acct-42",
+              "computed": "4.50",
+              "delta": "0.50",
+              "stored": "5.00"
+            }
+          ],
+          "elapsed_ms": 4,
+          "entry_count": 6,
+          "imbalance_minor": 50,
+          "verdict": "Books balance: NO"
+        },
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "matchingRules": {
+          "body": {
+            "$.drifted": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type",
+                  "min": 1
+                }
+              ]
+            },
+            "$.elapsed_ms": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.entry_count": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.imbalance_minor": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            }
+          }
+        },
+        "status": 200
+      }
+    }
+  ],
+  "metadata": {
+    "pact-js": {
+      "version": "17.1.2"
+    },
+    "pactRust": {
+      "ffi": "0.5.6",
+      "models": "1.3.14"
+    },
+    "pactSpecification": {
+      "version": "3.0.0"
+    }
+  },
+  "provider": {
+    "name": "ledgercore"
+  }
+}
