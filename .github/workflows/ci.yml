@@ -133,6 +133,26 @@ jobs:
         if: steps.probe.outputs.present == 'true'
         working-directory: web/console
         run: npm test
+      # Provider verification: reads the pact file the Vitest step above just
+      # (re)generated (web/console/pacts/console-ledgercore.json) and replays
+      # every interaction in it against the REAL internal/adapters/http
+      # handlers, confirming the backend actually honors what the consumer
+      # test pinned (fix-console-wire-shape-contract step 01-03). Placed
+      # immediately after the pact-generating Vitest step, on the same probe
+      # guard as every other step in this job, rather than as its own job —
+      # it depends on this job's freshly-written pact file, not a committed
+      # snapshot of it.
+      - uses: actions/setup-go@v5
+        if: steps.probe.outputs.present == 'true'
+        with:
+          go-version-file: ${{ env.GO_VERSION_FILE }}
+          cache: true
+      - name: Install pact-go native library (libpact_ffi)
+        if: steps.probe.outputs.present == 'true'
+        run: go run github.com/pact-foundation/pact-go/v2 -l ERROR install
+      - name: Go provider verification (replays console's pinned Pact contract)
+        if: steps.probe.outputs.present == 'true'
+        run: go test ./internal/adapters/http/... -run TestPactProvider_HonorsConsoleContract -v
       - name: Vite build
         if: steps.probe.outputs.present == 'true'
         working-directory: web/console
