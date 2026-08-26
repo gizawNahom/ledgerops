@@ -1,15 +1,8 @@
 // VerdictBanner -- the operator's first sentence, before any figures (US-1
 // AC). Layer: component (props -> render mapping, jsdom, no fetch).
-import { describe, it, expect, afterEach } from "vitest";
-import { render, screen, cleanup } from "@testing-library/react";
+import { describe, it, expect } from "vitest";
+import { render, screen } from "@testing-library/react";
 import { VerdictBanner } from "./VerdictBanner";
-
-// vitest.config.ts sets globals: false, so @testing-library/react's implicit
-// afterEach(cleanup) auto-registration never fires (it only self-registers
-// when it detects an ambient global `afterEach`). Without explicit cleanup,
-// renders from earlier tests in this file stay mounted and collide with
-// later tests asserting on identical text ("Books balance: YES").
-afterEach(cleanup);
 
 describe("VerdictBanner -- the operator's first sentence, before any figures", () => {
   it("a healthy ledger's console states the verdict in words first", () => {

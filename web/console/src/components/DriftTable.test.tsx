@@ -1,15 +1,9 @@
 // DriftTable -- which accounts drifted and by how much, without leaving the
 // console (US-2 AC). Layer: component (props -> render mapping).
-import { afterEach, describe, it, expect, vi } from "vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { describe, it, expect, vi } from "vitest";
+import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { DriftTable } from "./DriftTable";
-
-// vitest.config.ts sets globals: false, so @testing-library/react's
-// auto-cleanup (which detects a global `afterEach`) never registers --
-// explicit teardown here prevents prior renders in this file from leaking
-// into later assertions (queries would otherwise see stale rows).
-afterEach(cleanup);
 
 describe("DriftTable -- which accounts drifted and by how much", () => {
   it("a single drifted account is named with its numbers", () => {

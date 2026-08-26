@@ -19,8 +19,8 @@
 // [error: key-rejected] "normally"; the 401 arriving despite that hits the
 // state from the wrong assumption, which is exactly what this scenario
 // exercises.
-import { describe, it, expect, vi, afterEach } from "vitest";
-import { render, screen, cleanup } from "@testing-library/react";
+import { describe, it, expect, vi } from "vitest";
+import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ConsoleApp } from "./ConsoleApp";
 import type { KeyStorage } from "../keyStorage";
@@ -50,12 +50,6 @@ function fakeApiClient(): ApiClient {
 }
 
 const driftedAccount: DriftRow = { accountId: "acc-42", stored: 100, computed: 90, delta: -10 };
-
-// vitest.config.ts runs with `globals: false`, so Testing Library's
-// automatic per-test unmount (registered only under `globals: true`) does
-// not fire here. Without an explicit unmount, DOM assertions in one test
-// can observe elements a prior test rendered but never tore down.
-afterEach(cleanup);
 
 describe("ConsoleApp -- the console decides what the operator sees first", () => {
   it("shows the key-entry form when no operator key has ever been stored", () => {

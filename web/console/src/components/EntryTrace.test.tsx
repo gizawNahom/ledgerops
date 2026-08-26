@@ -1,14 +1,8 @@
 // EntryTrace -- trace a drifted account to its entries, without leaving the
 // console (US-3 AC). Layer: component (props -> render mapping).
-import { describe, it, expect, afterEach } from "vitest";
-import { render, screen, cleanup } from "@testing-library/react";
+import { describe, it, expect } from "vitest";
+import { render, screen } from "@testing-library/react";
 import { EntryTrace } from "./EntryTrace";
-
-// afterEach(cleanup) auto-registration never fires (it only self-registers
-// when it detects an ambient global `afterEach`; this project runs with
-// `globals: false`). Without explicit cleanup, DOM from one test leaks into
-// the next -- mirrors VerdictBanner.test.tsx / DriftTable.test.tsx.
-afterEach(cleanup);
 
 describe("EntryTrace -- trace a drifted account to its entries", () => {
   it("clicking a drifted account shows its entries, ordered, with a running balance column", () => {
