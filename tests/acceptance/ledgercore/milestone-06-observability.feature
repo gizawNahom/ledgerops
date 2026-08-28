@@ -24,34 +24,25 @@ Feature: The ledger can be watched from outside without reading its source
 
   # --- metrics exposition --------------------------------------------------
 
-  @pending @driving_adapter @real-io @contract-shape:unbounded-preservation
+  @driving_adapter @real-io @contract-shape:unbounded-preservation
   Scenario: An operator scrapes metrics without presenting any credentials
     When the operator scrapes the metrics endpoint with no credentials
     Then the scrape succeeds with metrics exposition text
     And the exposition names every declared series
 
-  @pending @driving_adapter @real-io @error @contract-shape:unbounded-preservation
+  @driving_adapter @real-io @error @contract-shape:unbounded-preservation
   Scenario: Scraping metrics with a rejected operator key still succeeds
     When the operator scrapes the metrics endpoint presenting an operator key that was never issued
     Then the scrape succeeds with metrics exposition text
 
-  @pending @real-io @contract-shape:bounded-change
-  # BLOCKED_BY_DEPENDENCY (2026-08-28, crafter step 01-01): production
-  # instrumentation is correct — ObservePosting fires at postTransferHandler's
-  # single outcome-decision site for every posting through the driving port,
-  # which is the right semantics. The scenario fails because
-  # CaptureMetricsBaseline (ledger_observability.go § serve()) snapshots the
-  # postings_total{result="posted"} baseline BEFORE the Background's
-  # account-seeding Given steps run. "a wallet account X funded with N" itself
-  # posts a real POST /transfers (treasury -> X, ledger_seeding.go
-  # GivenFundedFrom), which genuinely increments postings_total{result=
-  # "posted"} — so the baseline is 0 where it should already reflect the
-  # seed funding, and this scenario's own transfer makes the delta 2, not 1.
-  # Escalated to nw-acceptance-designer: baseline capture needs to move to
-  # after Background completes (or be re-captured per-scenario immediately
-  # before the When step). Not fixable from production code without adding a
-  # test-aware branch (e.g. excluding "seed-fund-*" idempotency keys), which
-  # would be incorrect instrumentation semantics.
+  @real-io @contract-shape:bounded-change
+  # Fixed (fix-ledger-core-observability, 2026-08-28): the test-infrastructure
+  # timing bug described above (baseline captured at serve()-time, before this
+  # scenario's own funding Given ran) is resolved by re-capturing the baseline
+  # immediately before the measured transfer — see the "the integrator moves
+  # ... under key ..." step (steps_ledger_test.go) and
+  # ledger_observability.go § CaptureMetricsBaseline. Not a production defect;
+  # ObservePosting's instrumentation semantics were correct throughout.
   Scenario: A posted transfer is counted and timed
     Given a wallet account "alice" funded with 100.00
     And a wallet account "bob" exists

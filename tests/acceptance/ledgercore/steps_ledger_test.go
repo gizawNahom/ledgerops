@@ -73,6 +73,25 @@ func RegisterSteps(ctx *godog.ScenarioContext, l *Ledger) {
 		return nil
 	})
 
+	// OPS-5's release-blocking scenario switches identity mid-journey
+	// ("When ... And the caller presents ..."), inheriting the When keyword
+	// (Gherkin's And takes the keyword of the nearest preceding Given/When/
+	// Then). godog's keyword matching is scoped to the registering
+	// function (Given/When/Then), so a Given-only registration does not
+	// answer an And inheriting When — confirmed by the RED gate run
+	// (2026-08-26) reporting these two as undefined under that scenario.
+	// Same phrasing, same behaviour, registered again under When rather
+	// than widening the Given regex's semantics.
+	ctx.When(`^the caller presents no operator key$`, func() error {
+		l.ActAs(NoKey)
+		return nil
+	})
+
+	ctx.When(`^the caller presents an operator key that was never issued$`, func() error {
+		l.ActAs(UnissuedKey)
+		return nil
+	})
+
 	ctx.Given(`^the clock is fixed at "([^"]*)"$`, func(stamp string) error {
 		return l.FixClockAt(stamp)
 	})
@@ -107,6 +126,7 @@ func RegisterSteps(ctx *godog.ScenarioContext, l *Ledger) {
 
 	ctx.When(`^the integrator moves (\S+) from "([^"]*)" to "([^"]*)" under key "([^"]*)"$`,
 		func(c context.Context, amount, from, to, key string) error {
+			l.CaptureMetricsBaseline(c)
 			return l.SubmitTransfer(c, Transfer{
 				From: AccountName(from), To: AccountName(to),
 				Amount: ParseMoney(amount), Key: IdempotencyKey(key),
@@ -470,5 +490,93 @@ func RegisterSteps(ctx *godog.ScenarioContext, l *Ledger) {
 
 	ctx.Then(`^no migration in the set erases an entry$`, func(c context.Context) error {
 		return l.ThenNoMigrationErasesAnEntry(c)
+	})
+
+	// --- OPS-5 observability (fix-ledger-core-observability, 2026-08-26) --
+
+	ctx.When(`^the operator scrapes the metrics endpoint with no credentials$`, func(c context.Context) error {
+		return l.ScrapeMetrics(c, NoKey)
+	})
+
+	ctx.When(`^the operator scrapes the metrics endpoint presenting an operator key that was never issued$`, func(c context.Context) error {
+		return l.ScrapeMetrics(c, UnissuedKey)
+	})
+
+	ctx.When(`^an unidentified caller requests "([^"]*)"$`, func(c context.Context, endpoint string) error {
+		return l.RequestAsUnidentifiedCaller(c, endpoint)
+	})
+
+	ctx.Then(`^the scrape succeeds with metrics exposition text$`, func() error {
+		return l.ThenTheScrapeSucceedsWithExpositionText()
+	})
+
+	ctx.Then(`^the exposition names every declared series$`, func() error {
+		return l.ThenTheExpositionNamesEveryDeclaredSeries()
+	})
+
+	ctx.Then(`^the postings counter for outcome "([^"]*)" increased by (\d+)$`, func(c context.Context, outcome string, n int) error {
+		return l.ThenTheCounterForOutcomeIncreasedBy(c, PostingsTotal, ParsePostingResult(outcome), float64(n))
+	})
+
+	ctx.Then(`^the posting duration was observed at least once$`, func(c context.Context) error {
+		return l.ThenTheHistogramWasObservedAtLeastOnce(c, PostingDurationSeconds)
+	})
+
+	ctx.Then(`^the insufficient-funds counter increased by (\d+)$`, func(c context.Context, n int) error {
+		return l.ThenTheCounterIncreasedBy(c, InsufficientFundsTotal, float64(n))
+	})
+
+	ctx.Then(`^the idempotent-replay counter increased by (\d+)$`, func(c context.Context, n int) error {
+		return l.ThenTheCounterIncreasedBy(c, IdempotentReplaysTotal, float64(n))
+	})
+
+	ctx.Then(`^the trial-balance imbalance gauge reads (\S+)$`, func(c context.Context, amount string) error {
+		// The series is *_minor (kpi-contracts.yaml): its unit is already
+		// signed minor units, exactly what ParseMoney returns — no /100.
+		return l.ThenTheGaugeReads(c, TrialBalanceImbalance, float64(ParseMoney(amount)))
+	})
+
+	ctx.Then(`^the trial-balance scan duration was observed at least once$`, func(c context.Context) error {
+		return l.ThenTheHistogramWasObservedAtLeastOnce(c, TrialBalanceScanDuration)
+	})
+
+	ctx.Then(`^the drifted-accounts gauge reads (\d+)$`, func(c context.Context, n int) error {
+		return l.ThenTheGaugeReads(c, DriftAccounts, float64(n))
+	})
+
+	ctx.Then(`^a log line for that request carries a request id, its route, its status, and how long it took$`, func() error {
+		return l.ThenALogLineForThatRequestCarriesTheBasics()
+	})
+
+	ctx.Then(`^both requests are logged under the very same route$`, func() error {
+		return l.ThenBothRequestsAreLoggedUnderTheSameRoute()
+	})
+
+	ctx.Then(`^a log line for that request names the transaction, both accounts, the amount moved, and the currency$`, func() error {
+		return l.ThenALogLineForThatRequestNamesTheMovement()
+	})
+
+	ctx.Then(`^a log line for that request carries the violation "([^"]*)"$`, func(kind string) error {
+		return l.ThenALogLineForThatRequestCarriesTheViolation(RefusalKind(kind))
+	})
+
+	ctx.Then(`^the same log line carries the status (\d+)$`, func(status int) error {
+		return l.ThenTheSameLogLineCarriesTheStatus(status)
+	})
+
+	ctx.Then(`^a log line for that request carries a hashed idempotency key and states it was (a replay|not a replay)$`, func(shape string) error {
+		return l.ThenALogLineForThatRequestCarriesAHashedIdempotencyKeyAnd(shape == "a replay")
+	})
+
+	ctx.Then(`^a log line for that request carries a hashed idempotency key instead$`, func() error {
+		return l.ThenALogLineForThatRequestCarriesAHashedIdempotencyKeyInstead()
+	})
+
+	ctx.Then(`^no captured log line contains the operator's key in any form$`, func() error {
+		return l.ThenNoCapturedLogLineContainsTheOperatorKey()
+	})
+
+	ctx.Then(`^no captured log line contains the raw idempotency key "([^"]*)"$`, func(key string) error {
+		return l.ThenNoCapturedLogLineContainsTheRawIdempotencyKey(IdempotencyKey(key))
 	})
 }
