@@ -13,9 +13,10 @@
 // shares verdictHandler with GET /health/trial-balance, so the two surfaces
 // cannot disagree by construction. GET /metrics is real as of OPS-5 step
 // 01-01: a Prometheus exposition over the seven declared series
-// (internal/adapters/http/metrics.go), still inside the protected group —
-// moving it out is step 01-02's job. GET /console and GET /console/* are
-// wired as of
+// (internal/adapters/http/metrics.go). As of step 01-02 it is mounted
+// unauthenticated, outside the protected group, and its collector set
+// travels through Deps.Metrics like every other adapter the composition
+// root constructs. GET /console and GET /console/* are wired as of
 // ledger-core-console's DEVOPS wave (build-output wiring, resolved as an
 // infra concern -- see feature-delta.md § Wave: DEVOPS / Build-output
 // wiring): they serve the built SPA shell and its assets, deliberately
@@ -43,6 +44,18 @@ type Deps struct {
 	Clock       func() time.Time
 	IDGenerator func() string
 
+	// Metrics is the Prometheus collector set (internal/adapters/http/metrics.go),
+	// threaded through Deps the same way Clock/IDGenerator are (OPS-5 step
+	// 01-02, design decision 1). Constructed once in cmd/api/main.go via
+	// NewMetrics() and handed in here, rather than built as a local variable
+	// inside NewRouter -- the composition root owns construction of every
+	// adapter, including this one.
+	//
+	// Falls back to a fresh NewMetrics() when nil, mirroring the Logger
+	// fallback below -- test doubles constructed before this field existed
+	// (e.g. the acceptance suite's composition root) are unaffected.
+	Metrics *Metrics
+
 	// Logger receives structured per-request JSON records (OPS-5,
 	// feature-delta.md § Wave: DEVOPS / Observability stack). Added by
 	// DISTILL (fix-ledger-core-observability, 2026-08-26) so the acceptance
@@ -63,7 +76,9 @@ type Deps struct {
 // The operator-API-key middleware is scoped to a group, not the whole
 // router: every JSON endpoint -- including GET /console/verdict, the one the
 // console SPA itself calls -- requires the key, but GET /console and its
-// static assets (mounted by mountConsole below) deliberately do not. The
+// static assets (mounted by mountConsole below) deliberately do not, and
+// neither does GET /metrics (OPS-5 step 01-02) -- a scrape target cannot
+// easily present an operator bearer key, and Prometheus never will. The
 // HTML shell has to load before any key can be presented; the key is
 // enforced at the JSON boundary it actually protects.
 func NewRouter(deps Deps) http.Handler {
@@ -71,12 +86,17 @@ func NewRouter(deps Deps) http.Handler {
 
 	ledger := app.NewLedger(deps.Store, deps.Clock, deps.IDGenerator)
 
-	// OPS-5 (fix-ledger-core-observability, design decision 1): the metrics
-	// collector set is constructed once here, the same way ledger itself is
-	// constructed inside NewRouter rather than threaded through Deps. Mount
-	// point and auth scoping are unchanged by this step — GET /metrics stays
-	// inside the protected group; moving it out is step 01-02's job.
-	metrics := NewMetrics()
+	metrics := deps.Metrics
+	if metrics == nil {
+		metrics = NewMetrics()
+	}
+
+	// OPS-5 (fix-ledger-core-observability, design decision 1 & 3): GET
+	// /metrics is mounted unauthenticated, outside the protected group --
+	// confirmed 2026-08-26, mirroring the GET /console static-asset
+	// precedent (console_static.go). A scrape target cannot easily present
+	// an operator bearer key, and Prometheus never will.
+	router.Get("/metrics", metrics.Handler().ServeHTTP)
 
 	router.Group(func(protected chi.Router) {
 		protected.Use(requireOperatorKey(deps.OperatorKey))
@@ -87,7 +107,6 @@ func NewRouter(deps Deps) http.Handler {
 		protected.Post("/transfers", postTransferHandler(ledger, metrics))
 		protected.Get("/health/trial-balance", verdictHandler(ledger, metrics))
 		protected.Get("/console/verdict", verdictHandler(ledger, metrics))
-		protected.Get("/metrics", metrics.Handler().ServeHTTP)
 	})
 
 	mountConsole(router, consoleDistDir)

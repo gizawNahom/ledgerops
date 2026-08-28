@@ -102,6 +102,17 @@ func NewMetrics() *Metrics {
 		m.driftedAccounts,
 	)
 
+	// A CounterVec exposes no series at all until a label combination has
+	// been observed at least once -- an unauthenticated scrape taken before
+	// any transfer ever posted would otherwise find ledgerops_postings_total
+	// simply absent from the exposition (OPS-5 step 01-02). Pre-declaring
+	// all three outcomes at zero makes the series visible from the first
+	// scrape, matching the other six declared series, which are always
+	// present because they are not label-vectors.
+	for _, outcome := range []PostingOutcome{PostingPosted, PostingRejected, PostingReplayed} {
+		m.postingsTotal.WithLabelValues(string(outcome))
+	}
+
 	return m
 }
 

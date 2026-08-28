@@ -55,6 +55,7 @@ func main() {
 		OperatorKey: os.Getenv("LEDGEROPS_OPERATOR_KEY"),
 		Clock:       time.Now,
 		IDGenerator: func() string { return "txn_" + uuid.NewString() },
+		Metrics:     apphttp.NewMetrics(),
 	})
 
 	addr := os.Getenv("LEDGEROPS_ADDR")
