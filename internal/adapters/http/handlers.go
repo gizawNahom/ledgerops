@@ -6,6 +6,8 @@ package http
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -211,8 +213,32 @@ func postTransferHandler(ledger *app.Ledger, metrics *Metrics) http.HandlerFunc 
 		if result.Replayed {
 			metrics.ObserveIdempotentReplay()
 		}
+
+		// Each value below is already known at this point — none is
+		// re-derived (OPS-5, design decision 5). The raw idempotency key
+		// variable (`key`) is deliberately never passed here: only its
+		// hash is.
+		accumulator := fieldsFrom(r.Context())
+		accumulator.Set("transaction_id", result.Posting.Transaction.ID())
+		accumulator.Set("account_ids", []string{body.From, body.To})
+		accumulator.Set("amount_minor", amount.MinorUnits())
+		accumulator.Set("currency", amount.Currency())
+		accumulator.Set("idempotency_key_hash", hashIdempotencyKey(key))
+		accumulator.Set("replayed", result.Replayed)
+
 		writeJSON(w, status, transferAnswer(result))
 	}
+}
+
+// hashIdempotencyKey computes the SHA-256 digest of the raw idempotency key,
+// returning the full 64-character lowercase hex digest with no truncation
+// (OPS-5, design decision 5). Pure function: input in, digest out, no side
+// effects. The raw key itself must never reach fieldsFrom(...).Set(...)
+// under any name, on any path — this is the sole legitimate use of the raw
+// key besides the app-layer idempotency lookup it already feeds.
+func hashIdempotencyKey(key string) string {
+	sum := sha256.Sum256([]byte(key))
+	return hex.EncodeToString(sum[:])
 }
 
 // fingerprintTransfer computes the idempotency fingerprint over the PARSED

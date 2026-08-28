@@ -112,7 +112,7 @@ Feature: The ledger can be watched from outside without reading its source
     And the operator traces "bob"
     Then both requests are logged under the very same route
 
-  @pending @real-io @contract-shape:unbounded-preservation
+  @real-io @contract-shape:unbounded-preservation
   Scenario: A posting is logged with the movement it made
     Given a wallet account "alice" funded with 100.00
     And a wallet account "bob" exists
@@ -126,14 +126,14 @@ Feature: The ledger can be watched from outside without reading its source
     When the integrator moves 50.00 from "alice" to "bob" under key "obs-6"
     Then a log line for that request carries the violation "insufficient_funds"
 
-  @pending @real-io @contract-shape:unbounded-preservation
+  @real-io @contract-shape:unbounded-preservation
   Scenario: A first-time posting under a key is logged as not replayed
     Given a wallet account "alice" funded with 100.00
     And a wallet account "bob" exists
     When the integrator moves 20.00 from "alice" to "bob" under key "obs-7"
     Then a log line for that request carries a hashed idempotency key and states it was not a replay
 
-  @pending @real-io @contract-shape:unbounded-preservation
+  @real-io @contract-shape:unbounded-preservation
   Scenario: A retried posting is logged as a replay
     Given a wallet account "alice" funded with 100.00
     And a wallet account "bob" exists
