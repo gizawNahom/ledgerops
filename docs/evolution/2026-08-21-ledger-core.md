@@ -414,8 +414,15 @@ Production-validated surface: `POST /accounts`, `POST /transfers`,
 only). No hosted environment exists yet (OPS-1) — Docker Compose is the
 entire deployment target. Rollback contract: Recreate, redeploy previous
 image tag, migrations expand-only (`feature-delta.md` § Deployment
-strategy). Observability: `slog` JSON logs + Prometheus exposition at
-`/metrics`, nothing scraping yet.
+strategy). Observability: **corrected 2026-08-26** — the original wording
+here ("`slog` JSON logs + Prometheus exposition at `/metrics`, nothing
+scraping yet") repeated the same false claim identified in
+`feature-delta.md` § Wave: DEVOPS / Observability stack; see
+`docs/analysis/2026-08-26-observability-status-false-claim-rca.md`. As of
+this correction: `log/slog` is wired for lifecycle events only (no
+per-request fields), and `GET /metrics` answers `501 __SCAFFOLD__` (no
+`prometheus/client_golang` dependency exists). DISTILL scenarios closing the
+gap: `tests/acceptance/ledgercore/milestone-06-observability.feature`.
 
 **Before this feature is called complete**: slice 04, slice 05, and the
 console SPA need their own DELIVER pass against the slice briefs now at

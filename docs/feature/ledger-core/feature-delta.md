@@ -807,8 +807,8 @@ surviving mutant means an invariant is untested rather than merely under-covered
 
 | Signal | Choice | Status |
 |---|---|---|
-| Logs | `log/slog`, JSON to stdout | Implemented in DELIVER |
-| Metrics | `prometheus/client_golang`, exposition at `GET /metrics` | Exposed; **nothing scrapes it yet** (OPS-1) |
+| Logs | `log/slog`, JSON to stdout | **Scaffold — corrected 2026-08-26** (was falsely "Implemented in DELIVER" — RCA: `docs/analysis/2026-08-26-observability-status-false-claim-rca.md`). Logger wired for lifecycle events only (`log/slog`, 4 calls, `cmd/api/main.go`); the per-request field contract below (`request_id`, `route`, `status`, etc.) is **`SCAFFOLD: true`, not emitted anywhere** — `request_logging.go`'s `requestLogger` middleware is an unregistered no-op (mirrors the `__SCAFFOLD__` vocabulary the Metrics row below uses, so a future grep-based sweep catches this row too). RED scaffold added by DISTILL 2026-08-26: `Deps.Logger` field + `request_logging.go`; scenarios: `milestone-06-observability.feature` |
+| Metrics | `prometheus/client_golang`, exposition at `GET /metrics` | **Corrected 2026-08-26** (was falsely "Exposed; nothing scrapes it yet" — same RCA). **Scaffold — `501 __SCAFFOLD__`, not implemented**; `prometheus/client_golang` not yet a dependency (`grep -i prometheus go.mod go.sum` → no matches). Confirmed 2026-08-26: mounted **unauthenticated**, outside `requireOperatorKey`, mirroring `console_static.go`'s precedent. Scenarios: `milestone-06-observability.feature` |
 | Traces | none | Declared out |
 | Alerting | none | Out of scope per DISCUSS (`feature-delta.md:140`) |
 
@@ -1747,3 +1747,266 @@ explicitly here rather than implying a browser was used.
 **Gate verdict: PASS.** Full acceptance suite green, both demos produced the
 exact "sees" outcome their pitch promises, stack was freshly built and torn
 down cleanly.
+
+---
+
+## Wave: DISTILL / [REF] OPS-5 observability fix (2026-08-26)
+
+Bugfix-shaped DISTILL pass, dispatched from
+`docs/analysis/2026-08-26-observability-status-false-claim-rca.md`. Root
+cause A/B: `feature-delta.md` § Wave: DEVOPS / Observability stack (above)
+and `docs/evolution/2026-08-21-ledger-core.md` both claimed Prometheus
+metrics were "Exposed" and structured logs "Implemented in DELIVER"; neither
+was true — `GET /metrics` answered `501 __SCAFFOLD__` and no per-request
+field was ever logged (zero `slog.` calls in `internal/adapters/http/`).
+OPS-5 (the DEVOPS decision authorizing both) was never discharged: no
+scenario ever exercised it, no roadmap step ever built it. Both status-table
+corrections are applied above, in place, dated 2026-08-26.
+
+**Path decision**: appended to this file rather than authoring
+`docs/feature/fix-ledger-core-observability/feature-delta.md`. OPS-5 is a
+DEVOPS decision that already lives here, addressed by name in the DEVOPS
+section this pass corrects; forking a second feature-delta for one
+unfinished DEVOPS decision would split the SSOT for "what OPS-5 means" and
+"whether OPS-5 shipped" across two files. Precedent: DDD-17..21 were
+likewise appended here as later corrections to earlier sections of this same
+document, not split into a new feature.
+
+### Wave-Decision Reconciliation HARD GATE
+
+Read: this file's own DISCUSS/DESIGN/DEVOPS/DISTILL sections (no separate
+`discuss/design/devops/wave-decisions.md` files exist for `ledger-core` —
+the project's lean-wave-documentation model keeps everything in this one
+file, confirmed absent by `find docs/feature/ledger-core -iname
+wave-decisions.md` → no matches). Checked OPS-5 (DEVOPS) against every
+DISCUSS/DESIGN commitment: no contradiction found — DISCUSS names no
+observability requirement to contradict, DESIGN's component decomposition
+places `internal/adapters/http/` and `cmd/api/` (both effect-shell, DDD-16)
+as the only components this fix touches, and no DDD row conflicts with
+either metrics or logging.
+
+One design question was open per the RCA (§ Recommended Next Step 2):
+whether `GET /metrics` sits inside or outside `requireOperatorKey`. **Not
+reopened here** — resolved directly by the user before this DISTILL session
+started (task brief: "mounted UNAUTHENTICATED ... confirmed with user, full
+OPS-5 scope"), mirroring how the SPA framework choice elsewhere in this
+document is recorded as "confirmed" rather than re-derived. Recorded as a
+settled fact in § Project Infrastructure Policy (below) and in
+`docs/architecture/atdd-infrastructure-policy.md`.
+
+**Reconciliation passed — 0 contradictions.**
+
+### [REF] Inherited commitments
+
+| Origin | Commitment | DDR | Impact |
+|--------|------------|-----|--------|
+| DEVOPS#OPS-5 | Structured JSON logs + Prometheus exposition, both never discharged | n/a | 18 scenario blocks (23 executed) author the coverage OPS-5 promised; the DEVOPS status table above is corrected to a closed vocabulary (`Scaffold` / `Corrected`) rather than the free text that let the false claim slip past the finalize pass (RCA § Root Cause A) |
+| RCA § Proposed Fix (a) | `GET /metrics` mounted unauthenticated, confirmed by user 2026-08-26 | n/a | Two scenarios assert the scrape succeeds presenting no credentials and presenting a rejected key; one regression outline asserts every OTHER JSON endpoint still requires the key, so the router restructuring this fix requires cannot silently widen further |
+| RCA § Proposed Fix (b), hard constraint | The raw operator key and the raw idempotency key must never reach a log call, on any path including 4xx/5xx error-echo paths | n/a | Two `@release-blocking` scenarios assert the entire captured log corpus, not just one line, never contains either raw secret — release-blocking per the task brief, not a doc note |
+| DDD-16 / ADR-007 | Pure domain core is out of bounds; this is effect-shell only | n/a | Zero scenarios or scaffolds touch `internal/domain/`; both scaffold edits (`Deps.Logger` field, `request_logging.go`) live in `internal/adapters/http/` |
+| kpi-contracts.yaml § runtime_instrumentation | Required/conditional log fields and the seven metric series named exactly | n/a | `domain_types.go`'s `MetricSeries`/`LogLine` types transcribe the field list and series names verbatim, so a scenario names a series once rather than as a repeated literal |
+
+### [REF] Scenario list with tags
+
+`tests/acceptance/ledgercore/milestone-06-observability.feature` — **18
+scenario blocks / 23 executed** (one `Scenario Outline` expands to 6
+examples), all `@pending` (this fix inherits slice 01's walking skeleton;
+no second one is authored — Mandate 5's "exactly one per feature" reading
+extended to "one per feature, not one per fix").
+
+| Group | Blocks | Tags |
+|---|---|---|
+| Metrics exposition | 8 | `@ops-5 @real-io` · 1 `@driving_adapter` happy path · 1 `@driving_adapter @error` (rejected key still succeeds) · 2 more `@error` (insufficient-funds counting, corruption gauge) |
+| Structured logging | 8 | `@ops-5 @real-io` · 2 `@error` (refusal violation logged, unidentified-caller rejection logged) |
+| Release-blocking security | 2 | `@security @error @release-blocking` |
+| Regression (auth boundary) | 1 outline / 6 examples | `@regression @error` |
+
+**Contract-shape tag invariant holds**: 18 blocks, 18 tags (3
+`bounded-change`, 15 `unbounded-preservation`, 0 `pure-function` — correct
+at this layer per DESIGN's own classification, `internal/adapters/http/`
+`GET` routes are `unbounded-preservation`, `POST` routes are `bounded-change`
+delegated).
+
+```bash
+grep -hE '^\s*Scenario( Outline)?:' tests/acceptance/ledgercore/milestone-06-observability.feature | wc -l   # 18
+grep -ohE '@contract-shape:[a-z-]+' tests/acceptance/ledgercore/milestone-06-observability.feature | wc -l    # 18
+```
+
+**Error coverage: 8 of 18 = 44%** (target ≥40%) — `@error` covers the
+rejected-credential scrape, the insufficient-funds counting path, the
+corruption gauge, both logging refusal paths, both release-blocking
+security scenarios, and the regression outline. No boundary/edge scenario
+without `@error` was needed to clear the target this time, unlike the
+original 60-scenario audit.
+
+### [REF] WS strategy
+
+Inherited, unchanged: **Strategy C — real local resources** (per
+Mandate 5), expressed via the Architecture of Reference. No new walking
+skeleton — the fix rides slice 01's. The two ports this fix touches classify
+by the same table already in force:
+
+- `GET /metrics` — **driving** port → real adapter (`httptest.Server`, real
+  `chi` router), same as every other HTTP endpoint in this suite.
+- `Logger` (`log/slog`) — **driven external/non-deterministic** port → fake
+  with output capture (`logCapture`, a mutex-safe `io.Writer` behind
+  `slog.NewJSONHandler`), same treatment class as `Clock`/`IDGenerator`.
+
+### [REF] Adapter coverage table (Mandate 6)
+
+| Adapter | `@real-io` scenario | Covered by |
+|---|---|---|
+| `GET /metrics` (driving) | YES | 2 scrape scenarios (no credentials, rejected key) + 6 counter/gauge/histogram scenarios read it back |
+| `Logger` (fake, output-captured) | N/A — fake by policy, same class as `Clock`/`IDGenerator` | 8 logging scenarios read the capture directly; 2 release-blocking scenarios read the full corpus, proving the capture seam itself is real rather than decorative |
+
+Zero `NO — MISSING` rows. Both ports this fix introduces are covered on the
+same terms Mandate 6 already holds the rest of the suite to.
+
+### [REF] Driving adapter coverage
+
+| Entry point | Exercised by | Verifies |
+|---|---|---|
+| `GET /metrics` | `milestone-06`, 8 scenarios | status, exposition body format, unauthenticated access (no credentials AND rejected credentials both succeed), every declared series present, per-series values |
+| Every other JSON endpoint (regression) | `milestone-06` Scenario Outline, 6 examples | still 401 `unidentified_caller` for an unidentified caller — the router restructuring this fix requires (moving `/metrics` out of `requireOperatorKey`) must not widen the group further |
+
+### [REF] Scaffolds
+
+Mandate 7 — two files touched, both effect-shell (`internal/adapters/http/`),
+zero domain-core changes (DDD-16 boundary respected):
+
+| File | Shape |
+|---|---|
+| `internal/adapters/http/router.go` | Additive only — `Deps` gains a `Logger *slog.Logger` field, unused by `NewRouter`. Not a panic (the file's established pattern for handlers/middleware that must stay inert rather than break every request — see the file's own two pre-existing deviations): every logging scenario reds cleanly on "0 log lines captured," never on a compile error or a dropped connection |
+| `internal/adapters/http/request_logging.go` | **NEW, `SCAFFOLD: true`.** `requestLogger(*slog.Logger) func(http.Handler) http.Handler` — a pass-through no-op, deliberately unregistered in `router.go`. Documents the field shape and the hard secret-redaction constraint DELIVER must honour, without wiring any behaviour |
+
+`GET /metrics` itself needed no new scaffold: the existing
+`scaffold("metrics exposition")` (`router.go`, already present) answers
+`501 __SCAFFOLD__`, which reds every new metrics scenario for exactly the
+right reason (`MISSING_FUNCTIONALITY`) without any DISTILL edit to that
+route.
+
+### [REF] Test placement
+
+`tests/acceptance/ledgercore/milestone-06-observability.feature` — same
+directory as milestones 01–05, per the existing precedent (`tests/acceptance/
+ledgercore/` — Go convention, package cannot live under `internal/`). New
+support file `ledger_observability.go` alongside `ledger_world.go` /
+`ledger_observations.go` / `ledger_assertions.go`, holding the two fakes
+this fix introduces (`logCapture`, the Prometheus-text parser) — kept
+separate from `ledger_world.go` because both are OPS-5-specific and neither
+is needed by any of the sixty pre-existing scenarios.
+
+```
+tests/acceptance/ledgercore/
+  milestone-06-observability.feature      # NEW — this fix's 18 scenario blocks
+  ledger_observability.go                 # NEW — logCapture fake, metrics-text parser, ScrapeMetrics
+  domain_types.go                         # EDITED — MetricSeries, PostingResult, LogLine, MetricsSnapshot
+  ledger_world.go                         # EDITED — struct fields, serve() wires Deps.Logger + baseline capture, callRawAs captures per-request log delta
+  ledger_assertions.go                    # EDITED — 15 new Then methods (metrics + logging + release-blocking)
+  steps_ledger_test.go                    # EDITED — 20 new step registrations
+```
+
+`go build ./...` and `go vet ./...` both pass clean against the edited tree.
+Unlike the original 60-scenario audit, this pass **did** await the suite to
+completion: Docker was available, so `LEDGEROPS_AT_TAGS="@ops-5" go test
+-count=1 -v ./tests/acceptance/ledgercore/...` was run three times over the
+course of this session (the first two runs caught and fixed two real test
+defects — 2 undefined steps, then 1 vacuous pass — before the third run
+came back clean). Full detail, reconciled failure-message counts, and the
+defects found: `distill/red-classification.md` § Addendum — OPS-5
+observability fix (2026-08-26).
+
+### [REF] Mandate-12 compliance (this pass)
+
+| # | Criterion | Verdict | Evidence |
+|---|---|---|---|
+| 1 | Domain types module exists | PASS | `domain_types.go` gains `MetricSeries` (7 constants + `DeclaredMetricSeries()`), `PostingResult` (3 constants + `ParsePostingResult`), `LogLine` (12 fields), `MetricsSnapshot`, `MetricKey` |
+| 2 | Composition methods consume typed parameters | PASS | `ThenTheCounterForOutcomeIncreasedBy(ctx, MetricSeries, PostingResult, float64)`, `ThenTheGaugeReads(ctx, MetricSeries, float64)` — no raw `string` where `MetricSeries`/`PostingResult` exist |
+| 3 | No business logic in step bodies | PASS | All 20 new step bodies are a single delegating call into a `Ledger` or parsing method; `grep -E '^\s+(if\|for\|while\|switch\|select) '` over the new block of `steps_ledger_test.go` returns nothing |
+| 4 | Step-reuse ratio reported | **3.7×** (429 Gherkin step lines / 116 decorators, suite-wide, up from 3.42×) | Informational per the refined mandate — natural ceiling for this feature shape, not a target |
+
+**Universe-bound assertion (Mandate 8) — deliberate deviation, documented.**
+None of the new Then methods calls `statedelta.AssertStateDelta`. That
+helper requires a `testing.TB` to call `Fatalf` on, and this suite's godog
+runner (`suite_test.go`) drives every scenario from `TestMain`, not from a
+`*testing.T` subtest — the same reason none of the sixty pre-existing
+scenarios call it either (`grep -rn AssertStateDelta tests/` finds it used
+only in `internal/app/usecases_test.go`, a plain `go test` file with a real
+`*testing.T`). The universe-bound discipline the helper exists for is
+honoured directly instead: every new assertion compares exactly one
+declared, port-exposed observable (one metric series/label pair, one log
+field) against a captured baseline or its own presence, and states its own
+reason on mismatch — same shape as every other `Then` in `ledger_assertions.go`.
+
+**PBT mode (Mandate 9) / sad paths (Mandate 11)**: this suite runs at layer
+3 (subprocess/FS acceptance, real Postgres via Testcontainers). All 18
+blocks are example-based; the `Scenario Outline` enumerates six named
+endpoints rather than generating them, consistent with the one prior use of
+`Scenario Outline` in this suite (milestone-01's amount-boundary outline).
+
+**Tier B (Mandate 10)**: not applicable. This is a bugfix adding
+observability instrumentation, not a chained user journey — the two-tier
+decision already recorded above (Tier A only) is unaffected.
+
+### [REF] Pre-requisites
+
+- **`prometheus/client_golang`** is not yet a `go.mod` dependency
+  (`grep -i prometheus go.mod go.sum` → no matches, verified 2026-08-26).
+  DELIVER must add it before the metrics scenarios can pass.
+- **A real request-logging middleware** replacing the `request_logging.go`
+  no-op, registered against `Deps.Logger`, on every route including those
+  outside `requireOperatorKey` (per the release-blocking scenario's demand
+  that unauthenticated-caller refusals are logged too).
+- **The `requireOperatorKey` group restructuring** — `GET /metrics` must
+  move outside it; the regression outline's six examples must keep passing
+  after that move.
+- Everything already required by the original 60-scenario suite (Docker
+  daemon, two database roles, migration set) — unchanged by this fix.
+
+### [REF] Wave decisions summary (this pass)
+
+**Scenarios**: 18 blocks / 23 executed, 44% `@error`, 0 new walking
+skeleton, all 18 `@pending`. **Tiering**: unchanged (Tier A only).
+**Constraints established**: `GET /metrics` is unauthenticated by confirmed
+user decision, not a DISTILL-invented default; the raw operator key and raw
+idempotency key are release-blocking secrets that must never appear in
+captured log output on any path. **Upstream changes**: two documentation
+corrections applied in place (this file's own DEVOPS section, and
+`docs/evolution/2026-08-21-ledger-core.md`) — both are the RCA's "immediate
+mitigation," applied here rather than deferred, since DISTILL was already
+touching this file. **Reconciliation**: passed, 0 contradictions (see
+above).
+
+**Final Wave Review Gate**: four Haiku reviewers dispatched 2026-08-26 against
+this section plus the corrected DEVOPS table. All four APPROVED or
+CONDITIONALLY_APPROVED, zero blockers:
+
+| Reviewer | Wave reviewed | Verdict | High findings |
+|---|---|---|---|
+| Eclipse (`@nw-product-owner-reviewer`) | DISCUSS | APPROVED | 0 |
+| Architect (`@nw-solution-architect-reviewer`) | DESIGN | APPROVED | 0 — confirms DDD-16 boundary held, contract-shape tags match DESIGN's table, no new DDD row needed for the `GET /metrics` auth move |
+| Forge (`@nw-platform-architect-reviewer`) | DEVOPS | CONDITIONALLY_APPROVED | 1 (fixed in-session — Logs row corrected to lead with `**Scaffold**` and name `request_logging.go`'s no-op explicitly, matching the Metrics row's grep-able vocabulary). 1 medium accepted as documented process debt: project-wide status-table vocabulary standardization (Scaffold/Partial/Implemented/Not started) was applied only to the two corrected cells, not every DEVOPS row — acceptable scope for a bugfix, flagged for a future governance pass |
+| Sentinel (`@nw-acceptance-designer-reviewer`) | DISTILL | APPROVED | 0 — explicitly verified the release-blocking scenarios are non-vacuous by citing the actual three-run RED gate evidence, not by re-deriving it |
+
+**RED gate**: executed 2026-08-26 and **PASSED** — 17
+`MISSING_FUNCTIONALITY` (of 23 executed: 18 blocks, one outline expanding to
+6), 0 `SETUP_FAILURE`, 0 `BROKEN`, 0 undefined steps. 6 passes are legitimate
+pre-existing GREEN (the regression outline's examples, proving slice 01's
+already-real `requireOperatorKey` middleware, not OPS-5 coverage) — not
+vacuous; a genuinely vacuous pass was found and fixed during this run (see
+below). Full detail: `distill/red-classification.md` § Addendum — OPS-5
+observability fix (2026-08-26).
+
+**One vacuous-pass defect found and fixed by actually running the gate,
+not just reasoning about it.** The `@release-blocking` scenario asserting
+the operator's credential never appears in a captured log line passed on
+its first real run — trivially, since nothing is logged at all yet, so no
+secret can appear in an empty capture. Fixed by adding a positive companion
+assertion ("a log line for that request carries a request id...") ahead of
+the negative one, so the scenario cannot pass until real logging exists. A
+second, unrelated defect (2 undefined steps — a `Given`-registered step
+phrasing reused under a `When` context, which godog's keyword-scoped
+matching does not answer) was found and fixed the same way. Both fixes are
+in `steps_ledger_test.go` and `milestone-06-observability.feature`; neither
+changed any assertion's meaning, only which keyword or which companion
+assertion carries it.

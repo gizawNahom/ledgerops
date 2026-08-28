@@ -386,3 +386,102 @@ type RaceReport struct {
 	DistinctTransactionIDs      int
 	EntryPairsStored            int
 }
+
+// --- OPS-5 observability (fix-ledger-core-observability, 2026-08-26) -------
+//
+// RCA: docs/analysis/2026-08-26-observability-status-false-claim-rca.md.
+// DEVOPS decided OPS-5 (feature-delta.md § Wave: DEVOPS / Observability
+// stack) — a Prometheus exposition at GET /metrics and structured per-request
+// JSON logs — and the decision was never discharged: no scenario ever
+// exercised it. These types are the vocabulary for the scenarios that close
+// that gap.
+
+// PostingResult is the `result` label OPS-5's postings counter carries. Sealed
+// to the three shapes a posting attempt can settle into — accepted for the
+// first time, refused, or answered again from the record (DDD-8).
+type PostingResult string
+
+const (
+	PostedResult   PostingResult = "posted"
+	RejectedResult PostingResult = "rejected"
+	ReplayedResult PostingResult = "replayed"
+)
+
+// ParsePostingResult coerces the Gherkin phrasing of a counted outcome.
+func ParsePostingResult(text string) PostingResult {
+	switch strings.TrimSpace(strings.ToLower(text)) {
+	case "posted":
+		return PostedResult
+	case "rejected":
+		return RejectedResult
+	case "replayed":
+		return ReplayedResult
+	default:
+		panic(fmt.Sprintf("unknown posting result %q — see PostingResult in domain_types.go", text))
+	}
+}
+
+// MetricSeries is the sealed set of Prometheus series OPS-5 declares
+// (feature-delta.md § Wave: DEVOPS / Observability stack;
+// kpi-contracts.yaml § runtime_instrumentation.metrics.series). One constant
+// per series so a scenario names a series once, not as a repeated literal.
+type MetricSeries string
+
+const (
+	PostingsTotal            MetricSeries = "ledgerops_postings_total"
+	PostingDurationSeconds   MetricSeries = "ledgerops_posting_duration_seconds"
+	InsufficientFundsTotal   MetricSeries = "ledgerops_insufficient_funds_rejections_total"
+	IdempotentReplaysTotal   MetricSeries = "ledgerops_idempotent_replays_total"
+	TrialBalanceImbalance    MetricSeries = "ledgerops_trial_balance_imbalance_minor"
+	TrialBalanceScanDuration MetricSeries = "ledgerops_trial_balance_scan_duration_seconds"
+	DriftAccounts            MetricSeries = "ledgerops_drift_accounts"
+)
+
+// DeclaredMetricSeries is the whole sealed set, for the one scenario that
+// asserts the exposition names every series DEVOPS declared rather than
+// picking one and hoping the rest are there too.
+func DeclaredMetricSeries() []MetricSeries {
+	return []MetricSeries{
+		PostingsTotal, PostingDurationSeconds, InsufficientFundsTotal,
+		IdempotentReplaysTotal, TrialBalanceImbalance, TrialBalanceScanDuration,
+		DriftAccounts,
+	}
+}
+
+// MetricsSnapshot is a parsed reading of the exposition text, keyed by series
+// name plus an optional label fragment (e.g. `result="posted"`), so a before
+// and after pair can be handed to statedelta.AssertStateDelta the same way
+// CaptureUniverse's ledger snapshot already is.
+type MetricsSnapshot map[string]float64
+
+// MetricKey builds the snapshot key for a series and an optional label
+// fragment. An empty fragment reads the series' bare value (a gauge with no
+// labels, e.g. ledgerops_drift_accounts).
+func MetricKey(series MetricSeries, labelFragment string) string {
+	if labelFragment == "" {
+		return string(series)
+	}
+	return string(series) + "{" + labelFragment + "}"
+}
+
+// LogLine is one decoded JSON log record, holding only the fields OPS-5
+// declares (feature-delta.md § Wave: DEVOPS / Observability stack;
+// kpi-contracts.yaml § runtime_instrumentation.logs). Never carries the raw
+// Authorization header or the raw idempotency key — that is the one property
+// the release-blocking scenario exists to hold the adapter to.
+type LogLine struct {
+	RequestID          string
+	Route              string
+	Status             int
+	ElapsedMillis      float64
+	HasElapsedMillis   bool
+	TransactionID      string
+	AccountIDs         []string
+	AmountMinor        int64
+	Currency           string
+	IdempotencyKeyHash string
+	HasReplayedField   bool
+	Replayed           bool
+	ViolationKind      string
+	Raw                string
+}

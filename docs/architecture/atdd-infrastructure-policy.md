@@ -23,6 +23,7 @@ override a class default: no driven-internal port may become a fake here.
 | `GET /health/trial-balance` | Real `chi` router over `httptest.Server` | |
 | Console verdict surface | HTTP/JSON only; browser E2E deferred | DISTILL DDR-2. The SPA bundle is not driven by a browser in CI — see § Known gap |
 | `cmd/api` binary | `go run ./cmd/api` as a subprocess, for the walking skeleton and the chaos demo | Proves wiring, argument handling, and exit codes — a handler-level test cannot |
+| `GET /metrics` (added 2026-08-26, OPS-5 fix) | Real `chi` router over `httptest.Server`, **outside** `requireOperatorKey` | Confirmed unauthenticated 2026-08-26 — mirrors `console_static.go`'s precedent for deliberately unauthenticated read-only surfaces. Scraped presenting no credentials AND presenting a rejected key, both must succeed |
 
 ## Driven internal (real)
 
@@ -42,6 +43,7 @@ Every container is reached through two DSNs (OPS-10): the suite connects as
 |---|---|---|
 | `Clock` | `FakeClock` — a `func() time.Time` literal, manually advanced | Function type per DDD-13, so the fake is one line |
 | `IDGenerator` | `FakeIDGenerator` — a `func() string` literal over a fixed sequence | Makes `transaction_id` assertions exact rather than shape-matched |
+| `Logger` (`log/slog`, added 2026-08-26, OPS-5 fix) | `logCapture` — a mutex-safe `io.Writer` behind `slog.NewJSONHandler`, output-captured | Stands in for stdout, where the real handler writes in production (`cmd/api/main.go`). Captured per-request (`logs.linesFrom(marker)`) for field assertions and as a full corpus (`logs.rawText()`) for the release-blocking secret-absence scenarios. `Deps.Logger` is a RED scaffold until DELIVER wires a request-logging middleware onto it (`internal/adapters/http/request_logging.go`) |
 | `apiClient`'s `fetch()` (`web/console/`, added DISTILL `ledger-core-console` 2026-08-25) | `vi.fn()` mock returning a scripted `Response`-shaped object | Component-level unit tests only — no real network in jsdom. The real-I/O HTTP/JSON contract this client renders is already asserted over a real Postgres-backed server by `tests/acceptance/ledgercore/milestone-04-proof-of-balance.feature`; this mock proves `apiClient`'s own header/timeout/401 wiring, not the wire contract |
 | `keyStorage`'s `window.localStorage` (`web/console/`, added DISTILL `ledger-core-console` 2026-08-25) | None — jsdom's real, spec-compliant `Storage` implementation | Not faked: jsdom's `localStorage` is a real synchronous key-value store, the same API surface the browser exposes. No mock needed for this port |
 

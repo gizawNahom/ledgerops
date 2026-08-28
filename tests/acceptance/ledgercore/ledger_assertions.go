@@ -3,6 +3,8 @@ package ledgercore
 import (
 	"context"
 	"fmt"
+	"math"
+	"net/http"
 	"sort"
 	"strings"
 
@@ -745,6 +747,287 @@ func (l *Ledger) ThenNoMigrationErasesAnEntry(ctx context.Context) error {
 		if strings.Contains(upper, "DELETE FROM ENTRIES") || strings.Contains(upper, "DROP TABLE ENTRIES") {
 			return fmt.Errorf("migration %s erases entries, which D7 forbids", name)
 		}
+	}
+	return nil
+}
+
+// --- OPS-5 observability (fix-ledger-core-observability, 2026-08-26) -------
+//
+// None of the assertions below is routed through statedelta.AssertStateDelta:
+// that helper needs a testing.TB to call Fatalf on, and this suite's godog
+// runner (suite_test.go) drives scenarios from TestMain rather than from a
+// *testing.T subtest — the same reason every other Then in this file returns
+// a plain error instead. The universe-bound discipline the helper exists for
+// is honoured directly: every assertion below compares exactly one declared,
+// port-exposed observable (one metric series, one log field) against a
+// captured baseline or its own presence, and states its own reason on
+// mismatch, same as the sixty scenarios above it.
+
+// --- metrics ---------------------------------------------------------------
+
+// ThenTheScrapeSucceedsWithExpositionText asserts GET /metrics answered like
+// a scrape target should: 200, with something in the body. It does not parse
+// the body's shape here — ThenTheExpositionNamesEveryDeclaredSeries and the
+// counter/gauge/histogram assertions below do that.
+func (l *Ledger) ThenTheScrapeSucceedsWithExpositionText() error {
+	if l.lastMetricsStatus != http.StatusOK {
+		return fmt.Errorf("expected the scrape to succeed with status 200, got %d (body: %s)",
+			l.lastMetricsStatus, l.lastMetricsBody)
+	}
+	if strings.TrimSpace(l.lastMetricsBody) == "" {
+		return fmt.Errorf("the scrape answered 200 but returned no exposition text")
+	}
+	return nil
+}
+
+// ThenTheExpositionNamesEveryDeclaredSeries asserts the exposition carries
+// every series DEVOPS declared (feature-delta.md § Wave: DEVOPS /
+// Observability stack), not just the one a narrower scenario happened to
+// exercise.
+func (l *Ledger) ThenTheExpositionNamesEveryDeclaredSeries() error {
+	var missing []string
+	for _, series := range DeclaredMetricSeries() {
+		if !strings.Contains(l.lastMetricsBody, string(series)) {
+			missing = append(missing, string(series))
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	return fmt.Errorf("the exposition is missing: %s", strings.Join(missing, ", "))
+}
+
+// ThenTheCounterForOutcomeIncreasedBy asserts a `{result=...}`-labelled
+// counter moved by exactly the stated amount since the ledger's start-of-
+// scenario baseline (ledger_observability.go § CaptureMetricsBaseline).
+func (l *Ledger) ThenTheCounterForOutcomeIncreasedBy(ctx context.Context, series MetricSeries, outcome PostingResult, want float64) error {
+	if err := l.ScrapeMetrics(ctx, ApplicationRole); err != nil {
+		return err
+	}
+	label := fmt.Sprintf("result=%q", string(outcome))
+	key := MetricKey(series, label)
+	current, found := l.MetricValue(series, label)
+	if !found {
+		return fmt.Errorf("the exposition carries no %s series to read", key)
+	}
+	got := current - l.baselineFor(key)
+	if math.Abs(got-want) < 0.0001 {
+		return nil
+	}
+	return fmt.Errorf("expected %s to increase by %v since the baseline, it moved by %v (baseline %v, now %v)",
+		key, want, got, l.baselineFor(key), current)
+}
+
+// ThenTheCounterIncreasedBy asserts a bare (unlabelled) counter moved by
+// exactly the stated amount since the baseline.
+func (l *Ledger) ThenTheCounterIncreasedBy(ctx context.Context, series MetricSeries, want float64) error {
+	if err := l.ScrapeMetrics(ctx, ApplicationRole); err != nil {
+		return err
+	}
+	key := MetricKey(series, "")
+	current, found := l.MetricValue(series, "")
+	if !found {
+		return fmt.Errorf("the exposition carries no %s series to read", key)
+	}
+	got := current - l.baselineFor(key)
+	if math.Abs(got-want) < 0.0001 {
+		return nil
+	}
+	return fmt.Errorf("expected %s to increase by %v since the baseline, it moved by %v (baseline %v, now %v)",
+		key, want, got, l.baselineFor(key), current)
+}
+
+// ThenTheHistogramWasObservedAtLeastOnce asserts a histogram's `_count`
+// companion moved since the baseline — the shape of a distribution matters
+// less here than the fact that something was recorded at all.
+func (l *Ledger) ThenTheHistogramWasObservedAtLeastOnce(ctx context.Context, series MetricSeries) error {
+	if err := l.ScrapeMetrics(ctx, ApplicationRole); err != nil {
+		return err
+	}
+	countSeries := MetricSeries(string(series) + "_count")
+	key := MetricKey(countSeries, "")
+	current, found := l.HistogramObservationCount(series)
+	if !found {
+		return fmt.Errorf("the exposition carries no %s series to read", key)
+	}
+	if current-l.baselineFor(key) >= 1 {
+		return nil
+	}
+	return fmt.Errorf("expected %s to have recorded at least one observation since the baseline, it reports %v (baseline %v)",
+		key, current, l.baselineFor(key))
+}
+
+// ThenTheGaugeReads asserts a gauge's absolute value — trial-balance
+// imbalance and drift count are both point-in-time facts about the whole
+// ledger, not deltas.
+func (l *Ledger) ThenTheGaugeReads(ctx context.Context, series MetricSeries, want float64) error {
+	if err := l.ScrapeMetrics(ctx, ApplicationRole); err != nil {
+		return err
+	}
+	got, found := l.MetricValue(series, "")
+	if !found {
+		return fmt.Errorf("the exposition carries no %s series to read", series)
+	}
+	if math.Abs(got-want) < 0.0001 {
+		return nil
+	}
+	return fmt.Errorf("expected %s to read %v, it reads %v", series, want, got)
+}
+
+// --- structured logging ------------------------------------------------
+
+// ThenALogLineForThatRequestCarriesTheBasics asserts the four fields OPS-5
+// requires on every request (kpi-contracts.yaml § runtime_instrumentation.logs).
+func (l *Ledger) ThenALogLineForThatRequestCarriesTheBasics() error {
+	if len(l.lastRequestLogLines) == 0 {
+		return fmt.Errorf("no log line was captured for the last request")
+	}
+	line := l.lastRequestLogLines[len(l.lastRequestLogLines)-1]
+	switch {
+	case line.RequestID == "":
+		return fmt.Errorf("the log line carries no request_id (line: %s)", line.Raw)
+	case line.Route == "":
+		return fmt.Errorf("the log line carries no route (line: %s)", line.Raw)
+	case line.Status == 0:
+		return fmt.Errorf("the log line carries no status (line: %s)", line.Raw)
+	case !line.HasElapsedMillis:
+		return fmt.Errorf("the log line carries no elapsed_ms (line: %s)", line.Raw)
+	}
+	return nil
+}
+
+// ThenBothRequestsAreLoggedUnderTheSameRoute asserts route is the matched
+// chi pattern, not the raw path — two different account ids must log
+// identically, or the field is a cardinality hazard wearing an observability
+// costume.
+func (l *Ledger) ThenBothRequestsAreLoggedUnderTheSameRoute() error {
+	if len(l.priorRequestLogLines) == 0 || len(l.lastRequestLogLines) == 0 {
+		return fmt.Errorf("both requests must have produced a captured log line to compare their routes")
+	}
+	first := l.priorRequestLogLines[len(l.priorRequestLogLines)-1].Route
+	second := l.lastRequestLogLines[len(l.lastRequestLogLines)-1].Route
+	if first == "" || second == "" {
+		return fmt.Errorf("one of the two requests logged no route at all (first: %q, second: %q)", first, second)
+	}
+	if first != second {
+		return fmt.Errorf("the two requests were logged under different routes (%q and %q) — route must be the matched pattern, not the raw path",
+			first, second)
+	}
+	return nil
+}
+
+// ThenALogLineForThatRequestNamesTheMovement asserts a posting's log line
+// carries the fields that make it explainable after the fact.
+func (l *Ledger) ThenALogLineForThatRequestNamesTheMovement() error {
+	if len(l.lastRequestLogLines) == 0 {
+		return fmt.Errorf("no log line was captured for the last request")
+	}
+	line := l.lastRequestLogLines[len(l.lastRequestLogLines)-1]
+	switch {
+	case line.TransactionID == "":
+		return fmt.Errorf("the log line names no transaction (line: %s)", line.Raw)
+	case len(line.AccountIDs) < 2:
+		return fmt.Errorf("the log line names %d account(s), expected both sides of the movement (line: %s)",
+			len(line.AccountIDs), line.Raw)
+	case line.AmountMinor == 0:
+		return fmt.Errorf("the log line carries no amount_minor (line: %s)", line.Raw)
+	case line.Currency == "":
+		return fmt.Errorf("the log line carries no currency (line: %s)", line.Raw)
+	}
+	return nil
+}
+
+// ThenALogLineForThatRequestCarriesTheViolation asserts a rejection's log
+// line names the same sealed refusal the caller was answered.
+func (l *Ledger) ThenALogLineForThatRequestCarriesTheViolation(kind RefusalKind) error {
+	if len(l.lastRequestLogLines) == 0 {
+		return fmt.Errorf("no log line was captured for the last request")
+	}
+	line := l.lastRequestLogLines[len(l.lastRequestLogLines)-1]
+	if RefusalKind(line.ViolationKind) != kind {
+		return fmt.Errorf("expected the log line to carry violation_kind %q, it carries %q (line: %s)",
+			kind, line.ViolationKind, line.Raw)
+	}
+	return nil
+}
+
+// ThenTheSameLogLineCarriesTheStatus asserts the status on the very same
+// line the preceding Then just inspected — the point being that ONE line
+// carries both facts together, not that two different lines each carry one.
+func (l *Ledger) ThenTheSameLogLineCarriesTheStatus(want int) error {
+	if len(l.lastRequestLogLines) == 0 {
+		return fmt.Errorf("no log line was captured for the last request")
+	}
+	line := l.lastRequestLogLines[len(l.lastRequestLogLines)-1]
+	if line.Status != want {
+		return fmt.Errorf("expected status %d on the log line, it carries %d (line: %s)", want, line.Status, line.Raw)
+	}
+	return nil
+}
+
+// ThenALogLineForThatRequestCarriesAHashedIdempotencyKeyAnd asserts the
+// idempotency-path fields together: a hash (never the raw key) and the
+// replay flag with the stated value.
+func (l *Ledger) ThenALogLineForThatRequestCarriesAHashedIdempotencyKeyAnd(replayed bool) error {
+	if len(l.lastRequestLogLines) == 0 {
+		return fmt.Errorf("no log line was captured for the last request")
+	}
+	line := l.lastRequestLogLines[len(l.lastRequestLogLines)-1]
+	switch {
+	case line.IdempotencyKeyHash == "":
+		return fmt.Errorf("the log line carries no idempotency_key_hash (line: %s)", line.Raw)
+	case line.IdempotencyKeyHash == string(l.lastRequest.Key):
+		return fmt.Errorf("the log line carries the RAW idempotency key where a hash belongs (line: %s)", line.Raw)
+	case !line.HasReplayedField:
+		return fmt.Errorf("the log line carries no replayed field (line: %s)", line.Raw)
+	case line.Replayed != replayed:
+		return fmt.Errorf("expected replayed=%v, the log line carries replayed=%v (line: %s)", replayed, line.Replayed, line.Raw)
+	}
+	return nil
+}
+
+// ThenALogLineForThatRequestCarriesAHashedIdempotencyKeyInstead asserts only
+// that a hash is present, for the release-blocking scenario where the point
+// is the ABSENCE of the raw key elsewhere, not the replay flag.
+func (l *Ledger) ThenALogLineForThatRequestCarriesAHashedIdempotencyKeyInstead() error {
+	if len(l.lastRequestLogLines) == 0 {
+		return fmt.Errorf("no log line was captured for the last request")
+	}
+	line := l.lastRequestLogLines[len(l.lastRequestLogLines)-1]
+	if line.IdempotencyKeyHash == "" {
+		return fmt.Errorf("the log line carries no idempotency_key_hash (line: %s)", line.Raw)
+	}
+	return nil
+}
+
+// --- the release-blocking guarantee -----------------------------------
+
+// ThenNoCapturedLogLineContainsTheOperatorKey is the mandatory,
+// release-blocking scenario's assertion (task brief: "assert that the raw
+// Authorization header value ... NEVER appear[s] in any captured log
+// output, on ANY path"). It searches the WHOLE corpus captured since the
+// ledger started, not just the last request — every driving-port call in
+// this suite presents the real operator key by default (ActAs defaults to
+// ApplicationRole, whose Authorization header is "Bearer "+l.operatorKey),
+// so the corpus already carries every kind of call a scenario makes.
+func (l *Ledger) ThenNoCapturedLogLineContainsTheOperatorKey() error {
+	corpus := l.logs.rawText()
+	if strings.Contains(corpus, l.operatorKey) {
+		return fmt.Errorf("a captured log line contains the operator's real key %q verbatim", l.operatorKey)
+	}
+	if strings.Contains(corpus, "never-issued-key") {
+		return fmt.Errorf("a captured log line contains the rejected operator key verbatim")
+	}
+	return nil
+}
+
+// ThenNoCapturedLogLineContainsTheRawIdempotencyKey is the idempotency-key
+// half of the same release-blocking guarantee, scoped to one caller-chosen
+// key so the scenario can name exactly which secret must never surface.
+func (l *Ledger) ThenNoCapturedLogLineContainsTheRawIdempotencyKey(key IdempotencyKey) error {
+	corpus := l.logs.rawText()
+	if strings.Contains(corpus, string(key)) {
+		return fmt.Errorf("a captured log line contains the raw idempotency key %q", key)
 	}
 	return nil
 }

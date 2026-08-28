@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"sort"
@@ -85,6 +86,20 @@ type Ledger struct {
 	tamperedRow  int
 	tamperedBy   Money
 	migrationSQL []string
+
+	// OPS-5 observability (fix-ledger-core-observability, 2026-08-26). logs is
+	// the fake log sink (driven external/non-deterministic per the
+	// Architecture of Reference); lastMetrics* holds the most recent scrape of
+	// the fake-free, real GET /metrics driving port; metricsBaseline is
+	// captured once at serve() so "increased by N" scenarios have a zero
+	// point (see ledger_observability.go § CaptureMetricsBaseline for why
+	// this is baseline-relative rather than absolute).
+	logs                 *logCapture
+	lastRequestLogLines  []LogLine
+	priorRequestLogLines []LogLine
+	lastMetricsStatus    int
+	lastMetricsBody      string
+	metricsBaseline      MetricsSnapshot
 }
 
 // --- lifecycle -------------------------------------------------------------
@@ -121,6 +136,9 @@ func (l *Ledger) serve(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("opening the store as the application role: %w", err)
 	}
+	if l.logs == nil {
+		l.logs = newLogCapture()
+	}
 	handler := apphttp.NewRouter(apphttp.Deps{
 		Store:       store,
 		OperatorKey: l.operatorKey,
@@ -133,9 +151,16 @@ func (l *Ledger) serve(ctx context.Context) error {
 		// takes effect on the already-running server.
 		Clock:       func() time.Time { return l.clock() },
 		IDGenerator: func() string { return l.nextID() },
+		// OPS-5: the fake log sink. slog.NewJSONHandler over l.logs, per the
+		// Architecture of Reference (driven external/non-deterministic port,
+		// fake with output capture). Deps.Logger is a RED scaffold today
+		// (router.go) — no middleware reads it, so every line this suite
+		// captures on a fresh run is exactly zero, which is the correct RED.
+		Logger: slog.New(slog.NewJSONHandler(l.logs, nil)),
 	})
 	l.server = httptest.NewServer(handler)
 	l.client = l.server.Client()
+	l.CaptureMetricsBaseline(ctx)
 	return nil
 }
 
@@ -423,6 +448,11 @@ func (l *Ledger) callRawAs(ctx context.Context, as Credentials, method, path str
 		request.Header.Set("Idempotency-Key", string(key))
 	}
 
+	// OPS-5: mark the log corpus before the call so the lines this exact
+	// request produces can be read back as a delta, regardless of what any
+	// earlier request in the scenario already wrote.
+	marker := l.logs.markerCount()
+
 	response, err := l.client.Do(request)
 	if err != nil {
 		return Answer{}, err
@@ -433,6 +463,10 @@ func (l *Ledger) callRawAs(ctx context.Context, as Credentials, method, path str
 	if err != nil {
 		return Answer{}, err
 	}
+
+	l.priorRequestLogLines = l.lastRequestLogLines
+	l.lastRequestLogLines = parseLogLines(l.logs.linesFrom(marker))
+
 	return decodeAnswer(response.StatusCode, raw), nil
 }
 
