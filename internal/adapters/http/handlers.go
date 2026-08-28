@@ -34,21 +34,21 @@ func createAccountHandler(ledger *app.Ledger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var body createAccountRequest
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			writeRefusal(w, http.StatusBadRequest, "malformed_request", nil)
+			writeRefusal(w, r, http.StatusBadRequest, "malformed_request", nil)
 			return
 		}
 		if body.AccountID == "" {
-			writeRefusal(w, http.StatusBadRequest, "malformed_request", nil)
+			writeRefusal(w, r, http.StatusBadRequest, "malformed_request", nil)
 			return
 		}
 		kind, ok := parseAccountKind(body.Type)
 		if !ok {
-			writeRefusal(w, http.StatusBadRequest, "malformed_request", nil)
+			writeRefusal(w, r, http.StatusBadRequest, "malformed_request", nil)
 			return
 		}
 
 		if err := ledger.CreateAccount(r.Context(), body.AccountID, kind); err != nil {
-			writeDomainError(w, err)
+			writeDomainError(w, r, err)
 			return
 		}
 
@@ -75,7 +75,7 @@ func getBalanceHandler(ledger *app.Ledger) http.HandlerFunc {
 
 		account, err := ledger.GetBalance(r.Context(), accountID)
 		if err != nil {
-			writeDomainError(w, err)
+			writeDomainError(w, r, err)
 			return
 		}
 
@@ -98,7 +98,7 @@ func getEntriesHandler(ledger *app.Ledger) http.HandlerFunc {
 
 		traced, err := ledger.GetEntries(r.Context(), accountID)
 		if err != nil {
-			writeDomainError(w, err)
+			writeDomainError(w, r, err)
 			return
 		}
 
@@ -145,13 +145,13 @@ func postTransferHandler(ledger *app.Ledger, metrics *Metrics) http.HandlerFunc 
 
 		key := r.Header.Get("Idempotency-Key")
 		if key == "" {
-			writeRefusal(w, http.StatusBadRequest, "missing_idempotency_key", nil)
+			writeRefusal(w, r, http.StatusBadRequest, "missing_idempotency_key", nil)
 			return
 		}
 
 		rawBody, err := io.ReadAll(r.Body)
 		if err != nil {
-			writeRefusal(w, http.StatusBadRequest, "malformed_request", nil)
+			writeRefusal(w, r, http.StatusBadRequest, "malformed_request", nil)
 			return
 		}
 
@@ -162,21 +162,21 @@ func postTransferHandler(ledger *app.Ledger, metrics *Metrics) http.HandlerFunc 
 		decoder.DisallowUnknownFields()
 		var body postTransferRequest
 		if err := decoder.Decode(&body); err != nil {
-			writeRefusal(w, http.StatusBadRequest, "malformed_request", nil)
+			writeRefusal(w, r, http.StatusBadRequest, "malformed_request", nil)
 			return
 		}
 		if body.From == "" || body.To == "" || body.Amount == "" {
-			writeRefusal(w, http.StatusBadRequest, "malformed_request", nil)
+			writeRefusal(w, r, http.StatusBadRequest, "malformed_request", nil)
 			return
 		}
 
 		amount, err := parseAmount(body.Amount)
 		if err != nil {
 			if errors.Is(err, errAmountNotLexicallyANumber) {
-				writeRefusal(w, http.StatusBadRequest, "malformed_request", nil)
+				writeRefusal(w, r, http.StatusBadRequest, "malformed_request", nil)
 				return
 			}
-			writeDomainError(w, err)
+			writeDomainError(w, r, err)
 			return
 		}
 
@@ -189,7 +189,7 @@ func postTransferHandler(ledger *app.Ledger, metrics *Metrics) http.HandlerFunc 
 		})
 		if err != nil {
 			if errors.Is(err, app.ErrIdempotencyKeyConflict) {
-				writeRefusal(w, http.StatusConflict, "idempotency_key_conflict", nil)
+				writeRefusal(w, r, http.StatusConflict, "idempotency_key_conflict", nil)
 				return
 			}
 			metrics.ObservePosting(PostingRejected, time.Since(started))
@@ -197,7 +197,7 @@ func postTransferHandler(ledger *app.Ledger, metrics *Metrics) http.HandlerFunc 
 			if errors.As(err, &violation) && violation.Kind() == domain.InsufficientFunds {
 				metrics.ObserveInsufficientFundsRejection()
 			}
-			writeDomainError(w, err)
+			writeDomainError(w, r, err)
 			return
 		}
 
@@ -280,10 +280,10 @@ func formatMoney(m domain.Money) string {
 // writeDomainError maps a domain.Violation onto the sealed HTTP status table
 // (ADR-008). Any other error is an infrastructure failure the adapter did not
 // cause and does not disguise as a domain refusal.
-func writeDomainError(w http.ResponseWriter, err error) {
+func writeDomainError(w http.ResponseWriter, r *http.Request, err error) {
 	var violation domain.Violation
 	if errors.As(err, &violation) {
-		writeViolation(w, violation)
+		writeViolation(w, r, violation)
 		return
 	}
 	writeJSON(w, http.StatusInternalServerError, map[string]any{
@@ -291,7 +291,13 @@ func writeDomainError(w http.ResponseWriter, err error) {
 	})
 }
 
-func writeRefusal(w http.ResponseWriter, status int, kind string, extra map[string]any) {
+// writeRefusal answers a refusal that does not flow through writeViolation's
+// exhaustive switch (malformed_request, missing_idempotency_key,
+// idempotency_key_conflict) — it records violation_kind onto the per-request
+// log accumulator itself, uniformly, at this single call site (OPS-5, design
+// decision 2).
+func writeRefusal(w http.ResponseWriter, r *http.Request, status int, kind string, extra map[string]any) {
+	fieldsFrom(r.Context()).Set("violation_kind", kind)
 	body := map[string]any{"error": kind}
 	for k, v := range extra {
 		body[k] = v
@@ -310,7 +316,7 @@ func verdictHandler(ledger *app.Ledger, metrics *Metrics) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		report, err := ledger.VerifyBooks(r.Context())
 		if err != nil {
-			writeRefusal(w, http.StatusInternalServerError, "internal_error", nil)
+			writeRefusal(w, r, http.StatusInternalServerError, "internal_error", nil)
 			return
 		}
 		body := verdictBodyFor(report)

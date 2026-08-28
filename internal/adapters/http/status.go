@@ -16,27 +16,31 @@ import (
 	"ledgerops/internal/domain"
 )
 
-// writeViolation maps a domain.Violation onto its wire status and body.
-func writeViolation(w http.ResponseWriter, v domain.Violation) {
+// writeViolation maps a domain.Violation onto its wire status and body. It
+// also records violation_kind onto the per-request log accumulator (OPS-5,
+// design decision 2) at this single exhaustive-switch site — reusing the
+// sealed classification rather than adding a second one elsewhere.
+func writeViolation(w http.ResponseWriter, r *http.Request, v domain.Violation) {
+	fieldsFrom(r.Context()).Set("violation_kind", string(v.Kind()))
 	switch v.Kind() {
 	case domain.UnknownAccount:
-		writeRefusal(w, http.StatusNotFound, string(v.Kind()), map[string]any{
+		writeRefusal(w, r, http.StatusNotFound, string(v.Kind()), map[string]any{
 			"account_id": v.Account(),
 		})
 	case domain.AccountAlreadyExists:
-		writeRefusal(w, http.StatusConflict, string(v.Kind()), map[string]any{
+		writeRefusal(w, r, http.StatusConflict, string(v.Kind()), map[string]any{
 			"account_id": v.Account(),
 		})
 	case domain.InsufficientFunds:
-		writeRefusal(w, http.StatusUnprocessableEntity, string(v.Kind()), map[string]any{
+		writeRefusal(w, r, http.StatusUnprocessableEntity, string(v.Kind()), map[string]any{
 			"account_id": v.Account(),
 			"available":  formatMoney(v.Available()),
 			"requested":  formatMoney(v.Requested()),
 		})
 	case domain.InvalidAmount:
-		writeRefusal(w, http.StatusUnprocessableEntity, string(v.Kind()), nil)
+		writeRefusal(w, r, http.StatusUnprocessableEntity, string(v.Kind()), nil)
 	case domain.CurrencyMismatch:
-		writeRefusal(w, http.StatusUnprocessableEntity, string(v.Kind()), map[string]any{
+		writeRefusal(w, r, http.StatusUnprocessableEntity, string(v.Kind()), map[string]any{
 			"from_currency": v.FromCurrency(),
 			"to_currency":   v.ToCurrency(),
 		})

@@ -119,7 +119,7 @@ Feature: The ledger can be watched from outside without reading its source
     When the integrator moves 20.00 from "alice" to "bob" under key "obs-5"
     Then a log line for that request names the transaction, both accounts, the amount moved, and the currency
 
-  @pending @real-io @error @contract-shape:unbounded-preservation
+  @real-io @error @contract-shape:unbounded-preservation
   Scenario: A refused posting is logged with the reason it was refused
     Given a wallet account "alice" funded with 10.00
     And a wallet account "bob" exists
@@ -141,7 +141,7 @@ Feature: The ledger can be watched from outside without reading its source
     And the integrator repeats the same request under key "obs-8"
     Then a log line for that request carries a hashed idempotency key and states it was a replay
 
-  @pending @real-io @error @contract-shape:unbounded-preservation
+  @real-io @error @contract-shape:unbounded-preservation
   Scenario: An unidentified caller's rejection is logged too
     Given the caller presents no operator key
     When the operator asks whether the books balance

@@ -134,6 +134,7 @@ func requireOperatorKey(expected string) func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			presented := r.Header.Get("Authorization")
 			if expected == "" || presented != "Bearer "+expected {
+				fieldsFrom(r.Context()).Set("violation_kind", "unidentified_caller")
 				writeJSON(w, http.StatusUnauthorized, map[string]any{
 					"error": "unidentified_caller",
 				})
