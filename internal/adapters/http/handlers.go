@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"regexp"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -132,8 +133,16 @@ type postTransferRequest struct {
 // header is required (ADR-005 / DDR-1) and threaded through to
 // PostTransfer's idempotency plumbing; full replay/conflict handling is a
 // later step's job (04-01/04-02) — this step reads and forwards the key.
-func postTransferHandler(ledger *app.Ledger) http.HandlerFunc {
+//
+// metrics observes the outcome at the single site it is decided (OPS-5,
+// design decision 1): posted, rejected, or replayed, plus how long the
+// request took to answer. The insufficient-funds branch additionally counts
+// on its own dedicated series, since that refusal is the one operators watch
+// for independently of the general rejection count.
+func postTransferHandler(ledger *app.Ledger, metrics *Metrics) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		started := time.Now()
+
 		key := r.Header.Get("Idempotency-Key")
 		if key == "" {
 			writeRefusal(w, http.StatusBadRequest, "missing_idempotency_key", nil)
@@ -183,13 +192,24 @@ func postTransferHandler(ledger *app.Ledger) http.HandlerFunc {
 				writeRefusal(w, http.StatusConflict, "idempotency_key_conflict", nil)
 				return
 			}
+			metrics.ObservePosting(PostingRejected, time.Since(started))
+			var violation domain.Violation
+			if errors.As(err, &violation) && violation.Kind() == domain.InsufficientFunds {
+				metrics.ObserveInsufficientFundsRejection()
+			}
 			writeDomainError(w, err)
 			return
 		}
 
 		status := http.StatusCreated
+		outcome := PostingPosted
 		if result.Replayed {
 			status = http.StatusOK
+			outcome = PostingReplayed
+		}
+		metrics.ObservePosting(outcome, time.Since(started))
+		if result.Replayed {
+			metrics.ObserveIdempotentReplay()
 		}
 		writeJSON(w, status, transferAnswer(result))
 	}
@@ -286,14 +306,23 @@ func writeRefusal(w http.ResponseWriter, status int, kind string, extra map[stri
 // same answer") — sharing one function body is what guarantees the two
 // surfaces can never drift apart, rather than two call sites independently
 // reproducing the same verdict-before-figures rendering.
-func verdictHandler(ledger *app.Ledger) http.HandlerFunc {
+func verdictHandler(ledger *app.Ledger, metrics *Metrics) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		report, err := ledger.VerifyBooks(r.Context())
 		if err != nil {
 			writeRefusal(w, http.StatusInternalServerError, "internal_error", nil)
 			return
 		}
-		writeJSON(w, http.StatusOK, verdictBodyFor(report))
+		body := verdictBodyFor(report)
+
+		// The three gauges/histogram below are set from data verdictBodyFor
+		// already computed for the wire response — no value is re-derived
+		// (OPS-5, design decision 1).
+		metrics.SetTrialBalanceImbalance(body.ImbalanceMinor)
+		metrics.ObserveTrialBalanceScanDuration(time.Duration(report.ElapsedMillis) * time.Millisecond)
+		metrics.SetDriftedAccounts(len(body.Drifted))
+
+		writeJSON(w, http.StatusOK, body)
 	}
 }
 

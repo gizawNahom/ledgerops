@@ -11,8 +11,11 @@
 // transaction id, counterparty, amount, recorded-at, running balance, and
 // unknown-account refusal. GET /console/verdict is real as of step 06-02: it
 // shares verdictHandler with GET /health/trial-balance, so the two surfaces
-// cannot disagree by construction. GET /metrics remains a scaffold: no active
-// scenario exercises it yet. GET /console and GET /console/* are wired as of
+// cannot disagree by construction. GET /metrics is real as of OPS-5 step
+// 01-01: a Prometheus exposition over the seven declared series
+// (internal/adapters/http/metrics.go), still inside the protected group —
+// moving it out is step 01-02's job. GET /console and GET /console/* are
+// wired as of
 // ledger-core-console's DEVOPS wave (build-output wiring, resolved as an
 // infra concern -- see feature-delta.md § Wave: DEVOPS / Build-output
 // wiring): they serve the built SPA shell and its assets, deliberately
@@ -21,6 +24,7 @@ package http
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -38,6 +42,20 @@ type Deps struct {
 	OperatorKey string
 	Clock       func() time.Time
 	IDGenerator func() string
+
+	// Logger receives structured per-request JSON records (OPS-5,
+	// feature-delta.md § Wave: DEVOPS / Observability stack). Added by
+	// DISTILL (fix-ledger-core-observability, 2026-08-26) so the acceptance
+	// suite's composition root compiles against the field DELIVER wires a
+	// real request-logging middleware onto — see request_logging.go.
+	//
+	// SCAFFOLD: true — accepted here, not yet read by NewRouter. No
+	// middleware is registered against it, so nothing panics and nothing is
+	// logged: a scenario asserting a captured field fails on a clean
+	// "expected N log lines, got 0" (RED), never on a compile error (BROKEN)
+	// or a dropped connection. Falls back to slog.Default() when nil so
+	// cmd/api/main.go, which does not set this field yet, is unaffected.
+	Logger *slog.Logger
 }
 
 // NewRouter builds the production router. Real routes, real auth middleware.
@@ -53,16 +71,23 @@ func NewRouter(deps Deps) http.Handler {
 
 	ledger := app.NewLedger(deps.Store, deps.Clock, deps.IDGenerator)
 
+	// OPS-5 (fix-ledger-core-observability, design decision 1): the metrics
+	// collector set is constructed once here, the same way ledger itself is
+	// constructed inside NewRouter rather than threaded through Deps. Mount
+	// point and auth scoping are unchanged by this step — GET /metrics stays
+	// inside the protected group; moving it out is step 01-02's job.
+	metrics := NewMetrics()
+
 	router.Group(func(protected chi.Router) {
 		protected.Use(requireOperatorKey(deps.OperatorKey))
 
 		protected.Post("/accounts", createAccountHandler(ledger))
 		protected.Get("/accounts/{id}", getBalanceHandler(ledger))
 		protected.Get("/accounts/{id}/entries", getEntriesHandler(ledger))
-		protected.Post("/transfers", postTransferHandler(ledger))
-		protected.Get("/health/trial-balance", verdictHandler(ledger))
-		protected.Get("/console/verdict", verdictHandler(ledger))
-		protected.Get("/metrics", scaffold("metrics exposition"))
+		protected.Post("/transfers", postTransferHandler(ledger, metrics))
+		protected.Get("/health/trial-balance", verdictHandler(ledger, metrics))
+		protected.Get("/console/verdict", verdictHandler(ledger, metrics))
+		protected.Get("/metrics", metrics.Handler().ServeHTTP)
 	})
 
 	mountConsole(router, consoleDistDir)
