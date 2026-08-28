@@ -1,16 +1,170 @@
 # Evolution — ledger-core
 
-**Status (updated 2026-08-24): PARTIALLY DELIVERED BY DECISION. Slices
-01-05 are DONE. Only the console SPA remains.**
-A second DELIVER pass (2026-08-24) shipped slice 04 (proof of balance) and
+**Status (updated 2026-08-28): PARTIALLY DELIVERED BY DECISION, OBSERVABILITY
+CORRECTED AND BUILT. Slices 01-05 are DONE. Console SPA remains the one
+open gap. A false "Observability: built" claim recorded in this document and
+in `feature-delta.md` on 2026-08-21/22 has been investigated (RCA), corrected,
+and — as of 2026-08-28 — the corresponding code has actually been built and
+verified.**
+See "Resolution — OPS-5 observability fix (2026-08-28)" below for the RCA
+summary, the fix that was built, and the review/verification evidence. It
+supersedes the observability claims made in both the "second DELIVER pass"
+update and the original 2026-08-21 record further down this document. A
+second DELIVER pass (2026-08-24) shipped slice 04 (proof of balance) and
 slice 05 (entry traceability), closing the two gaps this document originally
 reported as unbuilt. See "Update — second DELIVER pass (2026-08-24)" below
 for that pass's evidence; it supersedes every "NOT shipped" claim this
 document originally made about slices 04/05. The console SPA (`web/console/`)
 is the one remaining piece of the original feature scope — everything below
-the update section is the **original 2026-08-21 record**, preserved as
+the update sections is the **original 2026-08-21 record**, preserved as
 written, describing the state after the *first* DELIVER pass (walking
-skeleton + slices 01-03 only). Read the update section first.
+skeleton + slices 01-03 only). Read the update sections first, most recent
+first.
+
+---
+
+## Resolution — OPS-5 observability fix (2026-08-28)
+
+**What was false, and why.** This document's own "Handoff to operations"
+section (below) and `docs/feature/ledger-core/feature-delta.md` § "Wave:
+DEVOPS / [REF] Observability stack" both asserted, since the 2026-08-21/22
+finalize pass, that Prometheus metrics were "Exposed" (`GET /metrics`) and
+that structured `log/slog` logging with a named per-request field set was
+"Implemented in DELIVER." Neither was true: `GET /metrics` answered `501
+__SCAFFOLD__`, `prometheus/client_golang` was not a dependency, and zero
+`slog.` calls existed anywhere in `internal/adapters/http/` (only 4
+lifecycle-only calls existed in `cmd/api/main.go`). The gap was found and
+root-caused by `nw-troubleshooter` on 2026-08-26; full investigation,
+evidence table, and Five-Whys analysis (two branches, one shared root cause:
+finalize verification was reactive/named-target-only, not an exhaustive
+per-clause sweep) are recorded at
+`docs/analysis/2026-08-26-observability-status-false-claim-rca.md` — not
+reproduced here. The documentation correction itself (changing "Exposed"/
+"Implemented in DELIVER" to accurate wording) was applied in place on
+2026-08-26/27, ahead of this code fix, in both `feature-delta.md` and this
+document's "Handoff to operations" section below.
+
+**What was built.** A bugfix-shaped DELIVER run (`nw-bugfix`: RCA → user
+review → DELIVER, tracked under the separate task id
+`fix-ledger-core-observability` per that workflow's convention, with its
+DISTILL and design-consult artifacts deliberately appended to *this*
+feature's existing documents rather than forked into a new feature — see
+`feature-delta.md` § "Wave: DISTILL / [REF] OPS-5 observability fix" for
+that path decision and its rationale) executed a 6-step roadmap against
+`tests/acceptance/ledgercore/milestone-06-observability.feature`:
+
+| Phase | Steps | Delivered |
+|---|---|---|
+| 01 — Prometheus metrics exposition | 01-01, 01-02 | `internal/adapters/http/metrics.go` (new): 7 declared series (`ledgerops_postings_total{result}`, `ledgerops_posting_duration_seconds`, `ledgerops_insufficient_funds_rejections_total`, `ledgerops_idempotent_replays_total`, `ledgerops_trial_balance_imbalance_minor`, `ledgerops_trial_balance_scan_duration_seconds`, `ledgerops_drift_accounts`), registered once in `NewMetrics()` (single-registration-site discipline), wired into `postTransferHandler`/`verdictHandler` at the outcome-decision sites. `GET /metrics` mounted unauthenticated, outside the `requireOperatorKey` group, threaded through `Deps.Metrics` from `cmd/api/main.go`. |
+| 02 — Structured per-request logging | 02-01, 02-02, 02-03 | `internal/adapters/http/logfields.go` (new): write-only, mutex-guarded `fields` accumulator (`Set` only, no `Get`/iteration) carried on the request context. `request_logging.go`'s `requestLogger` middleware wraps the entire router, drains the accumulator after `next.ServeHTTP` returns, and makes exactly one `slog` call per request carrying `request_id`/`route` (chi's matched pattern, not raw path)/`status`/`elapsed_ms`, plus conditional fields (`transaction_id`, `account_ids`, `amount_minor`, `currency`, `idempotency_key_hash`, `replayed`, `violation_kind`) set at the exact call sites those values are already known. `hashIdempotencyKey` (SHA-256, full 64-char hex digest, no truncation) ensures the raw idempotency key never reaches a log call. |
+| 03 — Release-blocking verification | 03-01 | Verified, against real captured log output (not a doc note), that neither the raw operator key nor the raw idempotency key ever appears in any captured log line, on any path including 4xx/5xx error-echo paths. |
+
+Design source: `docs/feature/ledger-core/design/2026-08-27-ops-5-observability-design-decisions.md`
+(Morgan, `nw-solution-architect`, lightweight bugfix-scoped consult, not a
+full DESIGN-wave pass — no new component boundary or ADR was warranted).
+That document is the authority for the shape of every decision below; only
+pointers, not re-explanations, are given here.
+
+**Key decisions** (full rationale in the design-decisions doc linked above):
+- `GET /metrics` is unauthenticated by design (Decision 4) — a scrape target
+  cannot present an operator bearer key, mirroring the `console_static.go`
+  precedent for deliberately-unauthenticated read surfaces. Confirmed
+  directly with the user on 2026-08-26.
+- The per-request logging accumulator (`fields`) is write-only by design
+  (Decision 2) — exposes only `Set`, no read path outside `requestLogger`
+  itself, so no handler can read back a value another part of the request
+  already recorded.
+- The raw idempotency key is hashed with SHA-256, full 64-character lowercase
+  hex digest, no truncation (Decision 5) — the release-blocking hard rule
+  carried from the RCA: the raw key variable is used only for the existing
+  app-layer idempotency lookup and as `hashIdempotencyKey`'s sole input,
+  never passed to the log accumulator on any path.
+
+**Issues found and fixed mid-DELIVER** (each escalated and independently
+re-verified before being counted done, per this project's established
+discipline — see "Retrospective" sections below):
+1. **Metrics-baseline timing bug** (step 01-01, commit `1bc4161`) — the
+   acceptance suite's `CaptureMetricsBaseline` helper snapshotted the
+   `postings_total{result="posted"}` baseline *before* the `Background`'s
+   account-funding `Given` steps ran, and those funding steps themselves
+   post real transfers through the driving port — inflating the baseline and
+   re-pending the "A posted transfer is counted and timed" scenario on first
+   run. Fixed by re-timing the baseline capture to after `Background`'s
+   funding steps complete.
+2. **`CounterVec` label pre-declaration gap** (step 01-02, commit `81c8231`)
+   — a Prometheus `CounterVec` exposes no series at all until a label
+   combination has been observed at least once, so a scrape taken before any
+   transfer had posted was missing the `ledgerops_postings_total` series
+   entirely. Fixed by pre-declaring all three label combinations
+   (`posted`/`rejected`/`replayed`) at registration time.
+3. **`Deps.Metrics` wiring correction between 01-01 and 01-02** — step 01-01
+   constructed `Metrics` as a local variable inside `NewRouter` (a
+   flagged, acknowledged deviation from that step's own `files_to_modify`,
+   necessary to make the step's six owned scenarios observable through the
+   driving port). Step 01-02 corrected this to thread `Metrics` through
+   `Deps` from `cmd/api/main.go`, exactly like `Clock`/`IDGenerator`, with a
+   nil-fallback to a fresh `NewMetrics()` so composition roots predating the
+   field keep working — matching the existing `Deps.Logger` fallback
+   pattern.
+
+Two further defects were caught and fixed during DISTILL's own RED gate
+(before any DELIVER step ran), not during DELIVER itself — recorded for
+completeness since they shaped the scenarios DELIVER built against: a
+vacuous-pass defect (the credential-never-logged scenario passed trivially
+on its first run because nothing was logged at all yet — fixed by adding a
+positive companion assertion ahead of the negative one) and 2 undefined
+steps (a `Given`-registered phrasing reused under an `And` that inherited a
+`When` context — godog's keyword-scoped matching does not answer across
+that boundary). Full detail:
+`docs/feature/ledger-core/distill/red-classification.md` § Addendum — OPS-5
+observability fix.
+
+**Adversarial review outcome.** Four Haiku reviewers dispatched 2026-08-26
+against the corrected DEVOPS table and this fix's DISTILL section — all
+APPROVED or CONDITIONALLY_APPROVED, zero blockers: DISCUSS (Eclipse)
+APPROVED/0; DESIGN (Architect) APPROVED/0 — confirmed the DDD-16 effect-shell
+boundary held and no new DDD row was needed for the `GET /metrics` auth move;
+DEVOPS (Forge) CONDITIONALLY_APPROVED/1 high (fixed in-session — the Logs row
+corrected to lead with **Scaffold** and name `request_logging.go`'s prior
+no-op explicitly), 1 medium accepted as documented process debt
+(status-table vocabulary standardization applied only to the two corrected
+cells, not every DEVOPS row); DISTILL (Sentinel) APPROVED/0 — explicitly
+verified the release-blocking scenarios were non-vacuous by citing the actual
+three-run RED gate evidence rather than re-deriving it. The DELIVER-phase
+adversarial code review (`nw-software-crafter-reviewer` equivalent for this
+run) returned APPROVED, 0 blockers.
+
+**Verification evidence.**
+- Full acceptance suite: 93/93 scenarios, 692/692 steps green
+  (`go test ./tests/acceptance/ledgercore/... -run TestFeatures`).
+- `go build ./...`, `go vet ./...`: clean.
+- `des-verify-integrity docs/feature/fix-ledger-core-observability/deliver/`
+  → exit 0, all 6 steps have complete DES traces.
+- Mutation testing: skipped per project's `nightly-delta` strategy (CLAUDE.md),
+  consistent with both prior DELIVER passes on this feature.
+- `docs/product/architecture/brief.md` checked for the same stale
+  observability wording found by the RCA — no matches; brief.md never
+  carried the false claim, so no correction was needed there.
+
+**Commits this pass** (in order, all on `main`): `dc24b0a`, `1bc4161`,
+`81c8231`, `79da08f`, `3b46d02`, `fc65809`, `e621d44`, `c14c605`, `58d0d96`
+— 9 commits total.
+
+**Nothing migrated by this finalize pass.** Unlike the first two DELIVER
+passes on this feature, this bugfix's own DISTILL and design-consult
+artifacts were never forked into a separate `docs/feature/
+fix-ledger-core-observability/` DISCUSS/DESIGN/DISTILL tree — they were
+deliberately appended to `docs/feature/ledger-core/feature-delta.md` and
+`docs/feature/ledger-core/distill/red-classification.md` (an addendum) at
+authoring time, plus a standalone design-consult document at
+`docs/feature/ledger-core/design/2026-08-27-ops-5-observability-design-decisions.md`
+and this RCA at `docs/analysis/2026-08-26-observability-status-false-claim-rca.md`.
+All four are already in their permanent, intended locations — there is no
+lasting artifact left in `docs/feature/fix-ledger-core-observability/` to
+migrate. That directory holds only this run's own roadmap/execution-log
+process scaffolding (`deliver/roadmap.json`, `deliver/execution-log.json`),
+disposed of per the same discard precedent applied at both prior passes on
+this feature (see "Roadmap/execution-log disposition" above).
 
 ---
 
