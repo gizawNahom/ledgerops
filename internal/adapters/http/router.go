@@ -84,15 +84,8 @@ func NewRouter(deps Deps) http.Handler {
 
 	ledger := app.NewLedger(deps.Store, deps.Clock, deps.IDGenerator)
 
-	metrics := deps.Metrics
-	if metrics == nil {
-		metrics = NewMetrics()
-	}
-
-	logger := deps.Logger
-	if logger == nil {
-		logger = slog.Default()
-	}
+	metrics := resolveMetrics(deps.Metrics)
+	logger := resolveLogger(deps.Logger)
 
 	// OPS-5 (fix-ledger-core-observability, design decision 3): requestLogger
 	// wraps the entire router -- registered at the top level, before any
@@ -124,6 +117,25 @@ func NewRouter(deps Deps) http.Handler {
 	mountConsole(router, consoleDistDir)
 
 	return router
+}
+
+// resolveMetrics returns deps' collector set, falling back to a fresh
+// NewMetrics() when nil -- test doubles constructed before Deps.Metrics
+// existed are unaffected. Mirrors resolveLogger below.
+func resolveMetrics(deps *Metrics) *Metrics {
+	if deps == nil {
+		return NewMetrics()
+	}
+	return deps
+}
+
+// resolveLogger returns deps' logger, falling back to slog.Default() when
+// nil -- mirrors resolveMetrics above.
+func resolveLogger(logger *slog.Logger) *slog.Logger {
+	if logger == nil {
+		return slog.Default()
+	}
+	return logger
 }
 
 // requireOperatorKey is the real middleware, not a scaffold: authentication is

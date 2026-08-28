@@ -6,6 +6,7 @@ package http
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -194,40 +195,62 @@ func postTransferHandler(ledger *app.Ledger, metrics *Metrics) http.HandlerFunc 
 				writeRefusal(w, r, http.StatusConflict, "idempotency_key_conflict", nil)
 				return
 			}
-			metrics.ObservePosting(PostingRejected, time.Since(started))
-			var violation domain.Violation
-			if errors.As(err, &violation) && violation.Kind() == domain.InsufficientFunds {
-				metrics.ObserveInsufficientFundsRejection()
-			}
+			recordPostingFailure(metrics, err, time.Since(started))
 			writeDomainError(w, r, err)
 			return
 		}
 
-		status := http.StatusCreated
-		outcome := PostingPosted
-		if result.Replayed {
-			status = http.StatusOK
-			outcome = PostingReplayed
-		}
-		metrics.ObservePosting(outcome, time.Since(started))
-		if result.Replayed {
-			metrics.ObserveIdempotentReplay()
-		}
-
-		// Each value below is already known at this point — none is
-		// re-derived (OPS-5, design decision 5). The raw idempotency key
-		// variable (`key`) is deliberately never passed here: only its
-		// hash is.
-		accumulator := fieldsFrom(r.Context())
-		accumulator.Set("transaction_id", result.Posting.Transaction.ID())
-		accumulator.Set("account_ids", []string{body.From, body.To})
-		accumulator.Set("amount_minor", amount.MinorUnits())
-		accumulator.Set("currency", amount.Currency())
-		accumulator.Set("idempotency_key_hash", hashIdempotencyKey(key))
-		accumulator.Set("replayed", result.Replayed)
+		status := recordPostingSuccess(metrics, result, time.Since(started))
+		recordTransferLogFields(r.Context(), body, amount, key, result)
 
 		writeJSON(w, status, transferAnswer(result))
 	}
+}
+
+// recordPostingFailure observes the rejected outcome on the general posting
+// series, plus the dedicated insufficient-funds series when that is the
+// violation the ledger refused with (OPS-5, design decision 1). Extracted
+// from postTransferHandler so the handler body reads as one sequence of
+// decisions rather than metrics bookkeeping inlined into the error branch.
+func recordPostingFailure(metrics *Metrics, err error, elapsed time.Duration) {
+	metrics.ObservePosting(PostingRejected, elapsed)
+	var violation domain.Violation
+	if errors.As(err, &violation) && violation.Kind() == domain.InsufficientFunds {
+		metrics.ObserveInsufficientFundsRejection()
+	}
+}
+
+// recordPostingSuccess observes the posted-or-replayed outcome and returns
+// the wire status that matches it (201 for a first posting, 200 for a
+// replay). Kept alongside recordPostingFailure as the success-path
+// counterpart of the same single decision site (OPS-5, design decision 1).
+func recordPostingSuccess(metrics *Metrics, result app.Result, elapsed time.Duration) int {
+	status := http.StatusCreated
+	outcome := PostingPosted
+	if result.Replayed {
+		status = http.StatusOK
+		outcome = PostingReplayed
+	}
+	metrics.ObservePosting(outcome, elapsed)
+	if result.Replayed {
+		metrics.ObserveIdempotentReplay()
+	}
+	return status
+}
+
+// recordTransferLogFields writes every fact discovered while posting a
+// transfer onto the per-request log accumulator (OPS-5, design decision 5).
+// Each value below is already known at its call site — none is re-derived.
+// The raw idempotency key (`key`) is deliberately never passed here: only
+// its hash is.
+func recordTransferLogFields(ctx context.Context, body postTransferRequest, amount domain.Money, key string, result app.Result) {
+	accumulator := fieldsFrom(ctx)
+	accumulator.Set("transaction_id", result.Posting.Transaction.ID())
+	accumulator.Set("account_ids", []string{body.From, body.To})
+	accumulator.Set("amount_minor", amount.MinorUnits())
+	accumulator.Set("currency", amount.Currency())
+	accumulator.Set("idempotency_key_hash", hashIdempotencyKey(key))
+	accumulator.Set("replayed", result.Replayed)
 }
 
 // hashIdempotencyKey computes the SHA-256 digest of the raw idempotency key,
