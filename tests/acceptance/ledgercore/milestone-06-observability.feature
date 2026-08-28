@@ -154,7 +154,7 @@ Feature: The ledger can be watched from outside without reading its source
   # log output, on ANY path including 4xx/5xx error-echo paths. Not a doc
   # note — real scenarios, real assertions against captured log output.
 
-  @pending @real-io @security @error @release-blocking @contract-shape:unbounded-preservation
+  @real-io @security @error @release-blocking @contract-shape:unbounded-preservation
   Scenario: The operator's credential never appears in a captured log line, however the caller is answered
     Given a wallet account "alice" funded with 100.00
     And a wallet account "bob" exists
@@ -166,7 +166,7 @@ Feature: The ledger can be watched from outside without reading its source
     Then a log line for that request carries a request id, its route, its status, and how long it took
     And no captured log line contains the operator's key in any form
 
-  @pending @real-io @security @error @release-blocking @contract-shape:unbounded-preservation
+  @real-io @security @error @release-blocking @contract-shape:unbounded-preservation
   Scenario: The caller's idempotency key never appears in a captured log line, including on a request-echo error path
     Given a wallet account "alice" funded with 100.00
     And a wallet account "bob" exists
