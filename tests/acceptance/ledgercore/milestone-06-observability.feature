@@ -98,13 +98,13 @@ Feature: The ledger can be watched from outside without reading its source
 
   # --- structured per-request logging ---------------------------------------
 
-  @pending @real-io @contract-shape:unbounded-preservation
+  @real-io @contract-shape:unbounded-preservation
   Scenario: Every request is logged with its identifying fields
     Given a wallet account "alice" funded with 100.00
     When the operator traces "alice"
     Then a log line for that request carries a request id, its route, its status, and how long it took
 
-  @pending @real-io @contract-shape:unbounded-preservation
+  @real-io @contract-shape:unbounded-preservation
   Scenario: The logged route is the matched pattern, not the raw path a caller happened to use
     Given a wallet account "alice" funded with 100.00
     And a wallet account "bob" funded with 100.00
@@ -178,7 +178,7 @@ Feature: The ledger can be watched from outside without reading its source
   # --- regression: the router restructuring this fix requires must not widen
   # the auth boundary it does not touch ---------------------------------------
 
-  @pending @real-io @regression @error @contract-shape:unbounded-preservation
+  @real-io @regression @error @contract-shape:unbounded-preservation
   Scenario Outline: Every JSON endpoint except the metrics exposition still requires the operator key
     Given a wallet account "alice" exists
     When an unidentified caller requests "<endpoint>"

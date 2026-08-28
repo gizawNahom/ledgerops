@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
 
 	"ledgerops/internal/app"
 	"ledgerops/internal/app/ports"
@@ -57,17 +58,14 @@ type Deps struct {
 	Metrics *Metrics
 
 	// Logger receives structured per-request JSON records (OPS-5,
-	// feature-delta.md § Wave: DEVOPS / Observability stack). Added by
-	// DISTILL (fix-ledger-core-observability, 2026-08-26) so the acceptance
-	// suite's composition root compiles against the field DELIVER wires a
-	// real request-logging middleware onto — see request_logging.go.
+	// feature-delta.md § Wave: DEVOPS / Observability stack). requestLogger
+	// (request_logging.go) wraps the whole router with it as of step 02-01 —
+	// see design decision 3
+	// (docs/feature/ledger-core/design/2026-08-27-ops-5-observability-design-decisions.md).
 	//
-	// SCAFFOLD: true — accepted here, not yet read by NewRouter. No
-	// middleware is registered against it, so nothing panics and nothing is
-	// logged: a scenario asserting a captured field fails on a clean
-	// "expected N log lines, got 0" (RED), never on a compile error (BROKEN)
-	// or a dropped connection. Falls back to slog.Default() when nil so
-	// cmd/api/main.go, which does not set this field yet, is unaffected.
+	// Falls back to slog.Default() when nil, mirroring the Metrics fallback
+	// above -- test doubles or callers constructed before this field existed
+	// are unaffected.
 	Logger *slog.Logger
 }
 
@@ -90,6 +88,20 @@ func NewRouter(deps Deps) http.Handler {
 	if metrics == nil {
 		metrics = NewMetrics()
 	}
+
+	logger := deps.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+
+	// OPS-5 (fix-ledger-core-observability, design decision 3): requestLogger
+	// wraps the entire router -- registered at the top level, before any
+	// grouping -- so every response (success, domain refusal, the
+	// unidentified-caller 401, static asset serve, metrics scrape) passes
+	// through it and gets exactly one log line. middleware.RequestID runs
+	// first so requestLogger can read the id it assigns.
+	router.Use(middleware.RequestID)
+	router.Use(requestLogger(logger))
 
 	// OPS-5 (fix-ledger-core-observability, design decision 1 & 3): GET
 	// /metrics is mounted unauthenticated, outside the protected group --
