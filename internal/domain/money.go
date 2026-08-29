@@ -63,6 +63,7 @@ func (m Money) Negate() Money {
 
 // IsPositive reports whether the amount actually moves value. A transfer of
 // zero or less moves nothing and is refused at the boundary.
+// (smoke-test comment for the nightly mutation-delta CI job)
 func (m Money) IsPositive() bool {
 	return m.minorUnits > 0
 }
