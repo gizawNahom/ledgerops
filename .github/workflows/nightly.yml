@@ -11,15 +11,20 @@ on:
 
 jobs:
   # CLAUDE.md § Mutation Testing Strategy: nightly-delta, scoped to Go files
-  # changed in the last 24h, reported not blocking. OPS-9 amendment
-  # (feature-delta.md, 2026-08-29): tool is gremlins, pinned below. Trigger,
-  # scope (24h delta ∩ internal/domain/), and non-blocking posture are
-  # unchanged from the original OPS-9 decision.
+  # changed in the last 24h. OPS-9 amendment (feature-delta.md, 2026-08-29):
+  # tool is gremlins, pinned below. Trigger and scope (24h delta ∩
+  # internal/domain/) are unchanged from the original OPS-9 decision, but
+  # this job is a deliberate PROJECT-SPECIFIC deviation from the standard
+  # nightly-delta contract (which has no kill-rate gate at all): a
+  # KILL_RATE_THRESHOLD is enforced below. This job is never a required
+  # check (nightly.yml only runs on schedule/workflow_dispatch, never on
+  # push/PR), so a red run here still can't block a merge — the gate exists
+  # to make a low kill rate a visible failure instead of a silent report.
   mutation-delta:
     runs-on: ubuntu-latest
-    continue-on-error: true
     env:
       GREMLINS_VERSION: v0.6.0 # bump deliberately; re-check upstream at bump time
+      KILL_RATE_THRESHOLD: 80 # matches the per-feature strategy's standard gate
     steps:
       - uses: actions/checkout@v4
         with:
@@ -62,6 +67,23 @@ jobs:
           done
           tail -60 gremlins-output.txt >> "$GITHUB_STEP_SUMMARY" || true
           echo '```' >> "$GITHUB_STEP_SUMMARY"
+      - name: Enforce kill-rate threshold (project-specific amendment, see feature-delta.md OPS-9)
+        if: steps.scope.outputs.has_delta == 'true'
+        run: |
+          KILLED=$(grep -oE 'Killed: [0-9]+' gremlins-output.txt | grep -oE '[0-9]+' | awk '{s+=$1} END {print s+0}')
+          LIVED=$(grep -oE 'Lived: [0-9]+' gremlins-output.txt | grep -oE '[0-9]+' | awk '{s+=$1} END {print s+0}')
+          TOTAL=$((KILLED + LIVED))
+          if [ "$TOTAL" -eq 0 ]; then
+            echo "::notice title=mutation-delta::no killed/lived mutants reported this run — nothing to gate on."
+            exit 0
+          fi
+          EFFICACY=$(awk "BEGIN { printf \"%.2f\", ($KILLED / $TOTAL) * 100 }")
+          echo "killed=${KILLED} lived=${LIVED} efficacy=${EFFICACY}% threshold=${KILL_RATE_THRESHOLD}%" >> "$GITHUB_STEP_SUMMARY"
+          if awk "BEGIN { exit !($EFFICACY < $KILL_RATE_THRESHOLD) }"; then
+            echo "::error title=mutation-delta::kill rate ${EFFICACY}% is below the ${KILL_RATE_THRESHOLD}% threshold"
+            exit 1
+          fi
+          echo "kill rate ${EFFICACY}% meets the ${KILL_RATE_THRESHOLD}% threshold"
       - name: Report empty delta (placeholder, OPS-9)
         if: steps.scope.outputs.has_delta == 'false'
         run: |
