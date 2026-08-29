@@ -1,28 +1,29 @@
+version: "2"
+
 run:
   timeout: 5m
 
 linters:
-  disable-all: true
+  default: none
   enable:
-    - gofmt
     - govet
     - exhaustive
 
-linters-settings:
-  exhaustive:
-    # DDD-12 compensating control: a switch over domain.ViolationKind (or any
-    # wire-mapping switch keyed on it) with a `default:` branch would
-    # otherwise silently swallow a newly-added member. Force every case to be
-    # named explicitly rather than letting `default` stand in for it.
-    default-signifies-exhaustive: false
+  settings:
+    exhaustive:
+      # DDD-12 compensating control: a switch over domain.ViolationKind (or any
+      # wire-mapping switch keyed on it) with a `default:` branch would
+      # otherwise silently swallow a newly-added member. Force every case to be
+      # named explicitly rather than letting `default` stand in for it.
+      default-signifies-exhaustive: false
 
-issues:
-  exclude-rules:
-    # Step 05-02 scope is the production switch sites (DDD-12's two named
-    # surfaces: internal/domain and internal/adapters/http). Test-fixture
-    # switches over unrelated enums (e.g. tests/acceptance's Credentials
-    # type) are a pre-existing, separately-owned surface — not fixed here to
-    # avoid touching files outside this step's files_to_modify.
-    - path: ^tests/
-      linters:
-        - exhaustive
+  exclusions:
+    rules:
+      # Step 05-02 scope is the production switch sites (DDD-12's two named
+      # surfaces: internal/domain and internal/adapters/http). Test-fixture
+      # switches over unrelated enums (e.g. tests/acceptance's Credentials
+      # type) are a pre-existing, separately-owned surface — not fixed here to
+      # avoid touching files outside this step's files_to_modify.
+      - path: ^tests/
+        linters:
+          - exhaustive
