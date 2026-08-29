@@ -19,11 +19,19 @@ AUTH := Authorization: Bearer demo-operator-key
 
 # Polls the real driving port (not a container healthcheck) until the app
 # answers, so the wait proves the same thing a caller's first request proves.
+#
+# Checks curl's own exit status, not just "did %{http_code} print digits":
+# on connection-refused (e.g. mid-restart after chaos-01's SIGKILL) curl
+# reports http_code "000" and exits non-zero, and "000" alone matches a
+# bare digit-regex — so a digit-only check falsely declares the app
+# answering during the exact window it isn't.
 wait-app: up
 	@echo "waiting for the app to accept requests..."
 	@for i in $$(seq 1 60); do \
-		if curl -s -o /dev/null -w '%{http_code}' -H "$(AUTH)" $(APP_URL)/accounts/__probe__ | grep -qE '^[0-9]+$$'; then \
-			echo "app is answering"; exit 0; \
+		code="$$(curl -s -o /dev/null -w '%{http_code}' -H "$(AUTH)" $(APP_URL)/accounts/__probe__)"; \
+		status=$$?; \
+		if [ "$$status" -eq 0 ] && [ "$$code" != "000" ]; then \
+			echo "app is answering (HTTP $$code)"; exit 0; \
 		fi; \
 		sleep 1; \
 	done; \
