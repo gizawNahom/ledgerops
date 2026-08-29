@@ -79,6 +79,28 @@ target_environments:
       requires producing a genuine disagreement between stored balances and
       entry sums, which by D7 only a privileged role can create.
 
+  - name: load
+    description: >
+      Running docker compose stack (postgres, migrate, app, prometheus,
+      grafana), driven by k6 issuing HTTP POST /transfers traffic under
+      load/stress/soak profiles. Added 2026-08-29 (OPS-12, amendment to the
+      finished DEVOPS wave) — not part of the original five environments.
+    platform: [linux]
+    preconditions:
+      - "direct pgx connection pool — no pgbouncer or external pooler in front (same DDD-6 constraint as `contended`)"
+      - "single PostgreSQL instance (no read replica)"
+      - "docker compose stack up via the same `app` healthcheck path used by demo/invariant-gates jobs"
+      - "Prometheus started with --web.enable-remote-write-receiver (implementation-time change, not yet applied)"
+    used_by: ["k6 load-test workflow (workflow_dispatch only, OPS-12)"]
+    rationale: >
+      Scope is POST /transfers only, matching delivered slices 01-03.
+      Manually triggered, never nightly, never blocking — there is no hosted
+      environment (OPS-1) whose capacity this protects, so thresholds are
+      informational (k6 abortOnFail: false), not a gate. Distinct from
+      `contended`, whose used_by is specifically the in-process
+      make race-02/race-03 targets; conflating the two would blur what each
+      environment proves.
+
 coexistence_matrix:
   - tool: "make demo-01 .. make demo-05"
     must_not_break: true

@@ -11,26 +11,61 @@ on:
 
 jobs:
   # CLAUDE.md § Mutation Testing Strategy: nightly-delta, scoped to Go files
-  # changed in the last 24h, reported not blocking. No mutation testing tool
-  # is vendored in this repo yet (checked at step 05-03: go.mod/go.sum carry
-  # no mutation tool) — this job exists with the right trigger and scope,
-  # and reports that gap honestly rather than failing or faking a result.
+  # changed in the last 24h, reported not blocking. OPS-9 amendment
+  # (feature-delta.md, 2026-08-29): tool is gremlins, pinned below. Trigger,
+  # scope (24h delta ∩ internal/domain/), and non-blocking posture are
+  # unchanged from the original OPS-9 decision.
   mutation-delta:
     runs-on: ubuntu-latest
     continue-on-error: true
+    env:
+      GREMLINS_VERSION: v0.6.0 # bump deliberately; re-check upstream at bump time
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
       - name: Identify Go files changed in the last 24h
         run: |
           git log --since="24 hours ago" --name-only --pretty=format: -- '*.go' \
             | sort -u > changed-go-files.txt || true
           echo "Go files changed in the last 24h:"
           cat changed-go-files.txt
-      - name: Report mutation-delta status (placeholder, OPS-9)
+      - name: Scope changed files to internal/domain/
+        id: scope
         run: |
-          echo "::notice title=mutation-delta::nightly-delta mutation testing is not yet wired — no mutation testing tool is vendored in go.mod. This job reports scope (files changed in the last 24h) only, and is intentionally non-blocking."
+          grep '^internal/domain/' changed-go-files.txt > domain-changed-files.txt || true
+          echo "internal/domain/ files in the 24h delta:"
+          cat domain-changed-files.txt
+          if [ -s domain-changed-files.txt ]; then
+            echo "has_delta=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_delta=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Install gremlins
+        if: steps.scope.outputs.has_delta == 'true'
+        run: go install github.com/go-gremlins/gremlins/cmd/gremlins@${GREMLINS_VERSION}
+      - name: Run gremlins unleash over the domain delta
+        if: steps.scope.outputs.has_delta == 'true'
+        run: |
+          echo "## mutation-delta (OPS-9)" >> "$GITHUB_STEP_SUMMARY"
+          echo "gremlins ${GREMLINS_VERSION}, scoped to internal/domain/ files changed in the last 24h:" >> "$GITHUB_STEP_SUMMARY"
+          cat domain-changed-files.txt >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          # Mutate only the package directories the changed files actually live in,
+          # not the whole internal/domain/... tree, so runtime tracks the delta size.
+          cut -d/ -f1-2 domain-changed-files.txt | sort -u | while read -r pkg_dir; do
+            echo "-- ${pkg_dir} --" | tee -a gremlins-output.txt
+            gremlins unleash "./${pkg_dir}" > >(tee -a gremlins-output.txt) 2>&1 || true
+          done
+          tail -60 gremlins-output.txt >> "$GITHUB_STEP_SUMMARY" || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+      - name: Report empty delta (placeholder, OPS-9)
+        if: steps.scope.outputs.has_delta == 'false'
+        run: |
+          echo "::notice title=mutation-delta::no internal/domain/ files changed in the last 24h — gremlins not run this cycle."
 
   # KPI-6: cycle time between slice-NN-shipped tags. Reported, not blocking.
   slice-cycle-time:

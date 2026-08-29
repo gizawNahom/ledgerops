@@ -1,0 +1,82 @@
+name: Load test
+
+# OPS-12 (feature-delta.md, 2026-08-29): manually-triggered only, never on
+# push/PR/schedule, never a required check, never blocking. Scope is
+# POST /transfers only, matching delivered slices 01-03. Thresholds are
+# informational (abortOnFail: false) — OPS-1 established no hosted
+# environment exists yet, so there is no real SLO to enforce here.
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: "k6 stages profile"
+        type: choice
+        options:
+          - load
+          - stress
+          - soak
+        default: load
+
+jobs:
+  k6-transfers:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start the compose stack
+        run: docker compose up -d postgres migrate app prometheus grafana
+
+      # Same intent as the Makefile `wait-app` target (poll the real driving
+      # port rather than trust a container healthcheck), but checks curl's
+      # own exit status too: on connection-refused curl reports code "000"
+      # and exits non-zero, which wait-app's plain digit-regex would
+      # wrongly treat as "answering". Requiring both excludes that case.
+      - name: Wait for the app to accept requests
+        run: |
+          for i in $(seq 1 60); do
+            code="$(curl -s -o /dev/null -w '%{http_code}' \
+                -H 'Authorization: Bearer demo-operator-key' \
+                http://localhost:8080/accounts/__probe__)"
+            status=$?
+            if [ "$status" -eq 0 ] && [ "$code" != "000" ]; then
+              echo "app is answering (HTTP $code)"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "app never answered after 60s"
+          docker compose logs app
+          exit 1
+
+      - name: Install k6
+        uses: grafana/setup-k6-action@v1
+
+      - name: Run k6 (${{ github.event.inputs.profile }} profile)
+        # Thresholds are informational only (OPS-12) — abortOnFail: false in
+        # the script stops k6 from bailing mid-run, but a breached threshold
+        # still exits k6 non-zero. continue-on-error keeps that from failing
+        # this non-required job.
+        continue-on-error: true
+        env:
+          PROFILE: ${{ github.event.inputs.profile }}
+        run: |
+          k6 run \
+            --out experimental-prometheus-rw=http://localhost:9090/api/v1/write \
+            --summary-export=k6-summary.json \
+            tests/load/transfers.js
+
+      - name: Publish k6 summary
+        if: always()
+        run: |
+          if [ -f k6-summary.json ]; then
+            echo "## k6 load test (${PROFILE} profile)" >> "$GITHUB_STEP_SUMMARY"
+            echo '```json' >> "$GITHUB_STEP_SUMMARY"
+            cat k6-summary.json >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          fi
+        env:
+          PROFILE: ${{ github.event.inputs.profile }}
+
+      - name: Tear down compose stack
+        if: always()
+        run: docker compose down -v

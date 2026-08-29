@@ -656,6 +656,7 @@ collisions (registry empty — first feature).
 | OPS-9 | Nightly-delta mutation testing | Confirmed as-written in `CLAUDE.md`. Delivery is never blocked by mutation runtime, which protects the one-day slice budget |
 | OPS-10 | Two database roles: `ledgerops_app` (no `UPDATE`/`DELETE` on entries) and `ledgerops_migrate` (DDL) | D7 says append-only is enforced *at the database level*. A trigger alone is defeated by `ALTER TABLE … DISABLE TRIGGER`; revoked privileges on the role the service actually uses are not. **New constraint — see § Changed Assumptions** |
 | OPS-11 | Adapter tests get PostgreSQL 16 from Testcontainers, not a CI service container | One code path for `clean` and `ci` instead of two that drift. Fresh instance per package satisfies the `contended` and `corrupted` isolation preconditions structurally. Detail under § CI/CD pipeline outline |
+| OPS-12 | k6-driven load/stress/soak testing of `POST /transfers`, `workflow_dispatch`-only, non-blocking | New decision, added 2026-08-29 — not in original DEVOPS wave. Reuses the Prometheus + Grafana stack already running in the demo compose (native remote-write + official dashboards) rather than adding a bridge for vegeta. Detail under § Wave: DEVOPS / [REF] Mutation CI wiring + load testing (2026-08-29) |
 
 ---
 
@@ -2010,3 +2011,266 @@ matching does not answer) was found and fixed the same way. Both fixes are
 in `steps_ledger_test.go` and `milestone-06-observability.feature`; neither
 changed any assertion's meaning, only which keyword or which companion
 assertion carries it.
+
+---
+
+## Wave: DEVOPS / [REF] Mutation CI wiring + load testing (2026-08-29)
+
+Reopening the finished DEVOPS wave, additively, for two items the user
+requested by name: (1) turn the already-decided nightly-delta mutation
+strategy (OPS-9) into an actually-wired CI job instead of the honest
+placeholder currently in `nightly.yml`, and (2) add load/stress/soak testing
+for `POST /transfers`, not previously covered. Both are design-level —
+neither `.github/workflows/nightly.yml` nor a new `load-test.yml` is edited
+in this pass. See § Implementation follow-up below for what that requires.
+
+**Path decision**: appended here, not forked to a new feature-delta, for the
+same reason as the 2026-08-26 OPS-5 pass immediately above — OPS-9 already
+lives in this document by name, and splitting "what OPS-9 means" from
+"whether OPS-9 is wired" across two files would fracture the SSOT.
+
+### Existing infrastructure check (Principle 2)
+
+`.github/workflows/nightly.yml` already exists and already carries a
+`mutation-delta` job matching OPS-9's trigger (`schedule` +
+`workflow_dispatch`) and scope (`git log --since="24 hours ago" ... -- '*.go'`
+into `changed-go-files.txt`). It is a deliberate, honestly-labeled
+placeholder: `continue-on-error: true`, and its one real step emits a
+`::notice` stating no mutation tool is vendored. Nothing here replaces that
+job's trigger, scope-detection step, or its non-blocking posture — this
+amendment specifies the step that turns the placeholder into a real mutation
+run, appended after the existing `changed-go-files.txt` step. `ci.yml` is
+untouched: mutation testing has never been a commit-stage or PR gate under
+OPS-9, and this amendment does not make it one.
+
+### Mutation tool selection
+
+Two Go mutation-testing tools were compared; both are single-binary, no
+service dependency, install via `go install`.
+
+| Tool | Maintenance | Module-aware | Scoping | Verdict |
+|---|---|---|---|---|
+| `go-mutesting` (avito-tech fork of zimmski) | Last tagged release 2019; predates Go modules-first workflows, brittle against `go.mod` in this repo (`go 1.25.0`) | Partial — GOPATH-era assumptions leak through | Whole-package only | Rejected — unmaintained tooling on a ledger's test suite is exactly the "furniture" OPS-5's rationale warned against (instrument now, cheaply; a dead tool is not cheap, it is a false signal) |
+| `gremlins` (go-gremlins/gremlins) | Actively maintained, tagged releases track current Go | Yes — reads `go.mod`, standard module resolution | Directory/package-scoped (`gremlins unleash <path>`), plus file-level exclude/include patterns | **Selected** |
+
+**Rejected alternative — no tool, manual mutation review**: a human
+periodically hand-mutates `internal/domain/` and checks the suite catches
+it. Meets 0% of the automation requirement of a *reported, repeatable*
+nightly signal; a manual step nobody is assigned to run nightly reduces
+silently to "not run." Rejected per the simplest-infrastructure-first
+principle only after confirming it is insufficient, not skipped for being
+obviously wrong.
+
+### Job specification (amends `nightly.yml`'s `mutation-delta` job)
+
+Trigger and scope are **unchanged** from the current placeholder — this is
+additive, not a redesign:
+
+- Trigger: `schedule: "0 3 * * *"` + `workflow_dispatch` (existing)
+- Scope: Go files changed in the last 24h (existing `changed-go-files.txt`
+  step, kept verbatim)
+- Non-blocking: `continue-on-error: true` (existing, kept)
+
+New steps, appended after `changed-go-files.txt` is produced:
+
+1. Intersect `changed-go-files.txt` with `internal/domain/` (the primary
+   mutation target named in § Mutation testing strategy above — `Post` is
+   where I1/I4 are decided). If the intersection is empty, emit a
+   `::notice` ("no domain files changed in the last 24h; nothing to mutate
+   this run") and exit 0 — mirrors the existing job's honesty pattern rather
+   than silently mutating an unrelated package or silently mutating
+   everything, either of which would misreport what the nightly-delta scope
+   promises.
+2. Otherwise, derive the distinct package directories from the intersected
+   file list and run `gremlins unleash <pkg-dir> [<pkg-dir> ...]`, pinned to
+   a tagged `gremlins` release installed via `go install
+   github.com/go-gremlins/gremlins/cmd/gremlins@<pinned-tag>` (exact tag
+   selected at implementation time — not invented here).
+3. Report kill rate (gremlins prints a per-mutant table and a summary
+   percentage) to `$GITHUB_STEP_SUMMARY`, matching how `demo-cold` and
+   `slice-cycle-time` already surface their numbers as job-summary notices
+   rather than only console output.
+4. Gate: **none** — `continue-on-error: true` stays set at the job level.
+   OPS-9's rationale is unchanged by this amendment: delivery is never
+   blocked by mutation runtime.
+
+No new workflow file. No change to `ci.yml`. No change to trigger or scope.
+
+### Load, stress, and soak testing — new DEVOPS decision (OPS-12)
+
+Not previously covered in the original DEVOPS wave (§ OPS decisions above
+lists none). Scope, trigger, and the deferral of tool choice to this pass
+were confirmed with the user directly; recorded here as OPS-12.
+
+**Scope**: `POST /transfers` only — the double-entry posting hot path,
+matching delivered slices 01-03 (per `docs/feature/ledger-core/deliver/`).
+No other endpoint is exercised.
+
+**Trigger**: `workflow_dispatch` only. Not nightly, not on push/PR, not
+blocking. Consistent with OPS-1 (no hosted environment exists) — there is no
+production capacity to protect on a schedule, and forcing this into `ci.yml`
+would violate the same trunk-based "every gate is trustworthy on every
+commit" contract that OPS-8 established for the *required* eight jobs. A
+manually-triggered, non-required job does not carry that obligation.
+
+**Rejected simpler alternatives** (Principle 4):
+- *No load testing at all, rely on `race-02`/`race-03`* — those prove
+  correctness under concurrency (I4, I7), not throughput or latency
+  degradation under sustained load. Different question; insufficient.
+- *A single fixed-rate `vegeta attack` invoked ad hoc from a developer's
+  shell, no workflow at all* — meets the "manually triggered" requirement
+  but produces no ramp/soak profile and no shared observability trail; two
+  developers running it get incomparable, unarchived numbers. Insufficient
+  for a soak profile specifically, where the finding *is* the trend over
+  time, not a single number.
+
+**Tool selection**: k6 vs. vegeta, weighed against the Prometheus + Grafana
+stack already running in `docker-compose.yml` (`prom/prometheus:v3.14.0`,
+`grafana/grafana:13.0.2`, added in commit `5447e30`).
+
+| Criterion | k6 | vegeta |
+|---|---|---|
+| Multi-stage profiles (ramp → sustain/soak → ramp-down, spike/stress) | Native — `stages` array in one script | Not native — requires shell-scripted sequential invocations with different `-rate`/`-duration` flags glued together, and stitching their separate reports |
+| Prometheus integration | Native remote-write output (`k6 run --out experimental-prometheus-rw`) | None built in — vegeta emits its own binary/JSON report format; feeding Prometheus requires a bespoke exporter/bridge |
+| Grafana dashboards | Official Grafana-maintained k6 dashboards importable as-is | None — would need to be hand-built |
+| Distribution | Single binary, scriptable in JS | Single binary, scriptable via shell + flags |
+| Scenario expressiveness for POST /transfers (JSON body, idempotency key header) | First-class HTTP request scripting | Supported via target files, less ergonomic for per-iteration varying idempotency keys |
+
+**Selected: k6.** The deciding factor is reuse, not raw capability: this
+project already runs Prometheus + Grafana in the demo stack (Principle 2,
+existing-infrastructure-first). k6's native `experimental-prometheus-rw`
+output writes straight into the already-running Prometheus, and the
+official Grafana k6 dashboard drops into the already-running Grafana with no
+new dashboard-authoring work. Building the same integration on vegeta means
+writing and maintaining a Prometheus bridge that k6 ships for free — added
+component with no reuse justification, which the simplest-infrastructure
+principle weighs against. k6's native `stages` config also directly encodes
+all three requested profiles (load = steady stage, stress = ramped-beyond-
+capacity stage, soak = long sustained stage) in one script rather than three
+hand-glued vegeta invocations.
+
+**Environment**: exercises the same single-Postgres-instance, no-external-
+pooler topology as `contended` (DDD-6 lock ordering applies to load-tested
+traffic exactly as it does to `race-02`/`race-03`), but at the HTTP layer
+against a running `docker compose` stack rather than in-process Go
+concurrency. Declared as a new `load` environment in `environments.yaml`
+(below) rather than overloading `contended`, because `contended`'s `used_by`
+is specifically the two `make race-*` targets and mixing an HTTP-driven k6
+run into that environment's precondition list would blur what each actually
+proves.
+
+**Thresholds**: informational only, not a pass/fail gate. OPS-1 established
+that no hosted environment exists yet, so there is no production SLO for
+this job to enforce — asserting a hard latency/error-rate threshold here
+would invent an SLO backwards from a local docker-compose stack's capacity,
+which is not representative of anything real. k6's `thresholds` block is
+configured (`http_req_duration` p95, `http_req_failed` rate) but marked
+`abortOnFail: false` — reported in the job summary the same way
+`demo_first_green_seconds` is, not enforced. Revisit once OPS-1 is
+superseded by an actual hosted environment with a real SLO to test against.
+
+**Prometheus remote-write maturity note**: k6's Prometheus output is named
+`experimental-prometheus-rw` upstream — the label signals API stability, not
+low adoption; it is k6's standard route for Prometheus remote-write and is
+widely used, but implementation must pin exact `k6` and (compose-side)
+`prometheus` versions in the workflow/compose comments and treat a k6
+version bump as a point to re-check this flag's name/behavior, the same
+discipline already applied to `golangci-lint-action@v7` (see commit
+`b8cd188`).
+
+**Job specification** (new, `workflow_dispatch`-only workflow — not created
+in this pass, see § Implementation follow-up):
+
+| Step | Detail |
+|---|---|
+| Trigger | `workflow_dispatch`, input `profile` (`load`\|`stress`\|`soak`), default `load` |
+| Setup | `docker compose up -d postgres migrate app prometheus grafana`, wait on the existing `app` healthcheck path used by `demo`/`invariant-gates` |
+| Run | k6 script targeting `POST /transfers` on the compose `app` service, `--out experimental-prometheus-rw` against the compose `prometheus` service's remote-write receiver (requires `prometheus.yml`'s Prometheus started with `--web.enable-remote-write-receiver`, not currently set — implementation-time change) |
+| Report | k6 end-of-run summary + threshold results to `$GITHUB_STEP_SUMMARY`, non-blocking |
+| Teardown | `docker compose down -v` (`if: always()`, matching the existing pattern in `invariant-gates`/`demo`/`demo-cold`) |
+
+Not a required check. No branch-protection change.
+
+### `environments.yaml` — new `load` environment
+
+Added below (`docs/feature/ledger-core/devops/environments.yaml`): a `load`
+entry alongside `contended`, scoped to `POST /transfers` under k6-driven
+ramp/soak/stress profiles, manually triggered, non-blocking.
+
+### Implementation follow-up (done in a later pass, 2026-08-29)
+
+This section originally deferred three items as design-only. They were
+subsequently implemented directly (outside the roadmap/DELIVER process, by
+explicit user decision, after both `nw-solution-architect` and
+`nw-software-crafter` declined ad-hoc dispatch for CI/infra file edits and
+roadmap authoring):
+
+1. `nightly.yml`'s `mutation-delta` job now installs `gremlins` (pinned
+   `v0.6.0`), scopes it to the intersection of "Go files changed in the
+   last 24h" and `internal/domain/`, runs `gremlins unleash` per changed
+   package directory (not the whole `internal/domain/...` tree
+   unconditionally), and reports the kill rate to the job summary. Still
+   `continue-on-error: true`.
+2. `.github/workflows/load-test.yml` + `tests/load/transfers.js` now exist:
+   `workflow_dispatch`-only, `profile` choice input (`load`/`stress`/`soak`),
+   k6 against `POST /transfers`, non-blocking (`continue-on-error: true` on
+   the k6 step, since a breached — informational-only — threshold still
+   exits k6 non-zero).
+3. `docker-compose.yml`'s `prometheus` service now runs with
+   `--web.enable-remote-write-receiver` (verified live: `/-/ready` returns
+   200, the write endpoint responds rather than 404).
+
+All three were reviewed via `/code-review`; findings (a `hashFiles`-on-empty-
+file logic inversion, the whole-package-vs-delta mutation scope, the k6
+exit-code/abortOnFail gap, and a `curl` "000"/connection-refused false
+positive in the readiness poll) were fixed in the same pass.
+
+---
+
+## Changed Assumptions
+
+### OPS-9 — nightly-delta mutation strategy extended with a concrete CI job (2026-08-29)
+
+**Original decision** — `feature-delta.md`, § Wave: DEVOPS / [REF] OPS
+decisions:
+
+> | OPS-9 | Nightly-delta mutation testing | Confirmed as-written in
+> `CLAUDE.md`. Delivery is never blocked by mutation runtime, which protects
+> the one-day slice budget |
+
+and § Wave: DEVOPS / [REF] CI/CD pipeline outline:
+
+> `mutation-delta` | Go files changed in the last 24h (`go-mutesting` or
+> equivalent) | Kill rate reported, **not** blocking (OPS-9)
+
+**New assumption**: "`go-mutesting` or equivalent" is made concrete as
+**`gremlins`** (§ Mutation tool selection, above), and the placeholder step
+already present in `nightly.yml` (which honestly reports that no tool is
+vendored yet) is specified to be replaced by an actual `gremlins unleash`
+invocation scoped to the intersection of "files changed in the last 24h" and
+`internal/domain/`.
+
+**This is an extension, not a reversal.** Trigger (`schedule` +
+`workflow_dispatch`), scope (24h delta), non-blocking posture
+(`continue-on-error: true`), and target (`internal/domain/`) are all
+unchanged from the original OPS-9 decision and the § Mutation testing
+strategy section above — nothing here contradicts them. The only thing that
+changes is that "or equivalent" now names a specific, actively-maintained
+tool and a specific step sequence, because implementing the job requires
+picking one.
+
+**Rationale**: OPS-9 was correct to defer the exact tool ("go-mutesting or
+equivalent") until wiring time — naming a tool during DESIGN/DEVOPS's first
+pass, before checking its maintenance status against this repo's `go 1.25.0`
+toolchain, would have been speculative. This pass is that wiring-time check.
+
+### OPS-12 — load/stress/soak testing added (2026-08-29, new decision, not an extension of a prior OPS row)
+
+Not a changed assumption in the sense of OPS-9/OPS-10 above — the original
+DEVOPS wave recorded no load-testing decision at all (§ OPS decisions table
+has no row for it). Recorded here as a new decision, OPS-12, additive to the
+OPS decisions table: scope `POST /transfers` only, `workflow_dispatch`-only
+trigger, k6 selected over vegeta for native Prometheus remote-write and
+Grafana dashboard reuse against the already-running observability stack
+(commit `5447e30`). Full detail in § Load, stress, and soak testing above.
+No existing OPS row is superseded.
