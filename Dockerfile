@@ -1,6 +1,6 @@
 # Builds the single ledgerops binary (cmd/api) for the compose demo path.
 # Two stages: compile with the full Go toolchain, ship on a minimal base.
-FROM golang:1.23-alpine AS build
+FROM golang:1.25-alpine AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
