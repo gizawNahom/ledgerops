@@ -50,3 +50,26 @@ services:
     ports:
       - "8080:8080"
     restart: "no"
+
+  # --- manual demo aids (not part of the OPS-5 acceptance path) -------------
+  # Real Prometheus + Grafana so metrics can be demoed as live graphs rather
+  # than scraped exposition text. GET /metrics stays unauthenticated, so
+  # prometheus.yml needs no credentials.
+  prometheus:
+    image: prom/prometheus:v3.14.0
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    depends_on:
+      - app
+
+  grafana:
+    image: grafana/grafana:13.0.2
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus

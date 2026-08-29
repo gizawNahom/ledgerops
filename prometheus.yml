@@ -1,0 +1,9 @@
+# Local demo scrape config: pulls the ledgerops /metrics exposition
+# (internal/adapters/http/metrics.go) straight from the compose "app"
+# service. GET /metrics is unauthenticated (OPS-5 design decision 1), so no
+# bearer_token / basic_auth is configured here.
+scrape_configs:
+  - job_name: ledgerops
+    scrape_interval: 5s
+    static_configs:
+      - targets: ["app:8080"]
