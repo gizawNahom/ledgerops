@@ -361,3 +361,155 @@ func TestNewMoney_RejectsUnknownCurrency(t *testing.T) {
 		t.Fatalf("expected invalid_amount for an unknown currency, got %v", err)
 	}
 }
+
+// The tests below were written to kill specific surviving mutants reported
+// by the nightly-delta gremlins run (OPS-9), rather than to cover a PBT
+// obligation from the acceptance-designer's taxonomy. Each names the mutant
+// it kills in its doc comment.
+
+// TestMoney_IsPositive_ZeroBoundary kills the CONDITIONALS_BOUNDARY mutant at
+// money.go:68 (`> 0` mutated to `>= 0`): zero must report false, not true.
+//
+// bypass: named boundary value (zero), not an equivalence class a generator
+// would reliably hit.
+func TestMoney_IsPositive_ZeroBoundary(t *testing.T) {
+	zero, err := domain.NewMoney(0, "USD")
+	if err != nil {
+		t.Fatalf("NewMoney rejected a known currency: %v", err)
+	}
+	if zero.IsPositive() {
+		t.Fatalf("IsPositive() = true for a zero amount, want false")
+	}
+}
+
+// TestNewAccount_SystemAllowsNegativeBalanceAtConstruction kills the
+// CONDITIONALS_NEGATION mutant at account.go:26 (`kind == Wallet` negated to
+// `!=`): a System account must be constructible with a negative balance
+// directly (the documented Wallet/System asymmetry), not just reachable via
+// repeated Apply calls.
+//
+// bypass: named boundary case (direct construction vs. reached via Apply),
+// not an equivalence class.
+func TestNewAccount_SystemAllowsNegativeBalanceAtConstruction(t *testing.T) {
+	negative, err := domain.NewMoney(-100, "USD")
+	if err != nil {
+		t.Fatalf("NewMoney rejected a known currency: %v", err)
+	}
+	account, err := domain.NewAccount("treasury", domain.System, negative)
+	if err != nil {
+		t.Fatalf("NewAccount refused a negative balance for a System account: %v", err)
+	}
+	if account.Balance().MinorUnits() != -100 {
+		t.Fatalf("Balance().MinorUnits() = %d, want -100", account.Balance().MinorUnits())
+	}
+}
+
+// TestPost_ToAccountCurrencyMismatchIsRefused kills the CONDITIONALS_NEGATION
+// mutant at post.go:50 (the err-check guarding toAccount.Apply): when the
+// "from" side's currency matches the amount (so the first Apply succeeds)
+// but the "to" side's currency does not, Post must surface the
+// CurrencyMismatch from the second Apply rather than silently continuing
+// past it.
+//
+// bypass: a specific two-sided boundary needing three coordinated currency
+// values (from matches amount, to does not), not a natural property —
+// TestProperty_PostToleratesMixedCurrenciesAndMissingAccounts already draws
+// independent random currencies for from/to/amount but never pins this exact
+// combination or asserts on it.
+func TestPost_ToAccountCurrencyMismatchIsRefused(t *testing.T) {
+	fromBalance, err := domain.NewMoney(1_000, "USD")
+	if err != nil {
+		t.Fatalf("NewMoney rejected a known currency: %v", err)
+	}
+	fromAccount, err := domain.NewAccount("from", domain.Wallet, fromBalance)
+	if err != nil {
+		t.Fatalf("NewAccount rejected a non-negative balance: %v", err)
+	}
+
+	toBalance, err := domain.NewMoney(0, "EUR")
+	if err != nil {
+		t.Fatalf("NewMoney rejected a known currency: %v", err)
+	}
+	toAccount, err := domain.NewAccount("to", domain.System, toBalance)
+	if err != nil {
+		t.Fatalf("NewAccount rejected a non-negative balance: %v", err)
+	}
+
+	amount, err := domain.NewMoney(100, "USD")
+	if err != nil {
+		t.Fatalf("NewMoney rejected a known currency: %v", err)
+	}
+
+	cmd := domain.TransferCommand{From: "from", To: "to", Amount: amount}
+	_, postErr := domain.Post(cmd, []domain.Account{fromAccount, toAccount}, time.Now(), "tx-to-mismatch")
+
+	var violation domain.Violation
+	if !errors.As(postErr, &violation) || violation.Kind() != domain.CurrencyMismatch {
+		t.Fatalf("expected currency_mismatch from the to-side Apply, got %v", postErr)
+	}
+}
+
+// TestProperty_NewMoneyFromDecimalLiteral_ValidFracDigitsWithinScale kills
+// the ARITHMETIC_BASE/INVERT_NEGATIVES mutants at post.go:129 (the zero-pad
+// computation `scale-len(fracDigits)`) and post.go:130 (the
+// wholeDigits+padded concatenation): asserting the exact resulting
+// MinorUnits exposes any wrong padding length or wrong concatenation order.
+func TestProperty_NewMoneyFromDecimalLiteral_ValidFracDigitsWithinScale(t *testing.T) {
+	scales := map[string]int{"USD": 2, "EUR": 2, "GBP": 2, "JPY": 0}
+
+	rapid.Check(t, func(t *rapid.T) {
+		currency := rapid.SampledFrom([]string{"USD", "EUR", "GBP", "JPY"}).Draw(t, "currency")
+		scale := scales[currency]
+
+		wholeDigits := rapid.StringMatching(`[1-9][0-9]{0,5}`).Draw(t, "wholeDigits")
+		fracLen := rapid.IntRange(0, scale).Draw(t, "fracLen")
+		fracDigits := ""
+		if fracLen > 0 {
+			fracDigits = rapid.StringOfN(rapid.RuneFrom([]rune("0123456789")), fracLen, fracLen, fracLen).Draw(t, "fracDigits")
+		}
+
+		money, err := domain.NewMoneyFromDecimalLiteral(false, wholeDigits, fracDigits, currency)
+		if err != nil {
+			t.Fatalf("NewMoneyFromDecimalLiteral refused fracDigits (len %d) within scale (%d): %v", fracLen, scale, err)
+		}
+
+		padded := fracDigits
+		for len(padded) < scale {
+			padded += "0"
+		}
+		wantStr := wholeDigits + padded
+		var want int64
+		for _, r := range wantStr {
+			want = want*10 + int64(r-'0')
+		}
+
+		if money.MinorUnits() != want {
+			t.Fatalf("MinorUnits() = %d, want %d (whole=%q frac=%q scale=%d)", money.MinorUnits(), want, wholeDigits, fracDigits, scale)
+		}
+	})
+}
+
+// TestNewMoneyFromDecimalLiteral_FracDigitsExceedingScaleIsRefused kills the
+// CONDITIONALS_BOUNDARY and CONDITIONALS_NEGATION mutants at post.go:126
+// (`len(fracDigits) > scale`): one fractional digit past the currency's
+// scale must be refused, not silently accepted or off-by-one accepted.
+func TestNewMoneyFromDecimalLiteral_FracDigitsExceedingScaleIsRefused(t *testing.T) {
+	cases := []struct {
+		currency   string
+		fracDigits string
+	}{
+		{"USD", "123"}, // scale 2, one digit past it
+		{"JPY", "1"},   // scale 0, any fractional digit is past it
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.currency+"/"+tc.fracDigits, func(t *testing.T) {
+			_, err := domain.NewMoneyFromDecimalLiteral(false, "1", tc.fracDigits, tc.currency)
+
+			var violation domain.Violation
+			if !errors.As(err, &violation) || violation.Kind() != domain.InvalidAmount {
+				t.Fatalf("expected invalid_amount for fracDigits %q past %s's scale, got %v", tc.fracDigits, tc.currency, err)
+			}
+		})
+	}
+}
