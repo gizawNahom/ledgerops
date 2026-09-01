@@ -1,3 +1,7 @@
 # nWave activation marker (keep .nwave/local-config.json trackable)
 .nwave/*
 !.nwave/local-config.json
+
+# Python bytecode cache (tests/load/analysis/*.py)
+__pycache__/
+*.pyc

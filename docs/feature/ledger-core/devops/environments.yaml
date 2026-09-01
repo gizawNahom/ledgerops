@@ -82,22 +82,29 @@ target_environments:
   - name: load
     description: >
       Running docker compose stack (postgres, migrate, app, prometheus,
-      grafana), driven by k6 issuing HTTP POST /transfers traffic under
-      load/stress/soak profiles. Added 2026-08-29 (OPS-12, amendment to the
-      finished DEVOPS wave) — not part of the original five environments.
+      grafana), driven by k6 issuing HTTP traffic across the full driving-port
+      surface under load/stress/soak/tier-sweep/success/usl-sweep profiles.
+      Added 2026-08-29 (OPS-12, amendment to the finished DEVOPS wave), scope
+      widened 2026-08-31 — not part of the original five environments.
     platform: [linux]
     preconditions:
       - "direct pgx connection pool — no pgbouncer or external pooler in front (same DDD-6 constraint as `contended`)"
       - "single PostgreSQL instance (no read replica)"
       - "docker compose stack up via the same `app` healthcheck path used by demo/invariant-gates jobs"
-      - "Prometheus started with --web.enable-remote-write-receiver (implementation-time change, not yet applied)"
+      - "Prometheus started with --web.enable-remote-write-receiver"
+      - "seeded to 300,000 entries (150,000 balanced transactions, varied amounts and timestamps spread over ~180 days) before any profile runs — populated-at-scale, not the `populated` environment's `>=1 row` bar; a `load`-specific precondition, not a change to `populated`'s canonical definition. Seeded directly via SQL, bypassing internal/app's domain logic — see feature-delta.md § Data state for the stated limitation this carries"
+      - "tier-sweep and success profiles run under a resource-limited (cpus/mem_limit) app+postgres pair, capped to a standard GitHub-hosted runner's total capacity (4 vCPU/16GB) per the tier table in feature-delta.md § Hardware-tier extrapolation; load/stress/soak profiles run unconstrained, as before this amendment"
+      - "usl-sweep applies the same per-tier resource limits as tier-sweep, but cycles through all four automatically within one job (tests/load/analysis/run_usl_sweep.py resizing app+postgres in place between tiers) rather than one tier per manually-triggered run — see feature-delta.md § Fitting α (contention) and β (coherency)"
     used_by: ["k6 load-test workflow (workflow_dispatch only, OPS-12)"]
     rationale: >
-      Scope is POST /transfers only, matching delivered slices 01-03.
-      Manually triggered, never nightly, never blocking — there is no hosted
-      environment (OPS-1) whose capacity this protects, so thresholds are
-      informational (k6 abortOnFail: false), not a gate. Distinct from
-      `contended`, whose used_by is specifically the in-process
+      Endpoint mix, data state, and hardware tiers are detailed in
+      feature-delta.md § Load, stress, soak, and success testing
+      (2026-08-31) rather than restated here, to avoid the two documents
+      drifting on scope again. Manually triggered, never nightly. Only the
+      `success` profile is a real enforced gate (abortOnFail: true);
+      load/stress/soak/tier-sweep stay informational — there is no hosted
+      environment (OPS-1) whose capacity most of this protects. Distinct
+      from `contended`, whose used_by is specifically the in-process
       make race-02/race-03 targets; conflating the two would blur what each
       environment proves.
 
