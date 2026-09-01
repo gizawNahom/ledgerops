@@ -57,16 +57,17 @@ ERROR_BREAKDOWN_THRESHOLD = 0.05  # 5% error rate -- a different, higher bar
 # step broken the system badly enough to stop escalating," not "did this
 # tier pass its SLO."
 WAIT_FOR_APP_TIMEOUT_S = 60
-# Recreating app+postgres under a throttled tier is not the same situation
-# as the workflow's own cold-start wait (empty-ish DB, unconstrained CPU):
-# Postgres now has to survive a container recreation -- possibly a SIGKILL
-# if it doesn't finish a clean shutdown inside Compose's default 10s
-# stop-grace-period, forcing WAL crash recovery on next start -- against a
-# real 300k-row/150k-transaction dataset, on as little as 0.25 vCPU (Tier
-# 1). 60s was not enough on the first live run (2026-08-31); this is a
-# first-pass, deliberately generous number, not a measured one -- revisit
-# once real recovery times are observed via the log dump wait_for_app now
-# does on timeout.
+# First live run (2026-08-31) timed out here at 60s -- not because Postgres
+# was slow (its log showed a clean shutdown and readiness within ~150ms
+# even at Tier 1's 0.25 vCPU), but because resize_to_tier's docker compose
+# command left `migrate` out of the up invocation, bypassing app's actual
+# depends_on chain entirely and letting it race a not-yet-listening
+# postgres. That race is now fixed in resize_to_tier itself (migrate is
+# back in the command, restoring the same dependency gate the workflow's
+# cold-start step already relies on). This timeout stays generous as a
+# safety margin for genuine slow recovery under a throttled tier, not
+# because that's the bug that was actually observed -- 240s costs nothing
+# in the success case (wait_for_app returns as soon as the app answers).
 WAIT_FOR_APP_AFTER_RESIZE_TIMEOUT_S = 240
 OVERRIDE_FILE = "docker-compose.tier-override.yml"
 COMPOSE_FILE = "docker-compose.yml"
@@ -92,6 +93,20 @@ def write_override(tier):
 def resize_to_tier(tier):
     write_override(tier)
     print(f"[tier {tier}] applying {TIERS[tier]}", flush=True)
+    # `app` does not depend on `postgres` directly (docker-compose.yml) --
+    # it depends on `migrate` with condition: service_completed_successfully,
+    # and `migrate` is what actually waits on postgres's own healthcheck
+    # (pg_isready, 20 retries). `--no-deps app postgres` (the first live-run
+    # attempt, 2026-08-31) left `migrate` out of the command entirely, which
+    # meant compose enforced NO readiness gate between app and postgres at
+    # all -- app started racing a freshly-recreated postgres with zero
+    # ordering guarantee, lost that race by ~130ms, and (both app and
+    # migrate are `restart: "no"`) just stayed dead for the rest of the
+    # wait window. Listing `migrate` here and dropping --no-deps restores
+    # the same dependency chain the workflow's own cold-start step already
+    # relies on -- migrate is idempotent against an up-to-date schema
+    # (expand-only migrations), so re-running it on every tier resize is
+    # safe and fast, not a correctness risk.
     subprocess.run(
         [
             "docker",
@@ -102,9 +117,9 @@ def resize_to_tier(tier):
             OVERRIDE_FILE,
             "up",
             "-d",
-            "--no-deps",
-            "app",
             "postgres",
+            "migrate",
+            "app",
         ],
         check=True,
     )

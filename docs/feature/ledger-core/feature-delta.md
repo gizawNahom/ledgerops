@@ -2438,19 +2438,30 @@ vCPUs, a "plateau" may reflect the load generator running out of headroom
 rather than the target system saturating — a false-negative risk specific to
 single-runner co-location, distinct from any orchestration-tool concern.
 
-**First live run finding (2026-08-31)**: the initial `usl-sweep` run failed
+**First live run findings (2026-08-31)**: the initial `usl-sweep` run failed
 at Tier 1 — `wait_for_app()` timed out at 60s after the per-tier container
-resize, before any rate step ran. Recreating `postgres` under a throttled
-tier is not equivalent to the workflow's own cold-start wait: the container
-may not finish a clean shutdown inside Compose's default 10s
-stop-grace-period, forcing WAL crash recovery against the real 300k-row
-seed on next start, on as little as 0.25 vCPU. Fixed by (a) dumping
-`docker compose logs app postgres` on any post-resize timeout, so the next
-occurrence is diagnosable from the job log directly rather than a bare
-exception, and (b) raising the post-resize wait to 240s — a first-pass,
-deliberately generous number, not one derived from an observed recovery
-time, since the log dump exists specifically to obtain that number from a
-real run rather than guess it twice.
+resize, before any rate step ran. First fix attempt (dump
+`docker compose logs app postgres` on timeout, raise the wait to 240s)
+correctly added diagnostics but guessed the wrong root cause — the log dump
+from the *next* run showed Postgres logging a clean shutdown and reaching
+"ready to accept connections" within ~150ms even at Tier 1's 0.25 vCPU, so
+CPU throttling was never the problem. The real cause: `docker-compose.yml`
+has `app` depend on `migrate` (`condition: service_completed_successfully`),
+not on `postgres` directly — `migrate` is what actually waits on Postgres's
+own healthcheck. `resize_to_tier`'s original command
+(`up -d --no-deps app postgres`) left `migrate` out of the invocation
+entirely, which meant Compose enforced no readiness gate between app and
+postgres at all. App started immediately, lost the race against a
+freshly-recreated Postgres by roughly 130ms, logged
+`health.startup.refused`, and — since both `app` and `migrate` are
+`restart: "no"` — simply stayed dead for the rest of the wait window; no
+timeout length would have fixed that. Fixed by restoring `migrate` to the
+resize command (`up -d postgres migrate app`, dropping `--no-deps`),
+reinstating the same dependency chain the workflow's cold-start step
+already relies on. The 240s post-resize timeout and the log-dump-on-timeout
+diagnostic both stay — the diagnostic is what surfaced the real cause, and
+the longer timeout remains a harmless safety margin for genuine slow
+recovery, distinct from the bug that was actually hit.
 
 **Fitting α (contention) and β (coherency).** Standard USL regression
 (Gunther's method, via linearization: `y(N) = (N/C(N) - 1)/(N-1) = α + β·N`
