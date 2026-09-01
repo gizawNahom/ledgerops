@@ -2280,11 +2280,18 @@ original 2026-08-29 scoping note.
 **Within the 60% `POST /transfers` share**, two deliberate slices are
 included rather than only happy-path posting:
 
-- **~2% idempotency replay**: iterations reuse a previously-issued
-  `Idempotency-Key` instead of generating a fresh one, exercising the replay
-  path (I7, ADR-005) under sustained load rather than only under
-  `race-03`'s correctness check. Expected response: identical
-  `transaction_id`, HTTP 200/201 — counted as success, not failure.
+- **~2% idempotency replay**: iterations resend a previously-successful
+  request **verbatim** — same `Idempotency-Key`, same `from`/`to`/`amount`
+  body — rather than generating a fresh one, exercising the replay path
+  (I7, ADR-005) under sustained load rather than only under `race-03`'s
+  correctness check. Expected response: identical `transaction_id`, HTTP
+  200/201 — counted as success, not failure. **Live-run finding
+  (2026-09-01)**: the first implementation cached only the key and drew a
+  fresh `from`/`to`/`amount` at replay time — reusing a key with a
+  *different* request body, which is not a replay at all; ADR-005/DDD-8's
+  fingerprint check correctly refused it as a conflict, and a live run
+  caught the resulting unexpected status. Fixed by caching the full
+  original request body alongside the key and resending it unchanged.
 - **~1.5% deliberate insufficient-funds**: amount drawn from a value known to
   exceed any account's funded balance, exercising the 422
   `insufficient_funds` refusal path under load. Expected response: HTTP 422

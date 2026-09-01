@@ -201,30 +201,38 @@ function minorToDecimal(minor) {
   return `${Math.floor(abs / 100)}.${String(abs % 100).padStart(2, "0")}`;
 }
 
-// Bounded per-VU cache of successfully-posted idempotency keys, so the
-// replay slice below has something real to replay. Bounded to avoid
-// unbounded per-VU memory growth over `soak`'s longer duration.
-const replayKeys = [];
+// Bounded per-VU cache of successfully-posted requests (key AND the exact
+// body that earned it), so the replay slice below can resend the SAME
+// request under the SAME key -- a true idempotent replay. Caching only the
+// key and drawing a fresh from/to/amount at replay time (the original
+// version of this function, until a live run caught it 2026-09-01) is not
+// a replay at all: it's the same key reused with a different request body,
+// which ADR-005/DDD-8's fingerprint check correctly refuses as a conflict,
+// not the "identical transaction_id back" this slice is supposed to
+// exercise. Bounded to avoid unbounded per-VU memory growth over `soak`'s
+// longer duration.
+const replayableRequests = [];
 
 function postTransfer() {
-  const from = pickAccount();
-  const to = pickCounterparty(from);
   const roll = Math.random();
 
-  // ~2% idempotency-replay slice (I7, ADR-005): reuse a prior key, expect
-  // the identical transaction_id back, not a fresh posting.
-  if (roll < 0.02 && replayKeys.length > 0) {
-    const key = replayKeys[Math.floor(Math.random() * replayKeys.length)];
-    const res = http.post(
-      `${BASE_URL}/transfers`,
-      JSON.stringify({ from, to, amount: minorToDecimal(pickAmountMinor()) }),
-      { headers: { ...JSON_HEADERS, "Idempotency-Key": key } },
-    );
+  // ~2% idempotency-replay slice (I7, ADR-005): resend a prior request
+  // VERBATIM (same key, same from/to/amount) and expect the identical
+  // transaction_id back, not a fresh posting.
+  if (roll < 0.02 && replayableRequests.length > 0) {
+    const original =
+      replayableRequests[Math.floor(Math.random() * replayableRequests.length)];
+    const res = http.post(`${BASE_URL}/transfers`, original.body, {
+      headers: { ...JSON_HEADERS, "Idempotency-Key": original.key },
+    });
     check(res, {
       "replay: 200 or 201": (r) => r.status === 200 || r.status === 201,
     });
     return;
   }
+
+  const from = pickAccount();
+  const to = pickCounterparty(from);
 
   // ~1.5% deliberate insufficient-funds slice, on top of the 2% replay
   // slice above (roughly 2%-3.5% of rolls).
@@ -233,12 +241,11 @@ function postTransfer() {
     ? 999999999999 // implausibly large, exceeds any funded/seeded balance
     : pickAmountMinor();
   const key = `k6-${__VU}-${__ITER}-${Date.now()}`;
+  const body = JSON.stringify({ from, to, amount: minorToDecimal(amountMinor) });
 
-  const res = http.post(
-    `${BASE_URL}/transfers`,
-    JSON.stringify({ from, to, amount: minorToDecimal(amountMinor) }),
-    { headers: { ...JSON_HEADERS, "Idempotency-Key": key } },
-  );
+  const res = http.post(`${BASE_URL}/transfers`, body, {
+    headers: { ...JSON_HEADERS, "Idempotency-Key": key },
+  });
 
   if (forceInsufficientFunds) {
     check(res, { "insufficient_funds: 422": (r) => r.status === 422 });
@@ -249,8 +256,8 @@ function postTransfer() {
     "status is 200 or 201": (r) => r.status === 200 || r.status === 201,
   });
   if (res.status === 200 || res.status === 201) {
-    replayKeys.push(key);
-    if (replayKeys.length > 500) replayKeys.shift();
+    replayableRequests.push({ key, body });
+    if (replayableRequests.length > 500) replayableRequests.shift();
   }
 }
 
