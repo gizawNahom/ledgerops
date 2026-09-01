@@ -57,6 +57,17 @@ ERROR_BREAKDOWN_THRESHOLD = 0.05  # 5% error rate -- a different, higher bar
 # step broken the system badly enough to stop escalating," not "did this
 # tier pass its SLO."
 WAIT_FOR_APP_TIMEOUT_S = 60
+# Recreating app+postgres under a throttled tier is not the same situation
+# as the workflow's own cold-start wait (empty-ish DB, unconstrained CPU):
+# Postgres now has to survive a container recreation -- possibly a SIGKILL
+# if it doesn't finish a clean shutdown inside Compose's default 10s
+# stop-grace-period, forcing WAL crash recovery on next start -- against a
+# real 300k-row/150k-transaction dataset, on as little as 0.25 vCPU (Tier
+# 1). 60s was not enough on the first live run (2026-08-31); this is a
+# first-pass, deliberately generous number, not a measured one -- revisit
+# once real recovery times are observed via the log dump wait_for_app now
+# does on timeout.
+WAIT_FOR_APP_AFTER_RESIZE_TIMEOUT_S = 240
 OVERRIDE_FILE = "docker-compose.tier-override.yml"
 COMPOSE_FILE = "docker-compose.yml"
 BASE_URL = "http://localhost:8080"
@@ -99,8 +110,8 @@ def resize_to_tier(tier):
     )
 
 
-def wait_for_app():
-    deadline = time.time() + WAIT_FOR_APP_TIMEOUT_S
+def wait_for_app(timeout_s=WAIT_FOR_APP_TIMEOUT_S):
+    deadline = time.time() + timeout_s
     url = f"{BASE_URL}/accounts/__probe__"
     while time.time() < deadline:
         try:
@@ -112,7 +123,19 @@ def wait_for_app():
             return
         except (urllib.error.URLError, OSError):
             time.sleep(1)
-    raise RuntimeError(f"app never answered at {url} within {WAIT_FOR_APP_TIMEOUT_S}s")
+
+    # Unlike the workflow's own cold-start wait step, a post-resize wait has
+    # no visibility into *why* it timed out -- was Postgres still replaying
+    # WAL after a SIGKILL-forced restart under a throttled tier, or is the
+    # app crash-looping while it waits for a DB that isn't ready yet? Dump
+    # both, mirroring the pattern the original wait-for-app workflow step
+    # already used, so a real CI failure is diagnosable from the job log
+    # directly instead of a bare exception (this exact gap was hit on the
+    # first live run, 2026-08-31 -- see feature-delta.md's amendment note
+    # for what this timeout actually needs to cover under a throttled tier).
+    print(f"\napp never answered within {timeout_s}s -- dumping container logs for diagnosis:", flush=True)
+    subprocess.run(["docker", "compose", "-f", COMPOSE_FILE, "logs", "--tail=100", "app", "postgres"])
+    raise RuntimeError(f"app never answered at {url} within {timeout_s}s")
 
 
 def parse_k6_summary(path):
@@ -149,7 +172,7 @@ def run_fixed_rate_step(rate, summary_path):
 
 def sweep_one_tier(tier):
     resize_to_tier(tier)
-    wait_for_app()
+    wait_for_app(timeout_s=WAIT_FOR_APP_AFTER_RESIZE_TIMEOUT_S)
 
     prev = None
     for i, rate in enumerate(RATE_STEPS_RPS):

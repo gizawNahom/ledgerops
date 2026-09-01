@@ -2438,6 +2438,20 @@ vCPUs, a "plateau" may reflect the load generator running out of headroom
 rather than the target system saturating — a false-negative risk specific to
 single-runner co-location, distinct from any orchestration-tool concern.
 
+**First live run finding (2026-08-31)**: the initial `usl-sweep` run failed
+at Tier 1 — `wait_for_app()` timed out at 60s after the per-tier container
+resize, before any rate step ran. Recreating `postgres` under a throttled
+tier is not equivalent to the workflow's own cold-start wait: the container
+may not finish a clean shutdown inside Compose's default 10s
+stop-grace-period, forcing WAL crash recovery against the real 300k-row
+seed on next start, on as little as 0.25 vCPU. Fixed by (a) dumping
+`docker compose logs app postgres` on any post-resize timeout, so the next
+occurrence is diagnosable from the job log directly rather than a bare
+exception, and (b) raising the post-resize wait to 240s — a first-pass,
+deliberately generous number, not one derived from an observed recovery
+time, since the log dump exists specifically to obtain that number from a
+real run rather than guess it twice.
+
 **Fitting α (contention) and β (coherency).** Standard USL regression
 (Gunther's method, via linearization: `y(N) = (N/C(N) - 1)/(N-1) = α + β·N`
 over each tier's relative capacity `C(N) = X(N)/X(1)`, an ordinary
