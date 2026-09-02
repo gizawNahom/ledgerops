@@ -9,6 +9,10 @@
 # `docker compose` (v2 CLI) applies `deploy.resources.limits` outside swarm
 # mode, so no `--compatibility` flag or swarm init is needed.
 services:
+  # CPU/memory on both sides ruled out as the throughput bottleneck
+  # 2026-09-02 (postgres 3 CPU/3GB and app 4 CPU/1GB each made no
+  # measurable difference vs. this 2 CPU/2GB baseline; app's own CPU%
+  # never got close to its cap either). Baseline kept here.
   postgres:
     deploy:
       resources:
@@ -22,3 +26,22 @@ services:
         limits:
           cpus: "2.0"
           memory: 2G
+    # pgxpool defaults to 4 max connections when unset. Raised here after
+    # fixing the startup crash this caused (main.go's probeStartup used
+    # to open its own connection with plain pgx.Connect, which doesn't
+    # understand pgxpool-only DSN params like pool_max_conns and forwarded
+    # it to postgres as an unrecognized startup parameter -- fixed
+    # 2026-09-02, commit 4766c7c). Measured effect: p95 latency roughly
+    # halved (17-18ms -> 8.4ms), but throughput barely moved (~345 ->
+    # ~350 rps) -- the pool was making individual requests wait longer
+    # than necessary, but was NOT the real throughput ceiling. That
+    # ceiling's cause is still open; current leading theory is the local
+    # test machine itself (k6 and the containers under test competing for
+    # the same cores) rather than anything in app/postgres -- this CI run
+    # is partly to check whether the ceiling looks different on
+    # GitHub-hosted runner hardware. Note: ubuntu-latest runners are
+    # 2-vCPU, so postgres+app's combined 4.0 CPU cap here exceeds the
+    # runner's real core count -- expect different (likely lower)
+    # numbers than the 12-core local dev machine this was tuned against.
+    environment:
+      LEDGEROPS_APP_DSN: postgres://ledgerops_app:app-secret@postgres:5432/ledgerops?sslmode=disable&pool_max_conns=50

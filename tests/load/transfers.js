@@ -106,13 +106,32 @@ export const options =
           },
         },
         thresholds: {
-          http_req_duration: [{ threshold: "p(95)<500", abortOnFail: true }],
-          http_req_failed: [{ threshold: "rate<0.01", abortOnFail: true }],
+          // delayAbortEval: without it, abortOnFail evaluates from t=0,
+          // when achieved rate is still near zero (VUs haven't finished
+          // scaling up, and the first iterations -- including 5-15s
+          // getEntries/getVerdict ones -- haven't completed yet). That
+          // false-positives the throughput threshold within ~2s, before
+          // the run ever reaches steady state, regardless of real
+          // app/hardware capacity (caught 2026-09-02: a postgres resource
+          // bump made no difference to the ~2s abort, confirming this was
+          // a threshold-timing bug, not a capacity finding). 20s is a
+          // first-pass number, not tuned -- enough for VU ramp-up plus at
+          // least one worst-case (15s) iteration to complete.
+          http_req_duration: [
+            { threshold: "p(95)<500", abortOnFail: true, delayAbortEval: "20s" },
+          ],
+          http_req_failed: [
+            { threshold: "rate<0.01", abortOnFail: true, delayAbortEval: "20s" },
+          ],
           // 95% of target, not 100% -- a few seconds of executor VU
           // spin-up at the very start of a flat-rate run is expected and
           // shouldn't fail an otherwise-healthy result.
           http_reqs: [
-            { threshold: `rate>=${CAPACITY_TARGET_RPS * 0.95}`, abortOnFail: true },
+            {
+              threshold: `rate>=${CAPACITY_TARGET_RPS * 0.95}`,
+              abortOnFail: true,
+              delayAbortEval: "20s",
+            },
           ],
         },
       }
