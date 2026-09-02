@@ -95,6 +95,31 @@ function arrivalRateScenario(name, stages) {
   };
 }
 
+// Genuinely flat rate for the whole duration -- no ramp. `ramping-arrival-
+// rate` with a single stage (the original implementation of both
+// `fixed-rate` and `success`, until a live run caught this 2026-09-02)
+// linearly ramps from startRate:1 up to the target over the ENTIRE stage
+// duration -- it never actually holds the requested rate, so the achieved
+// average works out to roughly (1+target)/2, not target. For `fixed-rate`
+// that silently made every tier-sweep measurement understate real
+// throughput; for `success` it meant the enforced SLO gate was testing
+// "reach roughly half the target on average, hitting the real number only
+// at the last second" instead of "sustain the target rate," which is a
+// materially easier and wrong test for the one profile meant to be a real
+// gate. `constant-arrival-rate` holds `rate` flat from the first second.
+function constantArrivalRateScenario(name, rate, duration) {
+  return {
+    [name]: {
+      executor: "constant-arrival-rate",
+      rate,
+      timeUnit: "1s",
+      duration,
+      preAllocatedVUs: 50,
+      maxVUs: 400,
+    },
+  };
+}
+
 const profile = __ENV.PROFILE || "load";
 
 let resolvedOptions;
@@ -118,7 +143,7 @@ if (profile === "tier-sweep") {
   const rate = Number(__ENV.RATE) || 10;
   const duration = __ENV.DURATION || "30s";
   resolvedOptions = {
-    scenarios: arrivalRateScenario("fixed_rate", [{ duration, target: rate }]),
+    scenarios: constantArrivalRateScenario("fixed_rate", rate, duration),
     thresholds: {
       http_req_duration: [{ threshold: "p(95)<500", abortOnFail: false }],
       http_req_failed: [{ threshold: "rate<0.01", abortOnFail: false }],
@@ -126,9 +151,7 @@ if (profile === "tier-sweep") {
   };
 } else if (profile === "success") {
   resolvedOptions = {
-    scenarios: arrivalRateScenario("success", [
-      { duration: "5m", target: SUCCESS_TARGET_RPS },
-    ]),
+    scenarios: constantArrivalRateScenario("success", SUCCESS_TARGET_RPS, "5m"),
     thresholds: {
       http_req_duration: [{ threshold: "p(95)<500", abortOnFail: true }],
       http_req_failed: [{ threshold: "rate<0.01", abortOnFail: true }],

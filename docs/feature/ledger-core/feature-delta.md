@@ -2589,6 +2589,24 @@ Distinct from `load` (baseline), `stress` (find the breaking point), and
 check with `abortOnFail: true` — not `continue-on-error`. Three dimensions,
 decided upfront, not two-plus-a-derived-third:
 
+**Live-run finding (2026-09-02)**: the first implementation used k6's
+`ramping-arrival-rate` executor with a single stage
+(`[{ duration: "5m", target: SUCCESS_TARGET_RPS }]`). That executor always
+linearly ramps from `startRate` (1) up to the target over the *entire*
+stage duration — it never actually holds the target rate steady. The gate
+was therefore silently testing "reach roughly half the target rate on
+average, arriving at the real number only in the last second," not
+"sustain the target rate for 5 minutes," a materially easier and wrong
+test for the one profile meant to be a trustworthy gate. A tier-sweep run's
+flat, tier-independent ~3rps readings (traced back to the same bug in
+`fixed-rate`, which shared this scenario builder) are what surfaced it.
+Fixed by switching both `fixed-rate` and `success` to k6's
+`constant-arrival-rate` executor, which holds the requested rate flat from
+the first second — no ramp. `tier-sweep`'s intentional multi-stage
+escalation keeps `ramping-arrival-rate`, since ramping between rate levels
+is the point there, for a human watching a live Grafana dashboard, not a
+quantitative measurement being read back programmatically.
+
 | Dimension | Value | Source |
 |---|---|---|
 | Throughput (target) | ~579 rps peak | 5,000,000 tx/day ÷ 86,400s ≈ 58 tx/s average × 10x peak-to-average multiplier, reflecting batch-driven ledger traffic (payroll runs, end-of-day settlement) rather than smooth diurnal load. **Stated, provisional, business-derived — not measured, not a production guarantee.** |
