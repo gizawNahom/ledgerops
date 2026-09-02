@@ -2445,7 +2445,23 @@ vCPUs, a "plateau" may reflect the load generator running out of headroom
 rather than the target system saturating — a false-negative risk specific to
 single-runner co-location, distinct from any orchestration-tool concern.
 
-**First live run findings (2026-08-31)**: the initial `usl-sweep` run failed
+**Live run findings**:
+
+**2026-09-01**: after the two fixes below, the very first `k6 run` inside
+the very first rate step (5rps, Tier 1) crashed the whole script with
+`CalledProcessError: ... exit status 99`. k6 exits 99 specifically when a
+threshold it was tracking got breached during the run
+(`ExitCodeThresholdsHaveFailed`) — during a sweep that's expected,
+informative data (pushing load until something breaks is the entire
+point), not a script failure, and the summary file is still written
+normally regardless. `run_fixed_rate_step`'s `subprocess.run(...,
+check=True)` treated that routine outcome as fatal. Fixed by inspecting
+the return code directly: 0 or 99 both proceed to parse the summary; any
+other code still raises, since that means the run itself didn't complete
+as expected (script error, `setup()` failure) and the summary may not be
+trustworthy.
+
+**2026-08-31**: the initial `usl-sweep` run failed
 at Tier 1 — `wait_for_app()` timed out at 60s after the per-tier container
 resize, before any rate step ran. First fix attempt (dump
 `docker compose logs app postgres` on timeout, raise the wait to 240s)

@@ -171,7 +171,7 @@ def run_fixed_rate_step(rate, summary_path):
 
     full_env = {**os.environ, **env}
     print(f"    running fixed-rate step at {rate} rps...", flush=True)
-    subprocess.run(
+    proc = subprocess.run(
         [
             "k6",
             "run",
@@ -179,9 +179,32 @@ def run_fixed_rate_step(rate, summary_path):
             "tests/load/transfers.js",
         ],
         env=full_env,
-        check=True,
         capture_output=True,
+        text=True,
     )
+    # k6 exits 99 specifically when a threshold it was tracking got
+    # breached during the run (ExitCodeThresholdsHaveFailed) -- during a
+    # sweep that is expected, informative data (the whole point is to push
+    # load until something breaks), not a script failure, and the summary
+    # file is still written normally either way. `check=True` here (first
+    # live sweep run, 2026-09-01) treated that routine outcome as a fatal
+    # exception and crashed on the very first rate step. Any OTHER
+    # non-zero exit means the run itself didn't complete as expected (a
+    # script error, a setup() failure, etc.) and the summary may not exist
+    # or be trustworthy, so those still raise.
+    if proc.returncode not in (0, 99):
+        print(proc.stdout)
+        print(proc.stderr, file=sys.stderr)
+        raise RuntimeError(
+            f"k6 exited {proc.returncode} at rate={rate}rps -- not a threshold "
+            f"breach (that's 99), treating this as a genuine failure, not sweep data"
+        )
+    if proc.returncode == 99:
+        print(
+            f"    (k6 exit 99: a threshold was breached at {rate}rps -- expected "
+            f"during a sweep, continuing)",
+            flush=True,
+        )
     return parse_k6_summary(summary_path)
 
 
