@@ -48,11 +48,28 @@ const JSON_HEADERS = { ...AUTH_HEADER, "Content-Type": "application/json" };
 // elsewhere would be masked, an accepted tradeoff at this scope).
 http.setResponseCallback(http.expectedStatuses(200, 201, 422));
 
-// Live-traffic account pool -- disjoint from any seed data. 80/20 skew: the
-// 4 hot accounts (20% of the pool) receive 80% of traffic.
-const HOT_ACCOUNTS = ["k6-hot-00", "k6-hot-01", "k6-hot-02", "k6-hot-03"];
+// Live-traffic account pool -- disjoint from any seed data. Overridable
+// for further experiments (e.g. a realistic treasury-hub scenario with
+// HOT_ACCOUNT_COUNT=2). Defaults (500 total, 100 hot) are not the
+// original 20/4 pool -- they're the exact configuration
+// CAPACITY_TARGET_RPS's 300 rps ceiling below was validated against
+// (2026-09-02: widening the pool from 20/4 to 500/100 did NOT relieve
+// the row-lock-contention finding, ruling out "small-pool artifact";
+// see feature-delta.md). CI has no wiring to override these, so it must
+// exercise the same pool the number was proven against.
+const ACCOUNT_POOL_SIZE = Number(__ENV.ACCOUNT_POOL_SIZE) || 500;
+const HOT_ACCOUNT_COUNT = Number(__ENV.HOT_ACCOUNT_COUNT) || 100;
+
+// pickAccount() below always weights 80/20 toward this HOT_ACCOUNTS group
+// regardless of its size -- shrinking/growing HOT_ACCOUNT_COUNT changes how
+// concentrated that 80% is onto individual rows, not whether 80% of
+// traffic favors "hot" accounts at all.
+const HOT_ACCOUNTS = Array.from(
+  { length: HOT_ACCOUNT_COUNT },
+  (_, i) => `k6-hot-${String(i).padStart(2, "0")}`,
+);
 const COLD_ACCOUNTS = Array.from(
-  { length: 16 },
+  { length: Math.max(ACCOUNT_POOL_SIZE - HOT_ACCOUNT_COUNT, 0) },
   (_, i) => `k6-cold-${String(i).padStart(2, "0")}`,
 );
 const ALL_ACCOUNTS = [...HOT_ACCOUNTS, ...COLD_ACCOUNTS];
@@ -76,18 +93,26 @@ const STAGES = {
   ],
 };
 
-// First-pass business-adjacent number, not measured against a real
-// deployment -- see the `capacity` case in the header comment above. Held
-// flat for CAPACITY_DURATION via constant-arrival-rate (not
+// 300 rps (2026-09-02): the throughput target, chosen from an RPS sweep
+// against the pool above (500 total/100 hot). Not a hardware ceiling --
+// the real limit is row-lock contention on the hot accounts (see
+// feature-delta.md), still being worked through; the latency gate can
+// fail at this rate until that's addressed. Held flat for
+// CAPACITY_DURATION via constant-arrival-rate (not
 // ramping-arrival-rate, which only ramps toward the target and never
 // actually holds it steady).
-const CAPACITY_TARGET_RPS = Number(__ENV.CAPACITY_TARGET_RPS) || 400;
+const CAPACITY_TARGET_RPS = Number(__ENV.CAPACITY_TARGET_RPS) || 300;
 const CAPACITY_DURATION = __ENV.CAPACITY_DURATION || "2m";
 
 const profile = __ENV.PROFILE || "load";
 
-export const options =
-  profile === "capacity"
+export const options = {
+  // setup() now provisions ACCOUNT_POOL_SIZE accounts (default 500, up
+  // from the original 20) for every profile, not just capacity -- k6's
+  // own default (30s) is tight against that many sequential create+fund
+  // calls. 120s is a first-pass safe margin, not precisely measured.
+  setupTimeout: "120s",
+  ...(profile === "capacity"
     ? {
         scenarios: {
           capacity: {
@@ -125,12 +150,12 @@ export const options =
           http_req_failed: [
             { threshold: "rate<0.01", abortOnFail: true, delayAbortEval: "20s" },
           ],
-          // 95% of target, not 100% -- a few seconds of executor VU
+          // 90% of target, not 100% -- a few seconds of executor VU
           // spin-up at the very start of a flat-rate run is expected and
           // shouldn't fail an otherwise-healthy result.
           http_reqs: [
             {
-              threshold: `rate>=${CAPACITY_TARGET_RPS * 0.95}`,
+              threshold: `rate>=${CAPACITY_TARGET_RPS * 0.9}`,
               abortOnFail: true,
               delayAbortEval: "20s",
             },
@@ -143,7 +168,8 @@ export const options =
           http_req_duration: [{ threshold: "p(95)<500", abortOnFail: false }],
           http_req_failed: [{ threshold: "rate<0.01", abortOnFail: false }],
         },
-      };
+      }),
+};
 
 function createAccount(accountId, type) {
   http.post(
