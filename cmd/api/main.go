@@ -26,6 +26,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	apphttp "ledgerops/internal/adapters/http"
 	"ledgerops/internal/adapters/postgres"
@@ -75,7 +76,12 @@ func main() {
 // must prove the database this binary is actually pointed at, not assume the
 // migration set proves it (that is CI job 6's job, not this one's).
 func probeStartup(ctx context.Context, appDSN string) error {
-	conn, err := pgx.Connect(ctx, appDSN)
+	poolConfig, err := pgxpool.ParseConfig(appDSN)
+	if err != nil {
+		return fmt.Errorf("parsing the probe DSN: %w", err)
+	}
+
+	conn, err := pgx.ConnectConfig(ctx, poolConfig.ConnConfig)
 	if err != nil {
 		return fmt.Errorf("opening a probe connection as the application role: %w", err)
 	}
