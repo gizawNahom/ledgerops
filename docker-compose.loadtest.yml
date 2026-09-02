@@ -1,0 +1,24 @@
+# Override, applied on top of docker-compose.yml, only by the `capacity`
+# load-test profile (load-test.yml) -- pins app+postgres to a fixed,
+# reproducible ceiling so a throughput/latency/error-rate breach means
+# something (real contention at a stated limit), not "whatever the runner
+# happened to have free that day." First-pass number, not validated against
+# a real deployment target -- same "deliberately modest, no prior numeric
+# decision exists" pattern as the rest of this script's constants.
+#
+# `docker compose` (v2 CLI) applies `deploy.resources.limits` outside swarm
+# mode, so no `--compatibility` flag or swarm init is needed.
+services:
+  postgres:
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
+
+  app:
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G

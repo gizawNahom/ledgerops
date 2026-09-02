@@ -1,10 +1,14 @@
 name: Load test
 
 # OPS-12 (feature-delta.md, 2026-08-29): manually-triggered only, never on
-# push/PR/schedule, never a required check, never blocking. Scope is
-# POST /transfers only, matching delivered slices 01-03. Thresholds are
-# informational (abortOnFail: false) — OPS-1 established no hosted
-# environment exists yet, so there is no real SLO to enforce here.
+# push/PR/schedule, never a required check, never blocking as a required
+# GitHub check. `load`/`stress`/`soak` thresholds stay informational
+# (abortOnFail: false) — OPS-1 established no hosted environment exists
+# yet, so there is no production SLO to enforce for those. `capacity`
+# (added 2026-09-02, replacing the reverted USL/tier-sweep approach) is
+# the exception: a real, gating (abortOnFail: true) check against a fixed,
+# pinned hardware ceiling (docker-compose.loadtest.yml) — provisional and
+# workflow_dispatch-only, but its k6 exit code is allowed to fail this job.
 on:
   workflow_dispatch:
     inputs:
@@ -15,6 +19,7 @@ on:
           - load
           - stress
           - soak
+          - capacity
         default: load
 
 jobs:
@@ -23,8 +28,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # `capacity` runs against docker-compose.loadtest.yml's pinned
+      # CPU/memory ceiling so a threshold breach reflects a stated hardware
+      # limit, not whatever the runner happened to have free. The other
+      # profiles keep the plain, unpinned stack.
       - name: Start the compose stack
-        run: docker compose up -d postgres migrate app prometheus grafana
+        run: |
+          if [ "${{ github.event.inputs.profile }}" = "capacity" ]; then
+            docker compose -f docker-compose.yml -f docker-compose.loadtest.yml \
+              up -d postgres migrate app prometheus grafana
+          else
+            docker compose up -d postgres migrate app prometheus grafana
+          fi
 
       # Same intent as the Makefile `wait-app` target (poll the real driving
       # port rather than trust a container healthcheck), but checks curl's
@@ -52,11 +67,11 @@ jobs:
         uses: grafana/setup-k6-action@v1
 
       - name: Run k6 (${{ github.event.inputs.profile }} profile)
-        # Thresholds are informational only (OPS-12) — abortOnFail: false in
-        # the script stops k6 from bailing mid-run, but a breached threshold
-        # still exits k6 non-zero. continue-on-error keeps that from failing
-        # this non-required job.
-        continue-on-error: true
+        # load/stress/soak: thresholds are informational (abortOnFail:
+        # false in the script), but a breached threshold still exits k6
+        # non-zero, so continue-on-error keeps that from failing this
+        # non-required job. capacity: real gating thresholds — let it fail.
+        continue-on-error: ${{ github.event.inputs.profile != 'capacity' }}
         env:
           PROFILE: ${{ github.event.inputs.profile }}
         run: |

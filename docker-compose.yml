@@ -15,8 +15,15 @@ services:
       POSTGRES_USER: ledgerops_migrate
       POSTGRES_PASSWORD: migrate-secret
       POSTGRES_DB: ledgerops
+    # -h 127.0.0.1 forces this over TCP, not the Unix socket. The official
+    # postgres image's first boot on a fresh volume runs initdb, briefly
+    # comes up listening on the socket ONLY (no TCP yet), then restarts to
+    # apply config and opens TCP after that. A socket-only pg_isready (the
+    # default, no -h) can report healthy during that first pass, letting
+    # `migrate` connect too early and hit connection refused. -h 127.0.0.1
+    # only succeeds once TCP is actually listening, i.e. after the restart.
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ledgerops_migrate -d ledgerops"]
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U ledgerops_migrate -d ledgerops"]
       interval: 2s
       timeout: 3s
       retries: 20

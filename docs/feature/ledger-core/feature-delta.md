@@ -2274,3 +2274,29 @@ trigger, k6 selected over vegeta for native Prometheus remote-write and
 Grafana dashboard reuse against the already-running observability stack
 (commit `5447e30`). Full detail in § Load, stress, and soak testing above.
 No existing OPS row is superseded.
+
+### OPS-12 amendment — `capacity` profile added, USL/tier-sweep reverted (2026-09-02)
+
+A first attempt at a real throughput SLO (business-derived 579 rps target,
+Universal Scalability Law contention/coherency curve-fitting, escalating
+multi-tier sweeps) was built (commit `3beab6f`) and then reverted (commit
+`add8b8f`): too complex, buggy in practice, and not understood well enough
+by the team to maintain — reopening OPS-1's "no SLO exists" stance.
+
+Replaced with a deliberately simple `capacity` profile in
+`tests/load/transfers.js`: a fixed `CAPACITY_TARGET_RPS` (400, first-pass,
+not measured against a real deployment) held flat via k6's
+`constant-arrival-rate` executor, run against a fixed, pinned hardware
+ceiling (`docker-compose.loadtest.yml`: 2 CPU / 2GB on `app` and
+`postgres`, also first-pass) rather than an escalating tier search. Unlike
+`load`/`stress`/`soak`, all three SLO dimensions are real gating
+thresholds (`abortOnFail: true`): `http_req_duration` p95 &lt; 500ms,
+`http_req_failed` rate &lt; 1%, and `http_reqs` rate &gt;= 95% of target.
+`load-test.yml` does not swallow this profile's exit code the way it does
+for the other three (`continue-on-error` is conditioned on `profile !=
+'capacity'`).
+
+Still `workflow_dispatch`-only, still not a required GitHub check — this
+remains a provisional, load-test-only SLO against a stated hardware limit,
+not a claimed production guarantee (no hosted environment exists yet, per
+OPS-1).
