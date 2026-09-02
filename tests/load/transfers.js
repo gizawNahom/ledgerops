@@ -95,14 +95,16 @@ export const options =
             rate: CAPACITY_TARGET_RPS,
             timeUnit: "1s",
             duration: CAPACITY_DURATION,
-            // Sized for the multi-actor mix's 5-15s think-time slices
-            // (getEntries/getVerdict), not just raw request latency --
-            // concurrent VUs needed is roughly rate * avg-iteration-
-            // duration, which is dominated by sleep() here, not response
-            // time. Too few would ceiling on VU exhaustion
-            // (dropped_iterations) rather than real app/hardware capacity.
-            preAllocatedVUs: 200,
-            maxVUs: 2000,
+            // 2000 -> 5000 -> 10000 progressively confirmed maxVUs (not
+            // app/postgres/pool/hardware, all separately ruled out) was
+            // the real ceiling: dropped_iterations 48-54 -> 34 -> ~3-5/s,
+            // throughput climbing toward the 400 target each time.
+            // Pushing once more to see if it reaches zero drops. Sized for
+            // the multi-actor mix's 5-15s think-time slices
+            // (getEntries/getVerdict) -- worst-case concurrent VU demand
+            // spikes well above the average when several land at once.
+            preAllocatedVUs: 2000,
+            maxVUs: 20000,
           },
         },
         thresholds: {
