@@ -1,81 +1,30 @@
 name: Load test
 
-# OPS-12 (feature-delta.md, amended 2026-08-31): manually-triggered only,
-# never on push/PR/schedule, never a required check. Scope widened from
-# POST /transfers only to the full endpoint mix (see feature-delta.md §
-# "Actor model and endpoint mix"). load/stress/soak/tier-sweep stay
-# informational (abortOnFail: false in the script); success is the one
-# profile that is genuinely enforced (abortOnFail: true) -- see §
-# "Success scenario".
+# OPS-12 (feature-delta.md, 2026-08-29): manually-triggered only, never on
+# push/PR/schedule, never a required check, never blocking. Scope is
+# POST /transfers only, matching delivered slices 01-03. Thresholds are
+# informational (abortOnFail: false) — OPS-1 established no hosted
+# environment exists yet, so there is no real SLO to enforce here.
 on:
   workflow_dispatch:
     inputs:
       profile:
-        description: "k6 profile"
+        description: "k6 stages profile"
         type: choice
         options:
           - load
           - stress
           - soak
-          - tier-sweep
-          - success
-          - usl-sweep
         default: load
-      tier:
-        description: "Hardware tier 1-4 (tier-sweep only; success always runs at Tier 4; usl-sweep ignores this and sweeps all four tiers automatically -- feature-delta.md § Hardware-tier extrapolation)"
-        type: choice
-        options:
-          - "1"
-          - "2"
-          - "3"
-          - "4"
-        default: "4"
 
 jobs:
-  k6-load-test:
+  k6-transfers:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      # Resource tiers (feature-delta.md § "Hardware-tier extrapolation"):
-      # capped to a single standard GitHub-hosted runner (4 vCPU/16GB total,
-      # shared by app+postgres+migrate+prometheus+grafana+k6 in this same
-      # job) -- no self-hosted or larger paid runner is provisioned. Applies
-      # only to tier-sweep (selected tier) and success (fixed at Tier 4);
-      # load/stress/soak run unconstrained, as before this amendment.
-      - name: Write tier resource-limit override (tier-sweep / success only)
-        run: |
-          PROFILE="${{ github.event.inputs.profile }}"
-          TIER="${{ github.event.inputs.tier }}"
-          if [ "$PROFILE" = "success" ]; then
-            TIER="4"
-          fi
-          if [ "$PROFILE" != "tier-sweep" ] && [ "$PROFILE" != "success" ]; then
-            echo "profile=$PROFILE does not use a resource tier; skipping override file"
-            echo "COMPOSE_TIER_ARGS=" >> "$GITHUB_ENV"
-            exit 0
-          fi
-          case "$TIER" in
-            1) APP_CPUS=0.25; APP_MEM=512m; DB_CPUS=0.25; DB_MEM=1g ;;
-            2) APP_CPUS=0.5;  APP_MEM=1g;   DB_CPUS=0.5;  DB_MEM=2g ;;
-            3) APP_CPUS=1.0;  APP_MEM=2g;   DB_CPUS=1.0;  DB_MEM=3g ;;
-            4) APP_CPUS=1.5;  APP_MEM=3g;   DB_CPUS=1.5;  DB_MEM=4g ;;
-            *) echo "unknown tier $TIER" >&2; exit 1 ;;
-          esac
-          cat > docker-compose.tier-override.yml <<EOF
-          services:
-            app:
-              cpus: ${APP_CPUS}
-              mem_limit: ${APP_MEM}
-            postgres:
-              cpus: ${DB_CPUS}
-              mem_limit: ${DB_MEM}
-          EOF
-          echo "Tier $TIER: app ${APP_CPUS} vCPU/${APP_MEM}, postgres ${DB_CPUS} vCPU/${DB_MEM}"
-          echo "COMPOSE_TIER_ARGS=-f docker-compose.tier-override.yml" >> "$GITHUB_ENV"
-
       - name: Start the compose stack
-        run: docker compose -f docker-compose.yml ${COMPOSE_TIER_ARGS} up -d postgres migrate app prometheus grafana
+        run: docker compose up -d postgres migrate app prometheus grafana
 
       # Same intent as the Makefile `wait-app` target (poll the real driving
       # port rather than trust a container healthcheck), but checks curl's
@@ -99,146 +48,35 @@ jobs:
           docker compose logs app
           exit 1
 
-      # Populated-at-scale (feature-delta.md § "Data state"): 300,000
-      # entries via 150,000 balanced two-leg transactions, inserted directly
-      # via SQL against the running `postgres` service, bypassing
-      # internal/app's domain logic entirely (Post, PostTransfer, DDD-14).
-      #
-      # LIMITATION, stated explicitly per the amendment: this seed is not
-      # automatically protected by the same invariant-enforcing code path
-      # production traffic goes through. If the domain core's rules change
-      # (e.g. a new required field, different balance semantics), this SQL
-      # must be manually kept in sync -- it will not fail loudly the way a
-      # real integration test would if the schema's shape stays compatible
-      # but the rules underneath it change.
-      #
-      # Verified 2026-08-31 against a throwaway Postgres 16 instance running
-      # migrations 0001/0002: 250 accounts, 150,000 transactions, 300,000
-      # entries, global imbalance 0, all stored balances reconciled, no
-      # negative balances (min observed 984,391,268 minor units against a
-      # 1,000,000,000 starting buffer), 69,060 distinct amounts spanning all
-      # three buckets, 150,000 distinct timestamps spread across ~180 days,
-      # ~14s wall-clock. Account ids (seed-0000..seed-0249) are disjoint from
-      # the live k6 traffic pool (k6-hot-*/k6-cold-*) defined in
-      # tests/load/transfers.js.
-      #
-      # NOTE ON INDENTATION: the heredoc body and its closing "SQL" marker
-      # below must stay at the same indentation level as this comment and
-      # the `docker compose exec` line -- YAML's block-scalar (|) dedents
-      # every line by the block's own base indentation before handing the
-      # script to bash, so keeping all lines flush at this level is what
-      # makes `<<'SQL'` ... `SQL` land correctly at column 0 in the actual
-      # shell script bash executes.
-      - name: Seed populated-at-scale dataset (300k entries)
-        run: |
-          docker compose exec -T -e PGPASSWORD=app-secret postgres psql -U ledgerops_app -d ledgerops <<'SQL'
-          BEGIN;
-
-          INSERT INTO accounts (id, kind, balance_minor, currency)
-          SELECT 'seed-' || lpad(i::text, 4, '0'), 'wallet', 1000000000, 'USD'
-          FROM generate_series(0, 249) AS i
-          ON CONFLICT (id) DO NOTHING;
-
-          WITH raw AS (
-              SELECT
-                  gs,
-                  random() AS bucket_draw
-              FROM generate_series(1, 150000) AS gs
-          ),
-          tx AS (
-              SELECT
-                  'seed-tx-' || gs::text                                        AS transaction_id,
-                  now() - (random() * interval '180 days')                      AS recorded_at,
-                  'seed-' || lpad((gs % 250)::text, 4, '0')                     AS debit_account,
-                  'seed-' || lpad(((gs + 1 + (gs % 248)) % 250)::text, 4, '0')  AS credit_account,
-                  (CASE
-                      WHEN bucket_draw < 0.70 THEN 1 + floor(random() * 1000)
-                      WHEN bucket_draw < 0.95 THEN 1000 + floor(random() * 49000)
-                      ELSE 50000 + floor(random() * 450000)
-                  END)::bigint                                                  AS amount_minor
-              FROM raw
-          ),
-          inserted_tx AS (
-              INSERT INTO transactions (id, recorded_at)
-              SELECT transaction_id, recorded_at FROM tx
-              RETURNING id
-          )
-          INSERT INTO entries (transaction_id, account_id, counterparty_id, amount_minor, currency, recorded_at, sequence)
-          SELECT transaction_id, debit_account, credit_account, -amount_minor, 'USD', recorded_at, 0 FROM tx
-          UNION ALL
-          SELECT transaction_id, credit_account, debit_account,  amount_minor, 'USD', recorded_at, 1 FROM tx;
-
-          UPDATE accounts a
-          SET balance_minor = a.balance_minor + net.delta
-          FROM (
-              SELECT account_id, sum(amount_minor) AS delta
-              FROM entries
-              WHERE transaction_id LIKE 'seed-tx-%'
-              GROUP BY account_id
-          ) net
-          WHERE a.id = net.account_id;
-
-          COMMIT;
-          SQL
-
       - name: Install k6
         uses: grafana/setup-k6-action@v1
 
       - name: Run k6 (${{ github.event.inputs.profile }} profile)
-        if: github.event.inputs.profile != 'usl-sweep'
-        # load/stress/soak/tier-sweep: thresholds are informational
-        # (abortOnFail: false in the script) -- continue-on-error keeps a
-        # breached threshold from failing this non-required job.
-        # success: abortOnFail: true in the script -- continue-on-error is
-        # deliberately NOT set for this profile, so a breach genuinely
-        # fails the job.
-        continue-on-error: ${{ github.event.inputs.profile != 'success' }}
+        # Thresholds are informational only (OPS-12) — abortOnFail: false in
+        # the script stops k6 from bailing mid-run, but a breached threshold
+        # still exits k6 non-zero. continue-on-error keeps that from failing
+        # this non-required job.
+        continue-on-error: true
         env:
           PROFILE: ${{ github.event.inputs.profile }}
-          TIER: ${{ github.event.inputs.profile == 'success' && '4' || github.event.inputs.tier }}
-          # Placeholder until the Tier 4 tier-sweep has been run once and
-          # its measured plateau recorded here (feature-delta.md §
-          # "Success scenario" -- the 579 rps business target is
-          # deliberately NOT this number; see that section for why).
-          SUCCESS_TARGET_RPS: ${{ vars.SUCCESS_TARGET_RPS || '10' }}
         run: |
           k6 run \
             --out experimental-prometheus-rw=http://localhost:9090/api/v1/write \
             --summary-export=k6-summary.json \
-            --tag tier="${TIER}" \
-            --tag profile="${PROFILE}" \
             tests/load/transfers.js
 
-      # Fully automated version of tier-sweep: owns resizing app+postgres
-      # across all four tiers in sequence (docker compose recreate, not
-      # this job's own tier-override step above, which deliberately skips
-      # for this profile -- see run_usl_sweep.py's TIERS table, the single
-      # source of truth this path uses), running transfers.js's fixed-rate
-      # mode at escalating rates per tier, detecting each tier's plateau in
-      # code, and finally invoking fit_usl.py automatically. Informational
-      # -- continue-on-error stays true, same as tier-sweep/load/stress/soak.
-      - name: Run automated USL sweep (all four tiers)
-        if: github.event.inputs.profile == 'usl-sweep'
-        continue-on-error: true
-        run: |
-          python3 tests/load/analysis/run_usl_sweep.py \
-            --target-rps 579 \
-            --out-csv tier-measurements.csv \
-            --summary-file "$GITHUB_STEP_SUMMARY"
-
       - name: Publish k6 summary
-        if: always() && github.event.inputs.profile != 'usl-sweep'
-        env:
-          PROFILE: ${{ github.event.inputs.profile }}
-          TIER: ${{ github.event.inputs.profile == 'success' && '4' || github.event.inputs.tier }}
+        if: always()
         run: |
           if [ -f k6-summary.json ]; then
-            echo "## k6 ${PROFILE} profile (tier ${TIER})" >> "$GITHUB_STEP_SUMMARY"
+            echo "## k6 load test (${PROFILE} profile)" >> "$GITHUB_STEP_SUMMARY"
             echo '```json' >> "$GITHUB_STEP_SUMMARY"
             cat k6-summary.json >> "$GITHUB_STEP_SUMMARY"
             echo '```' >> "$GITHUB_STEP_SUMMARY"
           fi
+        env:
+          PROFILE: ${{ github.event.inputs.profile }}
 
       - name: Tear down compose stack
         if: always()
-        run: docker compose -f docker-compose.yml ${COMPOSE_TIER_ARGS} down -v
+        run: docker compose down -v

@@ -1,5 +1,0 @@
-tier,throughput_rps,p95_latency_ms,source
-1,42.0,180,ci
-2,78.0,210,ci
-3,135.0,260,ci
-4,171.0,340,ci
