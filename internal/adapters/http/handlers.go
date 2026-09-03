@@ -71,6 +71,41 @@ func parseAccountKind(text string) (domain.AccountKind, bool) {
 	}
 }
 
+// provisionTenantRequest is the wire shape POST /tenants accepts.
+type provisionTenantRequest struct {
+	Name string `json:"name"`
+}
+
+// provisionTenantHandler mints a new tenant's identity and credential
+// through the application shell (internal/app/usecases.go, step 01-03).
+// requireOperatorKey (unmodified, DDD-22) already gates this route: only the
+// platform-admin credential ever reaches this handler.
+func provisionTenantHandler(ledger *app.Ledger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var body provisionTenantRequest
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeRefusal(w, r, http.StatusBadRequest, "malformed_request", nil)
+			return
+		}
+		if body.Name == "" {
+			writeRefusal(w, r, http.StatusBadRequest, "malformed_request", nil)
+			return
+		}
+
+		provisioned, err := ledger.ProvisionTenant(r.Context(), body.Name)
+		if err != nil {
+			writeDomainError(w, r, err)
+			return
+		}
+
+		writeJSON(w, http.StatusCreated, map[string]any{
+			"tenant_id":  provisioned.TenantID,
+			"name":       provisioned.Name,
+			"tenant_key": provisioned.TenantKey,
+		})
+	}
+}
+
 // getBalanceHandler reads one account's stored balance.
 func getBalanceHandler(ledger *app.Ledger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {

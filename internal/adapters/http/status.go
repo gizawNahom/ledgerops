@@ -44,6 +44,21 @@ func writeViolation(w http.ResponseWriter, r *http.Request, v domain.Violation) 
 			"from_currency": v.FromCurrency(),
 			"to_currency":   v.ToCurrency(),
 		})
+	case domain.TenantAlreadyExists:
+		writeRefusal(w, r, http.StatusConflict, string(v.Kind()), map[string]any{
+			"tenant": v.Tenant(),
+		})
+	case domain.TenantNotFound:
+		// Not reachable through a driving port yet -- POST /tenants (this
+		// step) never looks a tenant up by id, so the courtesy-check branch
+		// in ProvisionTenant only ever produces TenantAlreadyExists or nil.
+		// Wired now so the `exhaustive` linter passes the moment
+		// domain.TenantNotFound exists (it has, since step 01-02); the
+		// caller that actually produces this refusal (trial-balance/
+		// verify-tenant lookup) lands in step 03-01/03-02.
+		writeRefusal(w, r, http.StatusNotFound, string(v.Kind()), map[string]any{
+			"tenant": v.Tenant(),
+		})
 	case domain.Unbalanced:
 		// Not a wire member (ADR-008): no caller input can reach it. If it
 		// escapes anyway, that is a defect in the rulebook, not a refusal —

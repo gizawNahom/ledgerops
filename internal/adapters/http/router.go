@@ -106,17 +106,13 @@ func NewRouter(deps Deps) http.Handler {
 	router.Group(func(protected chi.Router) {
 		protected.Use(requireOperatorKey(deps.OperatorKey))
 
-		// POST /tenants (multitenancy, DISTILL 2026-09-03, Mandate 7 RED
-		// scaffold). Mounted under the existing operator-key group: DDD-22
-		// reuses requireOperatorKey unmodified as the platform-admin gate, so
-		// an unauthenticated/wrong-key caller already gets the correct
-		// unidentified_caller refusal for free, and only the happy path
-		// reaches the scaffold below. ProvisionTenant does not exist yet
-		// (internal/app/usecases.go) — ledger-core's own scaffold() helper
-		// (below) is reused verbatim rather than inventing a second RED
-		// convention: a real HTTP response (501, __SCAFFOLD__ body) is what
-		// keeps this an acceptance-test RED, not a BROKEN/undefined-route.
-		protected.Post("/tenants", scaffold("provision_tenant"))
+		// POST /tenants (multitenancy, real as of step 01-04). Mounted under
+		// the existing operator-key group: DDD-22 reuses requireOperatorKey
+		// unmodified as the platform-admin gate, so an unauthenticated/
+		// wrong-key/tenant-scoped caller is already refused
+		// unidentified_caller by its existing string-compare before the
+		// handler below is ever reached — no new gating logic needed here.
+		protected.Post("/tenants", provisionTenantHandler(ledger))
 
 		protected.Post("/accounts", createAccountHandler(ledger))
 		protected.Get("/accounts/{id}", getBalanceHandler(ledger))

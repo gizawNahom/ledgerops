@@ -9,7 +9,7 @@ Feature: The operator provisions a tenant and receives a scoped credential
   that only ever sees that tenant's own accounts. Decision enabled: whether
   to hand the credential to the new customer and consider them onboarded.
 
-  @pending @real-io @adapter-integration @contract-shape:bounded-change
+  @real-io @adapter-integration @contract-shape:bounded-change
   Scenario: Provisioning a tenant issues a scoped credential
     Given the operator holds the platform-admin credential
     And a fresh store with no tenants provisioned
@@ -17,7 +17,7 @@ Feature: The operator provisions a tenant and receives a scoped credential
     Then the response names tenant "Acme Wallet" with a distinct tenant id and tenant credential
     And the tenant credential is distinct from the platform-admin credential
 
-  @pending @real-io @contract-shape:bounded-change
+  @real-io @contract-shape:bounded-change
   Scenario: Two tenants can be provisioned independently
     Given the operator holds the platform-admin credential
     And tenant "Acme Wallet" has been provisioned
@@ -25,7 +25,7 @@ Feature: The operator provisions a tenant and receives a scoped credential
     Then the response names tenant "Beacon Marketplace" with a distinct tenant id and tenant credential
     And tenant "Acme Wallet" remains provisioned with its original credential
 
-  @pending @real-io @contract-shape:unbounded-preservation
+  @real-io @contract-shape:unbounded-preservation
   Scenario: A duplicate tenant name is refused
     Given the operator holds the platform-admin credential
     And tenant "Acme Wallet" has been provisioned
@@ -33,7 +33,7 @@ Feature: The operator provisions a tenant and receives a scoped credential
     Then the response is refused as a tenant that already exists
     And no second tenant is created
 
-  @pending @real-io @contract-shape:unbounded-preservation
+  @real-io @contract-shape:unbounded-preservation
   Scenario: A tenant's own credential cannot provision another tenant
     Given tenant "Acme Wallet" has been provisioned
     And the caller holds tenant "Acme Wallet"'s own credential, not the platform-admin credential
@@ -41,7 +41,7 @@ Feature: The operator provisions a tenant and receives a scoped credential
     Then the response is refused as unidentified
     And no tenant is created
 
-  @pending @real-io @contract-shape:unbounded-preservation
+  @real-io @contract-shape:unbounded-preservation
   Scenario: An unissued credential cannot provision a tenant
     Given the caller presents an unissued credential
     When that caller attempts to provision a tenant named "Ghost Co"
