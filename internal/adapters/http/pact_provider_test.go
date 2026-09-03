@@ -225,7 +225,7 @@ func (s *pactFakeStore) corruptStoredBalance(accountID string, balance domain.Mo
 	if !ok {
 		return fmt.Errorf("pactFakeStore: unknown account %q", accountID)
 	}
-	rebuilt, err := domain.NewAccount(account.ID(), account.Kind(), balance)
+	rebuilt, err := domain.NewAccount(account.TenantID(), account.ID(), account.Kind(), balance)
 	if err != nil {
 		return err
 	}
@@ -264,7 +264,7 @@ type pactFakeAccountRepository struct{ store *pactFakeStore }
 
 var _ ports.AccountRepository = pactFakeAccountRepository{}
 
-func (r pactFakeAccountRepository) LockForUpdate(ctx context.Context, accountIDs []string) ([]domain.Account, error) {
+func (r pactFakeAccountRepository) LockForUpdate(ctx context.Context, tenantID string, accountIDs []string) ([]domain.Account, error) {
 	seen := make(map[string]bool, len(accountIDs))
 	sorted := make([]string, 0, len(accountIDs))
 	for _, id := range accountIDs {
@@ -285,7 +285,7 @@ func (r pactFakeAccountRepository) LockForUpdate(ctx context.Context, accountIDs
 	return accounts, nil
 }
 
-func (r pactFakeAccountRepository) ApplyDeltas(ctx context.Context, deltas []domain.BalanceDelta) error {
+func (r pactFakeAccountRepository) ApplyDeltas(ctx context.Context, tenantID string, deltas []domain.BalanceDelta) error {
 	for _, delta := range deltas {
 		account, ok := r.store.accounts[delta.AccountID]
 		if !ok {
@@ -300,7 +300,7 @@ func (r pactFakeAccountRepository) ApplyDeltas(ctx context.Context, deltas []dom
 	return nil
 }
 
-func (r pactFakeAccountRepository) Create(ctx context.Context, account domain.Account) error {
+func (r pactFakeAccountRepository) Create(ctx context.Context, tenantID string, account domain.Account) error {
 	if _, exists := r.store.accounts[account.ID()]; exists {
 		return fmt.Errorf("pactFakeAccountRepository: account %q already exists", account.ID())
 	}
@@ -308,7 +308,7 @@ func (r pactFakeAccountRepository) Create(ctx context.Context, account domain.Ac
 	return nil
 }
 
-func (r pactFakeAccountRepository) Get(ctx context.Context, accountID string) (domain.Account, error) {
+func (r pactFakeAccountRepository) Get(ctx context.Context, tenantID string, accountID string) (domain.Account, error) {
 	account, ok := r.store.accounts[accountID]
 	if !ok {
 		return domain.Account{}, domain.NewUnknownAccount(accountID)
@@ -316,7 +316,7 @@ func (r pactFakeAccountRepository) Get(ctx context.Context, accountID string) (d
 	return account, nil
 }
 
-func (r pactFakeAccountRepository) All(ctx context.Context) ([]domain.Account, error) {
+func (r pactFakeAccountRepository) All(ctx context.Context, tenantID string) ([]domain.Account, error) {
 	ids := make([]string, 0, len(r.store.accounts))
 	for id := range r.store.accounts {
 		ids = append(ids, id)
@@ -333,7 +333,7 @@ type pactFakeTransactionRepository struct{ store *pactFakeStore }
 
 var _ ports.TransactionRepository = pactFakeTransactionRepository{}
 
-func (r pactFakeTransactionRepository) Append(ctx context.Context, posting domain.Posting) error {
+func (r pactFakeTransactionRepository) Append(ctx context.Context, tenantID string, posting domain.Posting) error {
 	if _, exists := r.store.postings[posting.Transaction.ID()]; exists {
 		return fmt.Errorf("pactFakeTransactionRepository: transaction %q already recorded", posting.Transaction.ID())
 	}
@@ -342,7 +342,7 @@ func (r pactFakeTransactionRepository) Append(ctx context.Context, posting domai
 	return nil
 }
 
-func (r pactFakeTransactionRepository) Get(ctx context.Context, transactionID string) (domain.Posting, error) {
+func (r pactFakeTransactionRepository) Get(ctx context.Context, tenantID string, transactionID string) (domain.Posting, error) {
 	posting, ok := r.store.postings[transactionID]
 	if !ok {
 		return domain.Posting{}, fmt.Errorf("pactFakeTransactionRepository: unknown transaction %q", transactionID)
@@ -350,7 +350,7 @@ func (r pactFakeTransactionRepository) Get(ctx context.Context, transactionID st
 	return posting, nil
 }
 
-func (r pactFakeTransactionRepository) EntriesFor(ctx context.Context, accountID string) ([]domain.Entry, error) {
+func (r pactFakeTransactionRepository) EntriesFor(ctx context.Context, scope ports.TenantScope, accountID string) ([]domain.Entry, error) {
 	var entries []domain.Entry
 	for _, entry := range r.store.entries {
 		if entry.AccountID() == accountID {
@@ -360,7 +360,7 @@ func (r pactFakeTransactionRepository) EntriesFor(ctx context.Context, accountID
 	return entries, nil
 }
 
-func (r pactFakeTransactionRepository) TrialBalance(ctx context.Context) (domain.Money, int, error) {
+func (r pactFakeTransactionRepository) TrialBalance(ctx context.Context, scope ports.TenantScope) (domain.Money, int, error) {
 	currency := "USD"
 	var sumMinor int64
 	for _, entry := range r.store.entries {
@@ -374,7 +374,7 @@ func (r pactFakeTransactionRepository) TrialBalance(ctx context.Context) (domain
 	return total, len(r.store.entries), nil
 }
 
-func (r pactFakeTransactionRepository) ComputedBalances(ctx context.Context) (map[string]domain.Money, error) {
+func (r pactFakeTransactionRepository) ComputedBalances(ctx context.Context, scope ports.TenantScope) (map[string]domain.Money, error) {
 	sums := map[string]int64{}
 	currencies := map[string]string{}
 	for _, entry := range r.store.entries {

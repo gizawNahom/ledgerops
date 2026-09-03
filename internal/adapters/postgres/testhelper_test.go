@@ -17,7 +17,17 @@ import (
 
 	"ledgerops/internal/adapters/postgres"
 	"ledgerops/internal/app/ports"
+	"ledgerops/internal/domain"
 )
+
+// testTenantID is the tenant every repository test in this package seeds and
+// queries against unless a scenario is specifically about tenant isolation
+// (that isolation itself is proven for real here, against PostgreSQL — WS
+// strategy C, docs/feature/multitenancy/feature-delta.md). Migration 0003
+// seeds this same identity as the legacy sentinel every pre-existing row
+// backfills to; reusing it keeps these single-tenant wiring tests aligned
+// with what a freshly migrated database already contains.
+const testTenantID = "tnt_legacy_seed"
 
 // migratedStore brings up PostgreSQL 16, migrates it from zero as the
 // privileged role (step 01-02), and opens the store as the application role
@@ -96,4 +106,27 @@ func beginUOW(t *testing.T, store ports.Store) ports.UnitOfWork {
 		t.Fatalf("beginning a unit of work: %v", err)
 	}
 	return uow
+}
+
+// provisionTenant creates and commits a tenant row directly, in its own unit
+// of work — accounts.tenant_id/entries.tenant_id/transactions.tenant_id all
+// carry a REFERENCES tenants (tenant_id) foreign key (migration 0003), so
+// any test seeding an account or a posting under an id other than the
+// migration's own tnt_legacy_seed sentinel must provision that tenant row
+// first, or the seeding insert aborts on the FK constraint.
+func provisionTenant(t *testing.T, store ports.Store, tenantID, name string) {
+	t.Helper()
+	ctx := context.Background()
+
+	tenant, err := domain.NewTenant(tenantID, name, "tk_test-credential-"+tenantID)
+	if err != nil {
+		t.Fatalf("NewTenant(%q): %v", tenantID, err)
+	}
+	uow := beginUOW(t, store)
+	if err := uow.Tenants().Create(ctx, tenant); err != nil {
+		t.Fatalf("provisioning tenant %q: %v", tenantID, err)
+	}
+	if err := uow.Commit(ctx); err != nil {
+		t.Fatalf("committing tenant %q: %v", tenantID, err)
+	}
 }

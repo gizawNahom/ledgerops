@@ -8,6 +8,107 @@ import (
 	"ledgerops/internal/domain"
 )
 
+// TestAccountRepository_Create_TwoTenantsCanIndependentlyReuseTheSameAccountID
+// covers I9's rescoping (step 02-02): account-name uniqueness moved from
+// global id uniqueness to the composite (tenant_id, id) primary key
+// (migration 0003). Two different tenants opening an account under the
+// identical id must both succeed, and each tenant's Get must return only
+// its own account.
+func TestAccountRepository_Create_TwoTenantsCanIndependentlyReuseTheSameAccountID(t *testing.T) {
+	store := migratedStore(t)
+	ctx := context.Background()
+
+	const (
+		tenantA = "tnt_acme"
+		tenantB = "tnt_beacon"
+	)
+	provisionTenant(t, store, tenantA, "acme-i9")
+	provisionTenant(t, store, tenantB, "beacon-i9")
+
+	setup := beginUOW(t, store)
+	acmeAccount, err := domain.NewAccount(tenantA, "wallet-1", domain.Wallet, zeroUSD(t))
+	if err != nil {
+		t.Fatalf("NewAccount(tenantA): %v", err)
+	}
+	if err := setup.Accounts().Create(ctx, tenantA, acmeAccount); err != nil {
+		t.Fatalf("Create(tenantA, wallet-1): %v", err)
+	}
+	beaconAccount, err := domain.NewAccount(tenantB, "wallet-1", domain.Wallet, zeroUSD(t))
+	if err != nil {
+		t.Fatalf("NewAccount(tenantB): %v", err)
+	}
+	if err := setup.Accounts().Create(ctx, tenantB, beaconAccount); err != nil {
+		t.Fatalf("Create(tenantB, wallet-1) was refused by a stale global-uniqueness constraint: %v", err)
+	}
+	if err := setup.Commit(ctx); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	readUOW := beginUOW(t, store)
+	gotA, err := readUOW.Accounts().Get(ctx, tenantA, "wallet-1")
+	if err != nil {
+		t.Fatalf("Get(tenantA, wallet-1): %v", err)
+	}
+	gotB, err := readUOW.Accounts().Get(ctx, tenantB, "wallet-1")
+	_ = readUOW.Rollback(ctx)
+	if err != nil {
+		t.Fatalf("Get(tenantB, wallet-1): %v", err)
+	}
+
+	if gotA.TenantID() != tenantA {
+		t.Fatalf("tenantA's Get returned TenantID() = %q, want %q", gotA.TenantID(), tenantA)
+	}
+	if gotB.TenantID() != tenantB {
+		t.Fatalf("tenantB's Get returned TenantID() = %q, want %q", gotB.TenantID(), tenantB)
+	}
+}
+
+// TestAccountRepository_Get_NeverReturnsAnotherTenantsAccount covers the
+// tenant-scoped read half of I8/I9: a query for one tenant's account never
+// returns another tenant's row, even when both hold an account under the
+// same id.
+func TestAccountRepository_Get_NeverReturnsAnotherTenantsAccount(t *testing.T) {
+	store := migratedStore(t)
+	ctx := context.Background()
+
+	const (
+		tenantA = "tnt_alpha"
+		tenantB = "tnt_bravo"
+	)
+	provisionTenant(t, store, tenantA, "alpha-scoped-read")
+	provisionTenant(t, store, tenantB, "bravo-scoped-read")
+
+	setup := beginUOW(t, store)
+	account, err := domain.NewAccount(tenantA, "shared-name", domain.Wallet, zeroUSD(t))
+	if err != nil {
+		t.Fatalf("NewAccount: %v", err)
+	}
+	if err := setup.Accounts().Create(ctx, tenantA, account); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := setup.Commit(ctx); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	readUOW := beginUOW(t, store)
+	_, err = readUOW.Accounts().Get(ctx, tenantB, "shared-name")
+	_ = readUOW.Rollback(ctx)
+
+	var violation domain.Violation
+	if !errors.As(err, &violation) || violation.Kind() != domain.UnknownAccount {
+		t.Fatalf("expected account_not_found for a cross-tenant read (even though the id exists under tenantA), got %v", err)
+	}
+}
+
+func zeroUSD(t *testing.T) domain.Money {
+	t.Helper()
+	zero, err := domain.NewMoney(0, "USD")
+	if err != nil {
+		t.Fatalf("NewMoney: %v", err)
+	}
+	return zero
+}
+
 func TestAccountRepository_CreateThenGet_RoundTripsThroughRealPostgres(t *testing.T) {
 	store := migratedStore(t)
 	ctx := context.Background()
@@ -19,7 +120,7 @@ func TestAccountRepository_CreateThenGet_RoundTripsThroughRealPostgres(t *testin
 	}
 
 	readUOW := beginUOW(t, store)
-	got, err := readUOW.Accounts().Get(ctx, "wallet-create")
+	got, err := readUOW.Accounts().Get(ctx, testTenantID, "wallet-create")
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -41,7 +142,7 @@ func TestAccountRepository_Get_UnknownAccountIsRefused(t *testing.T) {
 	ctx := context.Background()
 
 	uow := beginUOW(t, store)
-	_, err := uow.Accounts().Get(ctx, "never-opened")
+	_, err := uow.Accounts().Get(ctx, testTenantID, "never-opened")
 	_ = uow.Rollback(ctx)
 
 	var violation domain.Violation
@@ -67,7 +168,7 @@ func TestAccountRepository_LockForUpdate_ReturnsAscendingOrderAndSkipsUnknownIDs
 	// silently omit the unknown id (domain.Post is what names it, not the
 	// repository).
 	lockUOW := beginUOW(t, store)
-	accounts, err := lockUOW.Accounts().LockForUpdate(ctx, []string{"charlie", "ghost", "bravo", "alpha"})
+	accounts, err := lockUOW.Accounts().LockForUpdate(ctx, testTenantID, []string{"charlie", "ghost", "bravo", "alpha"})
 	_ = lockUOW.Rollback(ctx)
 	if err != nil {
 		t.Fatalf("LockForUpdate: %v", err)
@@ -100,10 +201,10 @@ func TestAccountRepository_ApplyDeltas_UpdatesStoredBalanceWithinOneTransaction(
 		t.Fatalf("NewMoney: %v", err)
 	}
 	applyUOW := beginUOW(t, store)
-	if _, err := applyUOW.Accounts().LockForUpdate(ctx, []string{"wallet-delta"}); err != nil {
+	if _, err := applyUOW.Accounts().LockForUpdate(ctx, testTenantID, []string{"wallet-delta"}); err != nil {
 		t.Fatalf("LockForUpdate: %v", err)
 	}
-	if err := applyUOW.Accounts().ApplyDeltas(ctx, []domain.BalanceDelta{
+	if err := applyUOW.Accounts().ApplyDeltas(ctx, testTenantID, []domain.BalanceDelta{
 		{AccountID: "wallet-delta", Delta: delta},
 	}); err != nil {
 		t.Fatalf("ApplyDeltas: %v", err)
@@ -113,7 +214,7 @@ func TestAccountRepository_ApplyDeltas_UpdatesStoredBalanceWithinOneTransaction(
 	}
 
 	readUOW := beginUOW(t, store)
-	got, err := readUOW.Accounts().Get(ctx, "wallet-delta")
+	got, err := readUOW.Accounts().Get(ctx, testTenantID, "wallet-delta")
 	_ = readUOW.Rollback(ctx)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
@@ -138,10 +239,10 @@ func TestAccountRepository_ApplyDeltas_RolledBackTransactionLeavesBalanceUnchang
 		t.Fatalf("NewMoney: %v", err)
 	}
 	applyUOW := beginUOW(t, store)
-	if _, err := applyUOW.Accounts().LockForUpdate(ctx, []string{"wallet-rollback"}); err != nil {
+	if _, err := applyUOW.Accounts().LockForUpdate(ctx, testTenantID, []string{"wallet-rollback"}); err != nil {
 		t.Fatalf("LockForUpdate: %v", err)
 	}
-	if err := applyUOW.Accounts().ApplyDeltas(ctx, []domain.BalanceDelta{
+	if err := applyUOW.Accounts().ApplyDeltas(ctx, testTenantID, []domain.BalanceDelta{
 		{AccountID: "wallet-rollback", Delta: delta},
 	}); err != nil {
 		t.Fatalf("ApplyDeltas: %v", err)
@@ -151,7 +252,7 @@ func TestAccountRepository_ApplyDeltas_RolledBackTransactionLeavesBalanceUnchang
 	}
 
 	readUOW := beginUOW(t, store)
-	got, err := readUOW.Accounts().Get(ctx, "wallet-rollback")
+	got, err := readUOW.Accounts().Get(ctx, testTenantID, "wallet-rollback")
 	_ = readUOW.Rollback(ctx)
 	if err != nil {
 		t.Fatalf("Get: %v", err)

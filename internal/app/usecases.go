@@ -31,6 +31,18 @@ import (
 // currently unreachable through any driving port, by design).
 const ledgerCurrency = "USD"
 
+// legacyTenantID is the interim, single-tenant caller identity every
+// write-path use case scopes its repository calls to until a later step
+// (02-04) wires real per-request tenant extraction through the HTTP layer.
+// It matches the sentinel every pre-existing row was backfilled to
+// (migration 0003_tenants.up.sql, tnt_legacy_seed) — not a new identity, the
+// same one already on disk. Widening AccountRepository/TransactionRepository
+// to a required tenant_id (step 02-02) forces every write-path call site to
+// name a tenant explicitly; naming the existing sentinel here is what keeps
+// today's single-tenant driving ports (PostTransfer, CreateAccount,
+// GetBalance) behaving exactly as before, with no HTTP-layer change.
+const legacyTenantID = "tnt_legacy_seed"
+
 // ErrIdempotencyKeyConflict marks a same-key request whose fingerprint does
 // not match the one the key was first claimed with (DDD-8). This is an
 // application-shell decision, not a domain.ViolationKind member: no rule in
@@ -143,7 +155,7 @@ func (l *Ledger) PostTransfer(ctx context.Context, cmd TransferRequest) (Result,
 		if claim.Fingerprint != cmd.Fingerprint {
 			return Result{}, ErrIdempotencyKeyConflict
 		}
-		posting, err := uow.Transactions().Get(ctx, claim.TransactionID)
+		posting, err := uow.Transactions().Get(ctx, legacyTenantID, claim.TransactionID)
 		if err != nil {
 			return Result{}, fmt.Errorf("re-rendering replay for transaction %q: %w", claim.TransactionID, err)
 		}
@@ -156,7 +168,7 @@ func (l *Ledger) PostTransfer(ctx context.Context, cmd TransferRequest) (Result,
 
 	// Read (impure): lock the touched accounts in ascending id order
 	// (DDD-6) — the ordering is the repository's job, not this call site's.
-	snapshots, err := uow.Accounts().LockForUpdate(ctx, []string{cmd.From, cmd.To})
+	snapshots, err := uow.Accounts().LockForUpdate(ctx, legacyTenantID, []string{cmd.From, cmd.To})
 	if err != nil {
 		return Result{}, fmt.Errorf("locking accounts for transfer: %w", err)
 	}
@@ -166,9 +178,10 @@ func (l *Ledger) PostTransfer(ctx context.Context, cmd TransferRequest) (Result,
 	// Decide (pure): domain.Post is the whole rulebook. Nothing above or
 	// below this line evaluates I1 or I4.
 	posting, err := domain.Post(domain.TransferCommand{
-		From:   cmd.From,
-		To:     cmd.To,
-		Amount: cmd.Amount,
+		From:     cmd.From,
+		To:       cmd.To,
+		Amount:   cmd.Amount,
+		TenantID: legacyTenantID,
 	}, snapshots, now, transactionID)
 	if err != nil {
 		return Result{}, err
@@ -177,10 +190,10 @@ func (l *Ledger) PostTransfer(ctx context.Context, cmd TransferRequest) (Result,
 	// Write (impure): the transaction, its entries, the balance deltas, and
 	// the idempotency claim all land in the same transaction, so there is no
 	// window in which one exists without the others (ADR-005).
-	if err := uow.Transactions().Append(ctx, posting); err != nil {
+	if err := uow.Transactions().Append(ctx, legacyTenantID, posting); err != nil {
 		return Result{}, fmt.Errorf("recording transaction %q: %w", transactionID, err)
 	}
-	if err := uow.Accounts().ApplyDeltas(ctx, posting.Deltas); err != nil {
+	if err := uow.Accounts().ApplyDeltas(ctx, legacyTenantID, posting.Deltas); err != nil {
 		return Result{}, fmt.Errorf("applying balance deltas for transaction %q: %w", transactionID, err)
 	}
 	if _, err := uow.Idempotency().Claim(ctx, cmd.IdempotencyKey, cmd.Fingerprint, transactionID); err != nil {
@@ -228,12 +241,12 @@ func (l *Ledger) CreateAccount(ctx context.Context, accountID string, kind domai
 			return err
 		}
 
-		account, err := domain.OpenAccount(accountID, kind, openingBalance, alreadyOpen)
+		account, err := domain.OpenAccount(legacyTenantID, accountID, kind, openingBalance, alreadyOpen)
 		if err != nil {
 			return err
 		}
 
-		if err := uow.Accounts().Create(ctx, account); err != nil {
+		if err := uow.Accounts().Create(ctx, legacyTenantID, account); err != nil {
 			return fmt.Errorf("opening account %q: %w", accountID, err)
 		}
 		return nil
@@ -245,7 +258,7 @@ func (l *Ledger) CreateAccount(ctx context.Context, accountID string, kind domai
 // the expected shape of "no", not an error to propagate; anything else (a
 // genuine infrastructure failure) is.
 func (l *Ledger) accountAlreadyOpen(ctx context.Context, uow ports.UnitOfWork, accountID string) (bool, error) {
-	_, err := uow.Accounts().Get(ctx, accountID)
+	_, err := uow.Accounts().Get(ctx, legacyTenantID, accountID)
 	if err == nil {
 		return true, nil
 	}
@@ -331,7 +344,7 @@ type ProvisionedTenant struct {
 func (l *Ledger) GetBalance(ctx context.Context, accountID string) (domain.Account, error) {
 	return withUnitOfWork(ctx, l.store, fmt.Sprintf("reading balance for %q", accountID),
 		func(uow ports.UnitOfWork) (domain.Account, error) {
-			return uow.Accounts().Get(ctx, accountID)
+			return uow.Accounts().Get(ctx, legacyTenantID, accountID)
 		})
 }
 
@@ -358,10 +371,10 @@ type TracedEntry struct {
 func (l *Ledger) GetEntries(ctx context.Context, accountID string) ([]TracedEntry, error) {
 	entries, err := withUnitOfWork(ctx, l.store, fmt.Sprintf("reading entries for %q", accountID),
 		func(uow ports.UnitOfWork) ([]domain.Entry, error) {
-			if _, err := uow.Accounts().Get(ctx, accountID); err != nil {
+			if _, err := uow.Accounts().Get(ctx, legacyTenantID, accountID); err != nil {
 				return nil, err
 			}
-			return uow.Transactions().EntriesFor(ctx, accountID)
+			return uow.Transactions().EntriesFor(ctx, ports.ScopedToTenant(legacyTenantID), accountID)
 		})
 	if err != nil {
 		return nil, err
@@ -407,15 +420,15 @@ func (l *Ledger) VerifyBooks(ctx context.Context) (BooksReport, error) {
 
 	report, err := withUnitOfWork(ctx, l.store, "verifying the books",
 		func(uow ports.UnitOfWork) (BooksReport, error) {
-			accounts, err := uow.Accounts().All(ctx)
+			accounts, err := uow.Accounts().All(ctx, legacyTenantID)
 			if err != nil {
 				return BooksReport{}, fmt.Errorf("reading every account: %w", err)
 			}
-			computed, err := uow.Transactions().ComputedBalances(ctx)
+			computed, err := uow.Transactions().ComputedBalances(ctx, ports.Unscoped())
 			if err != nil {
 				return BooksReport{}, fmt.Errorf("computing balances from entries: %w", err)
 			}
-			trialBalance, entryCount, err := uow.Transactions().TrialBalance(ctx)
+			trialBalance, entryCount, err := uow.Transactions().TrialBalance(ctx, ports.Unscoped())
 			if err != nil {
 				return BooksReport{}, fmt.Errorf("computing the trial balance: %w", err)
 			}

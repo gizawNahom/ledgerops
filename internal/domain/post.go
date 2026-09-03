@@ -115,11 +115,11 @@ func findAccount(snapshots []Account, id string) (Account, bool) {
 // retry apart from a name collision between two independent callers, and
 // guessing "retry" would hand the second caller an account somebody else
 // created.
-func OpenAccount(id string, kind AccountKind, zero Money, alreadyOpen bool) (Account, error) {
+func OpenAccount(tenantID, id string, kind AccountKind, zero Money, alreadyOpen bool) (Account, error) {
 	if alreadyOpen {
 		return Account{}, NewAccountAlreadyExists(id)
 	}
-	return NewAccount(id, kind, zero)
+	return NewAccount(tenantID, id, kind, zero)
 }
 
 // NewMoneyFromDecimalLiteral is the domain-side legality decision for an

@@ -23,7 +23,7 @@ func TestIdempotencyStore_ClaimThenLookup_RoundTripsThroughRealPostgres(t *testi
 	posting := newPosting(t, "txn-idem-1", "wallet-idem", "system-idem", 75, recordedAt)
 
 	claimUOW := beginUOW(t, store)
-	if err := claimUOW.Transactions().Append(ctx, posting); err != nil {
+	if err := claimUOW.Transactions().Append(ctx, testTenantID, posting); err != nil {
 		t.Fatalf("Append: %v", err)
 	}
 	claim, err := claimUOW.Idempotency().Claim(ctx, "idem-key-1", "fingerprint-1", "txn-idem-1")
@@ -80,7 +80,7 @@ func TestIdempotencyStore_Claim_SameKeyTwiceIsRefusedByTheUniqueConstraint(t *te
 	recordedAt := time.Date(2026, 8, 20, 9, 0, 0, 0, time.UTC)
 
 	firstUOW := beginUOW(t, store)
-	if err := firstUOW.Transactions().Append(ctx, newPosting(t, "txn-idem-2a", "wallet-idem-2", "system-idem-2", 10, recordedAt)); err != nil {
+	if err := firstUOW.Transactions().Append(ctx, testTenantID, newPosting(t, "txn-idem-2a", "wallet-idem-2", "system-idem-2", 10, recordedAt)); err != nil {
 		t.Fatalf("Append 1: %v", err)
 	}
 	if _, err := firstUOW.Idempotency().Claim(ctx, "idem-key-conflict", "fp-a", "txn-idem-2a"); err != nil {
@@ -91,7 +91,7 @@ func TestIdempotencyStore_Claim_SameKeyTwiceIsRefusedByTheUniqueConstraint(t *te
 	}
 
 	secondUOW := beginUOW(t, store)
-	if err := secondUOW.Transactions().Append(ctx, newPosting(t, "txn-idem-2b", "wallet-idem-2", "system-idem-2", 20, recordedAt)); err != nil {
+	if err := secondUOW.Transactions().Append(ctx, testTenantID, newPosting(t, "txn-idem-2b", "wallet-idem-2", "system-idem-2", 20, recordedAt)); err != nil {
 		t.Fatalf("Append 2: %v", err)
 	}
 	_, err := secondUOW.Idempotency().Claim(ctx, "idem-key-conflict", "fp-b", "txn-idem-2b")

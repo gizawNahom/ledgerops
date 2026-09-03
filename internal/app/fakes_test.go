@@ -79,7 +79,7 @@ type fakeAccountRepository struct{ store *fakeStore }
 
 var _ ports.AccountRepository = fakeAccountRepository{}
 
-func (r fakeAccountRepository) LockForUpdate(ctx context.Context, accountIDs []string) ([]domain.Account, error) {
+func (r fakeAccountRepository) LockForUpdate(ctx context.Context, tenantID string, accountIDs []string) ([]domain.Account, error) {
 	seen := make(map[string]bool, len(accountIDs))
 	sorted := make([]string, 0, len(accountIDs))
 	for _, id := range accountIDs {
@@ -100,7 +100,7 @@ func (r fakeAccountRepository) LockForUpdate(ctx context.Context, accountIDs []s
 	return accounts, nil
 }
 
-func (r fakeAccountRepository) ApplyDeltas(ctx context.Context, deltas []domain.BalanceDelta) error {
+func (r fakeAccountRepository) ApplyDeltas(ctx context.Context, tenantID string, deltas []domain.BalanceDelta) error {
 	for _, delta := range deltas {
 		account, ok := r.store.accounts[delta.AccountID]
 		if !ok {
@@ -115,7 +115,7 @@ func (r fakeAccountRepository) ApplyDeltas(ctx context.Context, deltas []domain.
 	return nil
 }
 
-func (r fakeAccountRepository) Create(ctx context.Context, account domain.Account) error {
+func (r fakeAccountRepository) Create(ctx context.Context, tenantID string, account domain.Account) error {
 	if _, exists := r.store.accounts[account.ID()]; exists {
 		return fmt.Errorf("fakeAccountRepository: account %q already exists", account.ID())
 	}
@@ -123,7 +123,7 @@ func (r fakeAccountRepository) Create(ctx context.Context, account domain.Accoun
 	return nil
 }
 
-func (r fakeAccountRepository) Get(ctx context.Context, accountID string) (domain.Account, error) {
+func (r fakeAccountRepository) Get(ctx context.Context, tenantID string, accountID string) (domain.Account, error) {
 	account, ok := r.store.accounts[accountID]
 	if !ok {
 		return domain.Account{}, domain.NewUnknownAccount(accountID)
@@ -133,7 +133,16 @@ func (r fakeAccountRepository) Get(ctx context.Context, accountID string) (domai
 
 // All enumerates every account, ordered by id — VerifyBooks' full-scan
 // contract (D9) is what this fake exists for.
-func (r fakeAccountRepository) All(ctx context.Context) ([]domain.Account, error) {
+//
+// tenantID is accepted, not enforced: every call this suite issues goes
+// through app.Ledger, which always resolves to the same tenant internally
+// (step 02-02's legacyTenantID, pending 02-04's real extraction) — so a
+// single-tenant map is a faithful stand-in for PostTransfer/CreateAccount/
+// VerifyBooks' ORCHESTRATION, which is what this suite proves. Tenant
+// ISOLATION itself is proven for real against PostgreSQL (WS strategy C,
+// docs/feature/multitenancy/feature-delta.md): a fake enforcing scoping here
+// would model the very behaviour that suite exists to check.
+func (r fakeAccountRepository) All(ctx context.Context, tenantID string) ([]domain.Account, error) {
 	ids := make([]string, 0, len(r.store.accounts))
 	for id := range r.store.accounts {
 		ids = append(ids, id)
@@ -150,7 +159,7 @@ type fakeTransactionRepository struct{ store *fakeStore }
 
 var _ ports.TransactionRepository = fakeTransactionRepository{}
 
-func (r fakeTransactionRepository) Append(ctx context.Context, posting domain.Posting) error {
+func (r fakeTransactionRepository) Append(ctx context.Context, tenantID string, posting domain.Posting) error {
 	if _, exists := r.store.postings[posting.Transaction.ID()]; exists {
 		return fmt.Errorf("fakeTransactionRepository: transaction %q already recorded", posting.Transaction.ID())
 	}
@@ -159,7 +168,7 @@ func (r fakeTransactionRepository) Append(ctx context.Context, posting domain.Po
 	return nil
 }
 
-func (r fakeTransactionRepository) Get(ctx context.Context, transactionID string) (domain.Posting, error) {
+func (r fakeTransactionRepository) Get(ctx context.Context, tenantID string, transactionID string) (domain.Posting, error) {
 	posting, ok := r.store.postings[transactionID]
 	if !ok {
 		return domain.Posting{}, fmt.Errorf("fakeTransactionRepository: unknown transaction %q", transactionID)
@@ -167,7 +176,7 @@ func (r fakeTransactionRepository) Get(ctx context.Context, transactionID string
 	return posting, nil
 }
 
-func (r fakeTransactionRepository) EntriesFor(ctx context.Context, accountID string) ([]domain.Entry, error) {
+func (r fakeTransactionRepository) EntriesFor(ctx context.Context, scope ports.TenantScope, accountID string) ([]domain.Entry, error) {
 	var entries []domain.Entry
 	for _, entry := range r.store.entries {
 		if entry.AccountID() == accountID {
@@ -182,7 +191,7 @@ func (r fakeTransactionRepository) EntriesFor(ctx context.Context, accountID str
 // orchestration to be exercised over this fake — an all-zero stand-in would
 // hide the very defect (a stored balance that disagrees with its entries)
 // VerifyBooks exists to catch.
-func (r fakeTransactionRepository) TrialBalance(ctx context.Context) (domain.Money, int, error) {
+func (r fakeTransactionRepository) TrialBalance(ctx context.Context, scope ports.TenantScope) (domain.Money, int, error) {
 	currency := "USD"
 	var sumMinor int64
 	for _, entry := range r.store.entries {
@@ -198,7 +207,7 @@ func (r fakeTransactionRepository) TrialBalance(ctx context.Context) (domain.Mon
 
 // ComputedBalances derives every account's balance from its entries, grouped
 // by account — the other half of VerifyBooks' I3 comparison.
-func (r fakeTransactionRepository) ComputedBalances(ctx context.Context) (map[string]domain.Money, error) {
+func (r fakeTransactionRepository) ComputedBalances(ctx context.Context, scope ports.TenantScope) (map[string]domain.Money, error) {
 	sums := map[string]int64{}
 	currencies := map[string]string{}
 	for _, entry := range r.store.entries {

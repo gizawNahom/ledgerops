@@ -16,10 +16,14 @@ const (
 // illegal balance is never produced (DDD-15).
 //
 // tenantID scopes the snapshot to the Tenant aggregate that owns it (I8).
-// NewAccount leaves it at the zero value ("") — existing single-tenant call
-// sites are unaffected until they opt in via WithTenant, which is how the
-// snapshots domain.Post cross-checks against a TransferCommand's own
-// tenant_id get their value (brief.md § Domain Model / Multitenancy).
+// It is a required NewAccount constructor parameter — brief.md § Domain
+// Model / Multitenancy: "tenant_id becomes a required field on the Account
+// value type... there is no smart-constructor path that produces an Account
+// without one." There is no wither and no default: every Account in memory
+// carries the tenant it was constructed with, which is what lets
+// domain.Post's I8 cross-check compare a TransferCommand's own tenant_id
+// against a snapshot's tenant_id unconditionally, not only for callers that
+// remembered to opt in.
 type Account struct {
 	id       string
 	kind     AccountKind
@@ -29,12 +33,14 @@ type Account struct {
 
 // NewAccount is the smart constructor. It refuses a wallet opened with a
 // negative balance, so I4 holds from the first moment the value exists.
-func NewAccount(id string, kind AccountKind, balance Money) (Account, error) {
+// tenantID is required and positional, ahead of id — there is no path that
+// constructs an Account without naming the tenant it belongs to (I8).
+func NewAccount(tenantID, id string, kind AccountKind, balance Money) (Account, error) {
 	if kind == Wallet && balance.MinorUnits() < 0 {
 		zero, _ := NewMoney(0, balance.Currency())
 		return Account{}, NewInsufficientFunds(id, zero, balance.Negate())
 	}
-	return Account{id: id, kind: kind, balance: balance}, nil
+	return Account{id: id, kind: kind, balance: balance, tenantID: tenantID}, nil
 }
 
 // ID exposes the account identifier.
@@ -52,18 +58,9 @@ func (a Account) Balance() Money {
 	return a.balance
 }
 
-// TenantID exposes the tenant this snapshot is scoped to (I8). The zero
-// value ("") means no tenant has been assigned yet.
+// TenantID exposes the tenant this snapshot is scoped to (I8).
 func (a Account) TenantID() string {
 	return a.tenantID
-}
-
-// WithTenant returns a copy of the account scoped to the given tenant. Pure
-// and immutable like every other Account transformation (DDD-15) — there is
-// no mutating setter.
-func (a Account) WithTenant(tenantID string) Account {
-	a.tenantID = tenantID
-	return a
 }
 
 // Apply returns a new Account with the delta applied, or a violation when the

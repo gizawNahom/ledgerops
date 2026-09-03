@@ -51,34 +51,81 @@ type Store interface {
 	Close() error
 }
 
+// TenantScope is the closed, two-constructor credential-mechanism type for
+// the read-only ports where a legitimate unscoped state exists
+// (brief.md § Application Architecture / Multitenancy). It is NOT a
+// nullable string: the only ways to produce one are ScopedToTenant and
+// Unscoped, and the only way to read one back is Resolve, so "forgot to
+// scope" and "deliberately unscoped" cannot be confused with each other or
+// represented by an accidental zero value.
+//
+// Used only by EntriesFor, TrialBalance, and ComputedBalances — the three
+// read-only ports where a platform-wide aggregate is a real, intentional
+// answer. Every write-path port and every other read keeps tenant_id as a
+// plain required string; there is no legitimate unscoped write.
+type TenantScope struct {
+	tenantID string
+	scoped   bool
+}
+
+// ScopedToTenant returns a scope naming exactly one tenant.
+func ScopedToTenant(tenantID string) TenantScope {
+	return TenantScope{tenantID: tenantID, scoped: true}
+}
+
+// Unscoped returns the deliberate platform-wide scope — not a missing value,
+// a chosen one.
+func Unscoped() TenantScope {
+	return TenantScope{}
+}
+
+// Resolve reads the scope back: tenantID is meaningful only when scoped is
+// true.
+func (s TenantScope) Resolve() (tenantID string, scoped bool) {
+	return s.tenantID, s.scoped
+}
+
 // AccountRepository locks and reads the accounts a posting touches, and applies
 // the balance deltas the pure core returned.
 //
+// Every operation takes tenantID as a required, plain string — never
+// TenantScope — because there is no legitimate unscoped state for a write or
+// for a single-tenant read (brief.md § Multitenancy Contract-shape table).
+// Account-name uniqueness (I9/DDD-18) is scoped to (tenant_id, id), not
+// global id alone, as of this port.
+//
 // LockForUpdate MUST acquire its locks in ascending account-id order (DDD-6),
-// regardless of the order the caller passes them in. That ordering rule lives
-// here, in the shell — locking is an effect, and the pure core neither knows
-// nor could express it.
+// scoped within the given tenant's own account set, regardless of the order
+// the caller passes them in. That ordering rule lives here, in the shell —
+// locking is an effect, and the pure core neither knows nor could express it.
 type AccountRepository interface {
-	LockForUpdate(ctx context.Context, accountIDs []string) ([]domain.Account, error)
-	ApplyDeltas(ctx context.Context, deltas []domain.BalanceDelta) error
-	Create(ctx context.Context, account domain.Account) error
-	Get(ctx context.Context, accountID string) (domain.Account, error)
-	// All enumerates every account the ledger has ever opened, in a
+	LockForUpdate(ctx context.Context, tenantID string, accountIDs []string) ([]domain.Account, error)
+	ApplyDeltas(ctx context.Context, tenantID string, deltas []domain.BalanceDelta) error
+	Create(ctx context.Context, tenantID string, account domain.Account) error
+	Get(ctx context.Context, tenantID string, accountID string) (domain.Account, error)
+	// All enumerates every account the given tenant has ever opened, in a
 	// deterministic order. VerifyBooks (D9) is the one caller: its full-scan
 	// verdict needs every stored balance to compare against ComputedBalances,
 	// not just the ones a caller happens to ask about.
-	All(ctx context.Context) ([]domain.Account, error)
+	All(ctx context.Context, tenantID string) ([]domain.Account, error)
 }
 
 // TransactionRepository writes the transaction and its entries. It offers no
 // update and no delete, and the store refuses both anyway (D7 / OPS-10) — the
 // absence here is a reminder, not the enforcement.
+//
+// Append and Get are write-adjacent (a transaction has exactly one owning
+// tenant) and take tenantID as a plain required string. EntriesFor,
+// TrialBalance, and ComputedBalances are the pure-function, return-only
+// reads where a platform-wide aggregate is a legitimate answer, so they take
+// a closed TenantScope instead (brief.md § Multitenancy Contract-shape
+// table).
 type TransactionRepository interface {
-	Append(ctx context.Context, posting domain.Posting) error
-	Get(ctx context.Context, transactionID string) (domain.Posting, error)
-	EntriesFor(ctx context.Context, accountID string) ([]domain.Entry, error)
-	TrialBalance(ctx context.Context) (domain.Money, int, error)
-	ComputedBalances(ctx context.Context) (map[string]domain.Money, error)
+	Append(ctx context.Context, tenantID string, posting domain.Posting) error
+	Get(ctx context.Context, tenantID string, transactionID string) (domain.Posting, error)
+	EntriesFor(ctx context.Context, scope TenantScope, accountID string) ([]domain.Entry, error)
+	TrialBalance(ctx context.Context, scope TenantScope) (domain.Money, int, error)
+	ComputedBalances(ctx context.Context, scope TenantScope) (map[string]domain.Money, error)
 }
 
 // IdempotencyStore records the key, the request fingerprint, and the resulting

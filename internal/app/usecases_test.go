@@ -25,6 +25,15 @@ import (
 	"ledgerops/tests/common/statedelta"
 )
 
+// testTenantID mirrors app.legacyTenantID (unexported, so this suite
+// names its own copy) -- the interim single-tenant identity every
+// app.Ledger write-path call resolves to until step 02-04 wires real
+// per-request tenant extraction. Accounts seeded directly via
+// domain.NewAccount for this suite use the same constant so a seeded
+// snapshot's TenantID() matches what Ledger itself threads through to
+// domain.Post's I8 cross-check.
+const testTenantID = "tnt_legacy_seed"
+
 func fixedClock() time.Time {
 	return time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
 }
@@ -72,7 +81,7 @@ func TestProperty_PostTransfer_MovesValueAndClaimsTheKeyAtomically(t *testing.T)
 		if err != nil {
 			rt.Fatalf("NewMoney rejected a known currency: %v", err)
 		}
-		fromAccount, err := domain.NewAccount("from", domain.Wallet, fromBalance)
+		fromAccount, err := domain.NewAccount(testTenantID, "from", domain.Wallet, fromBalance)
 		if err != nil {
 			rt.Fatalf("NewAccount rejected a non-negative balance: %v", err)
 		}
@@ -80,7 +89,7 @@ func TestProperty_PostTransfer_MovesValueAndClaimsTheKeyAtomically(t *testing.T)
 		if err != nil {
 			rt.Fatalf("NewMoney rejected a known currency: %v", err)
 		}
-		toAccount, err := domain.NewAccount("to", domain.System, zero)
+		toAccount, err := domain.NewAccount(testTenantID, "to", domain.System, zero)
 		if err != nil {
 			rt.Fatalf("NewAccount rejected a non-negative balance: %v", err)
 		}
@@ -136,7 +145,7 @@ func TestProperty_PostTransfer_RefusalLeavesEveryUniverseSlotUnchanged(t *testin
 		if err != nil {
 			rt.Fatalf("NewMoney rejected a known currency: %v", err)
 		}
-		fromAccount, err := domain.NewAccount("from", domain.Wallet, fromBalance)
+		fromAccount, err := domain.NewAccount(testTenantID, "from", domain.Wallet, fromBalance)
 		if err != nil {
 			rt.Fatalf("NewAccount rejected a non-negative balance: %v", err)
 		}
@@ -144,7 +153,7 @@ func TestProperty_PostTransfer_RefusalLeavesEveryUniverseSlotUnchanged(t *testin
 		if err != nil {
 			rt.Fatalf("NewMoney rejected a known currency: %v", err)
 		}
-		toAccount, err := domain.NewAccount("to", domain.System, zero)
+		toAccount, err := domain.NewAccount(testTenantID, "to", domain.System, zero)
 		if err != nil {
 			rt.Fatalf("NewAccount rejected a non-negative balance: %v", err)
 		}
@@ -197,7 +206,7 @@ func TestProperty_PostTransfer_RepeatedApplicationEqualsOneApplication(t *testin
 		if err != nil {
 			rt.Fatalf("NewMoney rejected a known currency: %v", err)
 		}
-		fromAccount, err := domain.NewAccount("from", domain.Wallet, fromBalance)
+		fromAccount, err := domain.NewAccount(testTenantID, "from", domain.Wallet, fromBalance)
 		if err != nil {
 			rt.Fatalf("NewAccount rejected a non-negative balance: %v", err)
 		}
@@ -205,7 +214,7 @@ func TestProperty_PostTransfer_RepeatedApplicationEqualsOneApplication(t *testin
 		if err != nil {
 			rt.Fatalf("NewMoney rejected a known currency: %v", err)
 		}
-		toAccount, err := domain.NewAccount("to", domain.System, zero)
+		toAccount, err := domain.NewAccount(testTenantID, "to", domain.System, zero)
 		if err != nil {
 			rt.Fatalf("NewAccount rejected a non-negative balance: %v", err)
 		}
@@ -299,7 +308,7 @@ func TestGetBalance_ReadsStoredBalance(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewMoney rejected a known currency: %v", err)
 	}
-	account, err := domain.NewAccount("wallet-1", domain.Wallet, balance)
+	account, err := domain.NewAccount(testTenantID, "wallet-1", domain.Wallet, balance)
 	if err != nil {
 		t.Fatalf("NewAccount rejected a non-negative balance: %v", err)
 	}
@@ -349,7 +358,7 @@ func TestProperty_VerifyBooks_AgreeingBalancesAreReportedHealthy(t *testing.T) {
 			if err != nil {
 				t.Fatalf("NewMoney rejected a known currency: %v", err)
 			}
-			account, err := domain.NewAccount(accountID, domain.Wallet, balance)
+			account, err := domain.NewAccount(testTenantID, accountID, domain.Wallet, balance)
 			if err != nil {
 				t.Fatalf("NewAccount rejected a non-negative balance: %v", err)
 			}

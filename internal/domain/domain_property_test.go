@@ -22,6 +22,15 @@ import (
 
 var knownCurrencies = []string{"USD", "EUR", "GBP", "JPY"}
 
+// testTenantID is the placeholder tenant every domain-level test below
+// that is not itself exercising I8 uses for both the accounts it builds
+// and (where a domain.Post call is involved) the TransferCommand's own
+// TenantID -- NewAccount now requires a tenant_id positionally, and
+// Post's I8 cross-check compares it against the command's, so both
+// sides must agree for these pre-existing I1/I4 scenarios to keep
+// behaving exactly as before the tenant_id parameter was added.
+const testTenantID = "tnt_test"
+
 func genCurrency(t *rapid.T, label string) string {
 	return rapid.SampledFrom(knownCurrencies).Draw(t, label)
 }
@@ -38,7 +47,7 @@ func TestProperty_PostEntriesSumToZeroPerCurrency(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewMoney rejected a known currency: %v", err)
 		}
-		fromAccount, err := domain.NewAccount("from", fromKind, fromBalance)
+		fromAccount, err := domain.NewAccount(testTenantID, "from", fromKind, fromBalance)
 		if err != nil {
 			t.Fatalf("NewAccount rejected a non-negative balance: %v", err)
 		}
@@ -48,7 +57,7 @@ func TestProperty_PostEntriesSumToZeroPerCurrency(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewMoney rejected a known currency: %v", err)
 		}
-		toAccount, err := domain.NewAccount("to", domain.System, toBalance)
+		toAccount, err := domain.NewAccount(testTenantID, "to", domain.System, toBalance)
 		if err != nil {
 			t.Fatalf("NewAccount rejected a non-negative balance: %v", err)
 		}
@@ -59,7 +68,7 @@ func TestProperty_PostEntriesSumToZeroPerCurrency(t *testing.T) {
 			t.Fatalf("NewMoney rejected a known currency: %v", err)
 		}
 
-		cmd := domain.TransferCommand{From: "from", To: "to", Amount: amount}
+		cmd := domain.TransferCommand{From: "from", To: "to", Amount: amount, TenantID: testTenantID}
 		posting, err := domain.Post(cmd, []domain.Account{fromAccount, toAccount}, time.Now(), "tx-i1")
 		if err != nil {
 			// A refusal (e.g. insufficient funds on a wallet source) is not a
@@ -90,7 +99,7 @@ func TestProperty_NoSequenceOfTransfersDrivesWalletNegative(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewMoney rejected a known currency: %v", err)
 		}
-		systemAccount, err := domain.NewAccount("system", domain.System, systemBalance)
+		systemAccount, err := domain.NewAccount(testTenantID, "system", domain.System, systemBalance)
 		if err != nil {
 			t.Fatalf("NewAccount rejected a non-negative balance: %v", err)
 		}
@@ -104,7 +113,7 @@ func TestProperty_NoSequenceOfTransfersDrivesWalletNegative(t *testing.T) {
 			if err != nil {
 				t.Fatalf("NewMoney rejected a known currency: %v", err)
 			}
-			account, err := domain.NewAccount(id, domain.Wallet, balance)
+			account, err := domain.NewAccount(testTenantID, id, domain.Wallet, balance)
 			if err != nil {
 				t.Fatalf("NewAccount rejected a non-negative balance: %v", err)
 			}
@@ -130,7 +139,7 @@ func TestProperty_NoSequenceOfTransfersDrivesWalletNegative(t *testing.T) {
 				snapshots = append(snapshots, accounts[id])
 			}
 
-			cmd := domain.TransferCommand{From: fromID, To: toID, Amount: amount}
+			cmd := domain.TransferCommand{From: fromID, To: toID, Amount: amount, TenantID: testTenantID}
 			posting, err := domain.Post(cmd, snapshots, time.Now(), fmt.Sprintf("tx-%d", i))
 			if err != nil {
 				// Refused movement (e.g. insufficient funds): state unchanged.
@@ -175,7 +184,7 @@ func TestProperty_PostToleratesMixedCurrenciesAndMissingAccounts(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewMoney rejected a known currency: %v", err)
 		}
-		fromAccount, err := domain.NewAccount("from", domain.Wallet, fromBalance)
+		fromAccount, err := domain.NewAccount(testTenantID, "from", domain.Wallet, fromBalance)
 		if err != nil {
 			t.Fatalf("NewAccount rejected a non-negative balance: %v", err)
 		}
@@ -187,7 +196,7 @@ func TestProperty_PostToleratesMixedCurrenciesAndMissingAccounts(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewMoney rejected a known currency: %v", err)
 		}
-		toAccount, err := domain.NewAccount("to", domain.System, toBalance)
+		toAccount, err := domain.NewAccount(testTenantID, "to", domain.System, toBalance)
 		if err != nil {
 			t.Fatalf("NewAccount rejected a non-negative balance: %v", err)
 		}
@@ -201,7 +210,7 @@ func TestProperty_PostToleratesMixedCurrenciesAndMissingAccounts(t *testing.T) {
 			t.Fatalf("NewMoney rejected a known currency: %v", err)
 		}
 
-		cmd := domain.TransferCommand{From: "from", To: "to", Amount: amount}
+		cmd := domain.TransferCommand{From: "from", To: "to", Amount: amount, TenantID: testTenantID}
 		posting, postErr := domain.Post(cmd, snapshots, time.Now(), "tx-relaxed")
 		if postErr == nil && !domain.EntriesSumToZero(posting.Entries) {
 			t.Fatalf("Post succeeded across mismatched currencies without honouring I1: %+v", posting.Entries)
@@ -252,7 +261,7 @@ func TestPost_ExactBalanceAndOffByOneCent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewMoney rejected a known currency: %v", err)
 	}
-	wallet, err := domain.NewAccount("wallet-1", domain.Wallet, balance)
+	wallet, err := domain.NewAccount(testTenantID, "wallet-1", domain.Wallet, balance)
 	if err != nil {
 		t.Fatalf("NewAccount rejected a non-negative balance: %v", err)
 	}
@@ -260,7 +269,7 @@ func TestPost_ExactBalanceAndOffByOneCent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewMoney rejected a known currency: %v", err)
 	}
-	system, err := domain.NewAccount("system-1", domain.System, systemBalance)
+	system, err := domain.NewAccount(testTenantID, "system-1", domain.System, systemBalance)
 	if err != nil {
 		t.Fatalf("NewAccount rejected a non-negative balance: %v", err)
 	}
@@ -270,7 +279,7 @@ func TestPost_ExactBalanceAndOffByOneCent(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewMoney rejected a known currency: %v", err)
 		}
-		cmd := domain.TransferCommand{From: "wallet-1", To: "system-1", Amount: amount}
+		cmd := domain.TransferCommand{From: "wallet-1", To: "system-1", Amount: amount, TenantID: testTenantID}
 		posting, err := domain.Post(cmd, []domain.Account{wallet, system}, time.Now(), "tx-exact")
 		if err != nil {
 			t.Fatalf("unexpected refusal at exact balance: %v", err)
@@ -285,7 +294,7 @@ func TestPost_ExactBalanceAndOffByOneCent(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewMoney rejected a known currency: %v", err)
 		}
-		cmd := domain.TransferCommand{From: "wallet-1", To: "system-1", Amount: amount}
+		cmd := domain.TransferCommand{From: "wallet-1", To: "system-1", Amount: amount, TenantID: testTenantID}
 		_, postErr := domain.Post(cmd, []domain.Account{wallet, system}, time.Now(), "tx-over")
 
 		var violation domain.Violation
@@ -299,11 +308,11 @@ func TestPost_ExactBalanceAndOffByOneCent(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewMoney rejected a known currency: %v", err)
 		}
-		emptyWallet, err := domain.NewAccount("wallet-2", domain.Wallet, systemBalance)
+		emptyWallet, err := domain.NewAccount(testTenantID, "wallet-2", domain.Wallet, systemBalance)
 		if err != nil {
 			t.Fatalf("NewAccount rejected a non-negative balance: %v", err)
 		}
-		cmd := domain.TransferCommand{From: "system-1", To: "wallet-2", Amount: amount}
+		cmd := domain.TransferCommand{From: "system-1", To: "wallet-2", Amount: amount, TenantID: testTenantID}
 		posting, err := domain.Post(cmd, []domain.Account{system, emptyWallet}, time.Now(), "tx-system-negative")
 		if err != nil {
 			t.Fatalf("system source refused past its own (zero) balance, but I4 does not bind System: %v", err)
@@ -330,7 +339,7 @@ func TestPost_UnknownAccountNamesTheMissingOne(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewMoney rejected a known currency: %v", err)
 	}
-	onlyAccount, err := domain.NewAccount("known", domain.Wallet, balance)
+	onlyAccount, err := domain.NewAccount(testTenantID, "known", domain.Wallet, balance)
 	if err != nil {
 		t.Fatalf("NewAccount rejected a non-negative balance: %v", err)
 	}
@@ -339,7 +348,7 @@ func TestPost_UnknownAccountNamesTheMissingOne(t *testing.T) {
 		t.Fatalf("NewMoney rejected a known currency: %v", err)
 	}
 
-	cmd := domain.TransferCommand{From: "known", To: "ghost", Amount: amount}
+	cmd := domain.TransferCommand{From: "known", To: "ghost", Amount: amount, TenantID: testTenantID}
 	_, postErr := domain.Post(cmd, []domain.Account{onlyAccount}, time.Now(), "tx-unknown")
 
 	var violation domain.Violation
@@ -539,7 +548,7 @@ func TestNewAccount_SystemAllowsNegativeBalanceAtConstruction(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewMoney rejected a known currency: %v", err)
 	}
-	account, err := domain.NewAccount("treasury", domain.System, negative)
+	account, err := domain.NewAccount(testTenantID, "treasury", domain.System, negative)
 	if err != nil {
 		t.Fatalf("NewAccount refused a negative balance for a System account: %v", err)
 	}
@@ -565,7 +574,7 @@ func TestPost_ToAccountCurrencyMismatchIsRefused(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewMoney rejected a known currency: %v", err)
 	}
-	fromAccount, err := domain.NewAccount("from", domain.Wallet, fromBalance)
+	fromAccount, err := domain.NewAccount(testTenantID, "from", domain.Wallet, fromBalance)
 	if err != nil {
 		t.Fatalf("NewAccount rejected a non-negative balance: %v", err)
 	}
@@ -574,7 +583,7 @@ func TestPost_ToAccountCurrencyMismatchIsRefused(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewMoney rejected a known currency: %v", err)
 	}
-	toAccount, err := domain.NewAccount("to", domain.System, toBalance)
+	toAccount, err := domain.NewAccount(testTenantID, "to", domain.System, toBalance)
 	if err != nil {
 		t.Fatalf("NewAccount rejected a non-negative balance: %v", err)
 	}
@@ -584,7 +593,7 @@ func TestPost_ToAccountCurrencyMismatchIsRefused(t *testing.T) {
 		t.Fatalf("NewMoney rejected a known currency: %v", err)
 	}
 
-	cmd := domain.TransferCommand{From: "from", To: "to", Amount: amount}
+	cmd := domain.TransferCommand{From: "from", To: "to", Amount: amount, TenantID: testTenantID}
 	_, postErr := domain.Post(cmd, []domain.Account{fromAccount, toAccount}, time.Now(), "tx-to-mismatch")
 
 	var violation domain.Violation
@@ -652,12 +661,22 @@ func TestProperty_PostRefusesCrossTenantReference(t *testing.T) {
 
 		mismatchSide := rapid.SampledFrom([]string{"from", "to"}).Draw(t, "mismatchSide")
 
+		fromTenant, toTenant := commandTenant, commandTenant
+		var wantMismatchedID string
+		if mismatchSide == "from" {
+			fromTenant = otherTenant
+			wantMismatchedID = "from"
+		} else {
+			toTenant = otherTenant
+			wantMismatchedID = "to"
+		}
+
 		fromBalanceMinor := rapid.Int64Range(0, 1_000_000_000).Draw(t, "fromBalance")
 		fromBalance, err := domain.NewMoney(fromBalanceMinor, currency)
 		if err != nil {
 			t.Fatalf("NewMoney rejected a known currency: %v", err)
 		}
-		fromAccount, err := domain.NewAccount("from", domain.Wallet, fromBalance)
+		fromAccount, err := domain.NewAccount(fromTenant, "from", domain.Wallet, fromBalance)
 		if err != nil {
 			t.Fatalf("NewAccount rejected a non-negative balance: %v", err)
 		}
@@ -667,20 +686,9 @@ func TestProperty_PostRefusesCrossTenantReference(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewMoney rejected a known currency: %v", err)
 		}
-		toAccount, err := domain.NewAccount("to", domain.System, toBalance)
+		toAccount, err := domain.NewAccount(toTenant, "to", domain.System, toBalance)
 		if err != nil {
 			t.Fatalf("NewAccount rejected a non-negative balance: %v", err)
-		}
-
-		var wantMismatchedID string
-		if mismatchSide == "from" {
-			fromAccount = fromAccount.WithTenant(otherTenant)
-			toAccount = toAccount.WithTenant(commandTenant)
-			wantMismatchedID = "from"
-		} else {
-			fromAccount = fromAccount.WithTenant(commandTenant)
-			toAccount = toAccount.WithTenant(otherTenant)
-			wantMismatchedID = "to"
 		}
 
 		// Deliberately request more than the wallet side can cover, so an
@@ -715,21 +723,19 @@ func TestPost_CrossTenantRefusalReusesAccountNotFound(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewMoney rejected a known currency: %v", err)
 	}
-	fromAccount, err := domain.NewAccount("from", domain.Wallet, balance)
+	fromAccount, err := domain.NewAccount("tnt_alice", "from", domain.Wallet, balance)
 	if err != nil {
 		t.Fatalf("NewAccount rejected a non-negative balance: %v", err)
 	}
-	fromAccount = fromAccount.WithTenant("tnt_alice")
 
 	zero, err := domain.NewMoney(0, "USD")
 	if err != nil {
 		t.Fatalf("NewMoney rejected a known currency: %v", err)
 	}
-	toAccount, err := domain.NewAccount("to", domain.System, zero)
+	toAccount, err := domain.NewAccount("tnt_bob", "to", domain.System, zero)
 	if err != nil {
 		t.Fatalf("NewAccount rejected a non-negative balance: %v", err)
 	}
-	toAccount = toAccount.WithTenant("tnt_bob")
 
 	amount, err := domain.NewMoney(100, "USD")
 	if err != nil {

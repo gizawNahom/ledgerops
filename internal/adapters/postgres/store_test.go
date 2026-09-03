@@ -20,7 +20,7 @@ func TestStore_Begin_ThreeRepositoriesShareOneTransaction(t *testing.T) {
 	seedAccount(t, ctx, uow, "wallet-shared", domain.Wallet, 1000)
 	// ...read back through a second call to Accounts() on the SAME uow,
 	// before commit — only possible if both share one transaction handle.
-	got, err := uow.Accounts().Get(ctx, "wallet-shared")
+	got, err := uow.Accounts().Get(ctx, testTenantID, "wallet-shared")
 	if err != nil {
 		t.Fatalf("Get within the same uncommitted unit of work: %v", err)
 	}
@@ -33,7 +33,7 @@ func TestStore_Begin_ThreeRepositoriesShareOneTransaction(t *testing.T) {
 
 	// Now visible from a fresh unit of work too.
 	verifyUOW := beginUOW(t, store)
-	got, err = verifyUOW.Accounts().Get(ctx, "wallet-shared")
+	got, err = verifyUOW.Accounts().Get(ctx, testTenantID, "wallet-shared")
 	_ = verifyUOW.Rollback(ctx)
 	if err != nil {
 		t.Fatalf("Get after commit: %v", err)
@@ -56,7 +56,7 @@ func TestStore_Begin_UncommittedWorkIsInvisibleAfterRollback(t *testing.T) {
 	}
 
 	verifyUOW := beginUOW(t, store)
-	_, err := verifyUOW.Accounts().Get(ctx, "wallet-never-committed")
+	_, err := verifyUOW.Accounts().Get(ctx, testTenantID, "wallet-never-committed")
 	_ = verifyUOW.Rollback(ctx)
 
 	var violation domain.Violation
