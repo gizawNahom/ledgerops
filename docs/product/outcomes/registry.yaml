@@ -12,14 +12,17 @@ schema_version: '0.1'
 outcomes:
 - id: OUT-1
   kind: operation
-  summary: Record a balanced two-leg movement between two accounts, atomically and at most once per key.
+  summary: Record a balanced two-leg movement between two accounts, atomically and at most once per key,
+    scoped to the caller's tenant.
   feature: ledger-core
   inputs:
-  - shape: 'POST /transfers {from: AccountID, to: AccountID, amount: Decimal} + Idempotency-Key: string'
+  - shape: 'POST /transfers {from: AccountID, to: AccountID, amount: Decimal} + Idempotency-Key: string,
+      caller authenticated as a tenant_key (multitenancy, 2026-09-03: widened from a single shared
+      OperatorKey)'
   output:
     shape: '201 {transaction_id, status: posted, legs: [{account, amount} x2]} | 200 replay | 422 {error:
       insufficient_funds|invalid_amount, available, requested} | 409 idempotency_key_conflict | 404 account_not_found
-      | 400 missing_idempotency_key'
+      (also the cross-tenant refusal, I8 — ADR-011) | 400 missing_idempotency_key | 401 unidentified_caller'
   keywords:
   - transfer
   - posting
@@ -35,13 +38,16 @@ outcomes:
   superseded_by: null
 - id: OUT-2
   kind: operation
-  summary: Open an account of a declared kind with a zero balance; value may only arrive afterwards as
-    a movement.
+  summary: Open an account of a declared kind with a zero balance, scoped to the caller's tenant; value
+    may only arrive afterwards as a movement.
   feature: ledger-core
   inputs:
-  - shape: 'POST /accounts {account_id: AccountID, type: wallet|system}'
+  - shape: 'POST /accounts {account_id: AccountID, type: wallet|system}, caller authenticated as a
+      tenant_key (multitenancy, 2026-09-03: account_id uniqueness rescoped from global to (tenant_id,
+      account_id), I9)'
   output:
-    shape: '201 {account_id, balance: 0.00, type} | 409 account_exists'
+    shape: '201 {account_id, balance: 0.00, type} | 409 account_exists (per-tenant, not global as of I9)
+      | 401 unidentified_caller'
   keywords:
   - account
   - open
@@ -70,13 +76,15 @@ outcomes:
 - id: OUT-4
   kind: operation
   summary: Report one account's entries in a settled order with a cumulative running balance and named
-    counterparty.
+    counterparty. Dual-mode as of multitenancy (2026-09-03).
   feature: ledger-core
   inputs:
-  - shape: GET /accounts/{id}/entries
+  - shape: 'GET /accounts/{id}/entries — dual-mode: a tenant_key caller sees only that tenant''s entries
+      (new); the existing unscoped OperatorKey call keeps succeeding identically to today (console
+      compatibility, CI-gated)'
   output:
     shape: '200 {entries: [{transaction_id, counterparty, amount, recorded_at, running_balance}]} | 404
-      account_not_found'
+      account_not_found (also the cross-tenant refusal for a tenant_key caller, I8) | 401 unidentified_caller'
   keywords:
   - entries
   - trace
@@ -91,14 +99,16 @@ outcomes:
 - id: OUT-5
   kind: operation
   summary: Answer whether the books balance, by full scan, stating the verdict in words with per-account
-    drift attribution.
+    drift attribution — optionally scoped to one tenant as of multitenancy (2026-09-03).
   feature: ledger-core
   inputs:
-  - shape: GET /health/trial-balance
-  - shape: GET /console/verdict
+  - shape: 'GET /health/trial-balance[?tenant_id=] — unscoped means platform-wide aggregate, unchanged
+      from today (console compatibility, CI-gated)'
+  - shape: GET /console/verdict (unchanged, unscoped only, shares the same handler)
   output:
-    shape: '200 {verdict: ''Books balance: YES''|''Books balance: NO'', imbalance_minor, entry_count,
-      elapsed_ms, drifted: [{account_id, stored, computed, delta}]}'
+    shape: '200 {tenant_id?, verdict: ''Books balance: YES''|''Books balance: NO'', imbalance_minor,
+      entry_count, elapsed_ms, drifted: [{account_id, stored, computed, delta}]} | 404 tenant_not_found
+      (scoped call naming an unprovisioned tenant_id, I10)'
   keywords:
   - trial-balance
   - verification
@@ -206,4 +216,87 @@ outcomes:
   related:
   - OUT-4
   - OUT-5
+  superseded_by: null
+- id: OUT-11
+  kind: operation
+  summary: Provision a new tenant and issue it a credential scoped to that tenant alone, refusing a
+    duplicate name or a non-admin caller.
+  feature: multitenancy
+  inputs:
+  - shape: 'POST /tenants {name: string}, caller authenticated as the platform-admin credential (OperatorKey,
+      D8/DDD-22)'
+  output:
+    shape: '201 {tenant_id, name, tenant_key} | 409 tenant_already_exists | 401 unidentified_caller'
+  keywords:
+  - tenant
+  - provisioning
+  - onboarding
+  - credential
+  artifact: internal/app/usecases.go:Ledger.ProvisionTenant (not yet built — RED scaffold at
+    internal/adapters/http/router.go:scaffold("provision_tenant"))
+  related:
+  - OUT-12
+  - OUT-13
+  - OUT-14
+  superseded_by: null
+- id: OUT-12
+  kind: invariant
+  summary: 'I8 — a tenant''s credential can never read or write another tenant''s account, transaction,
+    or entry, enforced by construction.'
+  feature: multitenancy
+  inputs:
+  - shape: any request presenting one tenant's credential and naming another tenant's account, directly
+      or as a transfer counterparty
+  output:
+    shape: refused (account_not_found for reads, per ADR-011's reuse of the sealed I8 taxonomy; the
+      transfer is refused and neither account's balance changes), always
+  keywords:
+  - I8
+  - isolation
+  - tenant
+  - construction-time
+  - invariant
+  artifact: internal/domain (tenant_id required on Account and every repository query/lock port; not yet
+    built)
+  related:
+  - OUT-1
+  - OUT-2
+  - OUT-4
+  superseded_by: null
+- id: OUT-13
+  kind: invariant
+  summary: 'I9 — account-name uniqueness is scoped to (tenant_id, account_id), not global (renumbered
+    from the pre-existing DDD-18 concept, which was never itself registered).'
+  feature: multitenancy
+  inputs:
+  - shape: two accounts opened under the same account_id by two different tenants
+  output:
+    shape: both succeed independently; a duplicate account_id within the SAME tenant is still refused
+      account_already_exists, unchanged from ledger-core's own DDD-18 behavior
+  keywords:
+  - I9
+  - uniqueness
+  - tenant-scoped
+  - invariant
+  artifact: internal/adapters/postgres (composite (tenant_id, id) PRIMARY KEY, DDD-24; not yet built)
+  related:
+  - OUT-2
+  superseded_by: null
+- id: OUT-14
+  kind: invariant
+  summary: 'I10 — tenant-name uniqueness at the Tenant aggregate, structurally identical to I9 one level
+    up.'
+  feature: multitenancy
+  inputs:
+  - shape: two POST /tenants calls naming the same tenant name
+  output:
+    shape: the second is refused tenant_already_exists (409), the first tenant unaffected
+  keywords:
+  - I10
+  - uniqueness
+  - tenant
+  - invariant
+  artifact: internal/domain (Tenant aggregate, not yet built)
+  related:
+  - OUT-11
   superseded_by: null

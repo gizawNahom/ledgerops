@@ -24,6 +24,9 @@ override a class default: no driven-internal port may become a fake here.
 | Console verdict surface | HTTP/JSON only; browser E2E deferred | DISTILL DDR-2. The SPA bundle is not driven by a browser in CI — see § Known gap |
 | `cmd/api` binary | `go run ./cmd/api` as a subprocess, for the walking skeleton and the chaos demo | Proves wiring, argument handling, and exit codes — a handler-level test cannot |
 | `GET /metrics` (added 2026-08-26, OPS-5 fix) | Real `chi` router over `httptest.Server`, **outside** `requireOperatorKey` | Confirmed unauthenticated 2026-08-26 — mirrors `console_static.go`'s precedent for deliberately unauthenticated read-only surfaces. Scraped presenting no credentials AND presenting a rejected key, both must succeed |
+| `POST /tenants` (added 2026-09-03, `multitenancy` DISTILL) | Real `chi` router over `httptest.Server`, mounted behind the existing `requireOperatorKey` group (DDD-22 reuses it verbatim as the platform-admin gate) | RED scaffold today (`scaffold("provision_tenant")`) — the same `httptest.Server` mechanism as every other driving port, no new test-side machinery |
+| `POST /accounts`, `POST /transfers`, `GET /accounts/{id}` (extended 2026-09-03, tenant-scoped) | Same `httptest.Server` mechanism, now behind a `tenant_key`-only credential (DDD-22/23) | Existing ports, existing mechanism — only the credential the acceptance suite presents changes |
+| `GET /accounts/{id}/entries`, `GET /health/trial-balance`, `GET /console/verdict` (extended 2026-09-03, dual-mode) | Same `httptest.Server` mechanism, exercised twice per scenario set: once with a `tenant_key`, once with the unscoped `OperatorKey` (console-compatibility hard constraint) | No new mechanism — the dual-mode requirement is a scenario-authoring concern (two scenarios, same port), not an infrastructure one |
 
 ## Driven internal (real)
 
@@ -32,6 +35,7 @@ override a class default: no driven-internal port may become a fake here.
 | `TransactionRepository` (PostgreSQL 16) | Testcontainers `postgres:16`, fresh container per test package (OPS-11) | Never faked — WS strategy C |
 | `AccountRepository` (PostgreSQL 16) | Testcontainers `postgres:16`, direct `pgx` pool, **no pooler** | DDD-6 lock ordering needs one session per transaction |
 | `IdempotencyStore` (PostgreSQL 16) | Testcontainers `postgres:16`, unique constraint under real concurrent insert | I7 is a property of the constraint, not of the code around it |
+| `TenantRepository` (PostgreSQL 16, added 2026-09-03, `multitenancy` DISTILL) | Testcontainers `postgres:16`, same fresh-container-per-package mechanism as the three rows above | Not yet built (RED scaffold at the driving port only) — isolation is a property of the real store's `(tenant_id, account_id)` composite-key constraint (DDD-24), so a fake would model the very thing this feature exists to prove (same rationale WS strategy C already states for `AccountRepository`) |
 
 Every container is reached through two DSNs (OPS-10): the suite connects as
 `ledgerops_app`, and only the corruption and migration helpers connect as

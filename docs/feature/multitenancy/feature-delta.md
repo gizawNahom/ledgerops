@@ -1190,3 +1190,265 @@ beyond DESIGN's already-decided credential mechanism (DDD-22/23). Default
 **Handoff**: to `nw-acceptance-designer` (DISTILL wave). Deliverables:
 this section + `docs/feature/multitenancy/devops/environments.yaml` +
 `docs/feature/multitenancy/devops/wave-decisions.md`.
+
+---
+
+## Wave: DISTILL / [REF] Prior wave consultation
+
+*Owner: nw-acceptance-designer (Quinn).*
+
+Read in full before writing any scenario: this file's §§ Wave: DISCUSS,
+DESIGN, DEVOPS (all three, in full) · `docs/feature/multitenancy/design/wave-decisions.md`
+· `docs/feature/multitenancy/devops/wave-decisions.md` ·
+`docs/feature/multitenancy/devops/environments.yaml` ·
+`docs/feature/multitenancy/slices/slice-01-provision-a-tenant.md`,
+`slice-02-operate-within-a-tenant.md`, `slice-03-verify-one-tenants-books.md`
+· `docs/product/architecture/brief.md` § Multitenancy · this project's own
+`docs/architecture/atdd-infrastructure-policy.md` and
+`tests/common/statedelta/state_delta.go` (both already bootstrapped
+2026-08-18, inherited not re-bootstrapped) · brownfield code:
+`go.mod` (language detection), `internal/adapters/http/router.go`,
+`internal/domain/{account,violation}.go`, `internal/app/usecases.go`,
+`internal/app/ports/ports.go`, `internal/adapters/postgres/accounts.go`,
+`Makefile`, and the full existing acceptance suite
+`tests/acceptance/ledgercore/*` (domain_types.go, world.go, suite_test.go,
+walking-skeleton.feature, steps file) to establish this project's own
+conventions before authoring a single scenario, per this file's own
+`## nWave Wave Work` mandate to never author against assumed conventions.
+No SPIKE artifacts exist for this feature (none was run). Migration gate:
+`docs/product/` exists — not greenfield, not a migration case.
+
+**Deliverable type**: read from `.nwave/des-config.json` — no
+`deliverable_type` key present, resolves to the safe default `application`
+per the config precedence rule. Routes to the unchanged pytest/Hypothesis-
+equivalent verification path (here: go test / godog) — no `@nw-plugin-validator`
+or `@nw-skill-reviewer` dispatch.
+
+## Wave: DISTILL / [REF] Wave-Decision Reconciliation
+
+Read `discuss`/`design`/`devops` wave-decisions (this feature's DISCUSS
+narrative lives entirely in this file, with no separate
+`discuss/wave-decisions.md`; DESIGN's and DEVOPS's own summary files were
+read in full). Checked every DISCUSS-locked decision against DESIGN and
+DEVOPS. **Zero contradictions found** — DESIGN's three legs resolve every
+DISCUSS-flagged open question without contradicting any locked decision;
+DEVOPS's own contradiction check already confirmed the same against DESIGN.
+**Reconciliation passed — 0 contradictions.** Full log:
+`docs/feature/multitenancy/distill/wave-decisions.md`.
+
+## Wave: DISTILL / [REF] Scenario list with tags
+
+18 scenarios across 4 `.feature` files
+(`tests/acceptance/multitenancy/`). Every scenario carries exactly one
+`@contract-shape:` tag (2026-05-15 mandate). Non-walking-skeleton scenarios
+carry `@pending` (ADR-025 one-at-a-time delivery, ` ~@pending` default in
+`suite_test.go`).
+
+| # | Scenario | File | Tags |
+|---|---|---|---|
+| 1 | A newly onboarded tenant operates invisibly to an existing tenant | walking-skeleton.feature | `@walking_skeleton @driving_port @driving_adapter @real-io @slice-01 @slice-02 @us-1 @us-2 @env-two-tenant @contract-shape:bounded-change` |
+| 2 | Provisioning a tenant issues a scoped credential | milestone-01 | `@pending @real-io @adapter-integration @slice-01 @us-1 @env-clean @contract-shape:bounded-change` |
+| 3 | Two tenants can be provisioned independently | milestone-01 | `@pending @real-io @slice-01 @us-1 @env-clean @contract-shape:bounded-change` |
+| 4 | A duplicate tenant name is refused | milestone-01 | `@pending @real-io @slice-01 @us-1 @env-clean @contract-shape:unbounded-preservation` |
+| 5 | A tenant's own credential cannot provision another tenant | milestone-01 | `@pending @real-io @slice-01 @us-1 @env-clean @contract-shape:unbounded-preservation` |
+| 6 | An unissued credential cannot provision a tenant | milestone-01 | `@pending @real-io @slice-01 @us-1 @env-clean @contract-shape:unbounded-preservation` |
+| 7 | Two tenants independently reuse the same account name | milestone-02 | `@pending @real-io @slice-02 @us-2 @env-two-tenant @contract-shape:bounded-change` |
+| 8 | A tenant's account is invisible to every other tenant | milestone-02 | `@pending @real-io @adapter-integration @slice-02 @us-2 @env-two-tenant @contract-shape:unbounded-preservation` |
+| 9 | A tenant cannot post a transfer touching another tenant's account | milestone-02 | `@pending @real-io @slice-02 @us-2 @env-two-tenant @contract-shape:unbounded-preservation` |
+| 10 | Existing single-tenant invariants still hold within one tenant | milestone-02 | `@pending @real-io @slice-02 @us-2 @env-two-tenant @contract-shape:bounded-change` |
+| 11 | A malformed or missing tenant credential is refused before any tenant logic runs | milestone-02 | `@pending @real-io @slice-02 @us-2 @env-two-tenant @contract-shape:unbounded-preservation` |
+| 12 | A tenant's entries are scoped to that tenant alone | milestone-02 | `@pending @real-io @adapter-integration @slice-02 @us-2 @env-two-tenant @contract-shape:pure-function` |
+| 13 | The existing unscoped entries call keeps working for the console's own credential | milestone-02 | `@pending @real-io @adapter-integration @console-compat @slice-02 @us-2 @env-two-tenant @contract-shape:pure-function` |
+| 14 | A tenant's clean books report YES independent of another tenant's state | milestone-03 | `@pending @real-io @adapter-integration @slice-03 @us-3 @env-two-tenant @contract-shape:pure-function` |
+| 15 | A tenant's drift is named without exposing other tenants | milestone-03 | `@pending @real-io @adapter-integration @slice-03 @us-3 @env-two-tenant @contract-shape:pure-function` |
+| 16 | Checking an unprovisioned tenant is refused | milestone-03 | `@pending @real-io @slice-03 @us-3 @env-two-tenant @contract-shape:unbounded-preservation` |
+| 17 | The existing unscoped trial-balance call keeps succeeding once tenants exist | milestone-03 | `@pending @real-io @adapter-integration @console-compat @slice-03 @us-3 @env-two-tenant @contract-shape:pure-function` |
+| 18 | The existing unscoped console verdict call keeps succeeding once tenants exist | milestone-03 | `@pending @real-io @adapter-integration @console-compat @slice-03 @us-3 @env-two-tenant @contract-shape:pure-function` |
+
+Error/edge coverage: 8 of 18 (44%) are refusal or isolation-proof scenarios
+— above the 40% floor.
+
+## Wave: DISTILL / [REF] WS strategy
+
+**Architecture of Reference** (project-level, unchanged): driving ports real
+(chi router + `httptest.Server`), driven-internal real (Testcontainers
+PostgreSQL 16), driven-external/non-deterministic faked. No port in this
+feature's scope needed a soft prompt — every port classifies the same way
+`ledger-core`'s own ports already do. The retired per-feature Strategy A/B/C/D
+choice does not apply to new features (`nw-distill` § Walking Skeleton
+Strategy, RETIRED section); this feature's DISCUSS-era "Strategy C" note
+(§ Wave: DISCUSS / WS strategy, above) is historical record from before the
+retirement, superseded by the Architecture of Reference default, which agrees
+with it in substance (real local resources, no fake for isolation).
+
+One walking-skeleton scenario, `@walking_skeleton @driving_port`, chaining
+slice 01 into slice 02 through the production composition root (real chi
+router, real `requireOperatorKey`, real PostgreSQL 16) — per DISCUSS's own
+locked decision that slice 01 alone does not prove this feature's reason for
+existing.
+
+## Wave: DISTILL / [REF] Adapter coverage table
+
+| Adapter | @real-io scenario | Covered by |
+|---|---|---|
+| `chi` router / `requireOperatorKey` (extended: mounts `POST /tenants`) | YES | WS + every milestone-01 scenario |
+| `TenantRepository` (PostgreSQL 16, new) | YES (once DELIVER builds it — every provisioning scenario exercises it through the real driving port) | WS + milestone-01 |
+| `AccountRepository` (PostgreSQL 16, extended: tenant-scoped) | YES | WS + milestone-02 |
+| `TransactionRepository` (PostgreSQL 16, extended: tenant-scoped) | YES | milestone-02 |
+| `IdempotencyStore` (PostgreSQL 16, unchanged) | YES (inherited coverage from `ledgercore`'s own suite; not re-tested here — this feature does not change I7) | n/a — out of this feature's own scope, correctly not duplicated |
+
+Zero "NO — MISSING" rows: every driven adapter this feature touches has at
+least one `@real-io` scenario.
+
+## Wave: DISTILL / [REF] Scaffolds
+
+One RED scaffold, minimal by design (Mandate 1 — this suite invokes driving
+ports exclusively, so only the HTTP route needed one):
+
+| File | What | Marker |
+|---|---|---|
+| `internal/adapters/http/router.go` | `POST /tenants` mounted to `scaffold("provision_tenant")` (existing helper, reused verbatim — ledger-core's own RED-scaffold convention, not a new one) | `"error": "__SCAFFOLD__"` in the JSON body, 501 status |
+
+No domain- or application-layer scaffold: step definitions in
+`tests/acceptance/multitenancy/world.go` import only `internal/adapters/http`
+and `internal/adapters/postgres` (driving + driven-internal, per Mandate 1) —
+never `internal/domain` or `internal/app` directly.
+
+## Wave: DISTILL / [REF] Test placement
+
+`tests/acceptance/multitenancy/` — sibling package to
+`tests/acceptance/ledgercore/`, not a subdirectory of it. Justified directly
+in `world.go`'s header comment: this feature needs its own composition root
+(concurrent multi-tenant identities against one server, unlike `ledgercore`'s
+single-identity `Ledger`) and its own walking skeleton (DISCUSS's own locked
+decision). One-line precedent: `web/console/`'s own sibling-tree placement
+relative to `internal/` for `ledger-core-console`.
+
+## Wave: DISTILL / [REF] Driving Adapter coverage
+
+Both driving ports DESIGN named for this feature are exercised via subprocess-
+equivalent real HTTP (`httptest.Server` over the real `chi` router, the same
+mechanism the whole existing suite uses — this project's own established
+"driving adapter" proof, per `atdd-infrastructure-policy.md`):
+
+| Port | Verified by |
+|---|---|
+| `POST /tenants` (new) | WS + milestone-01, all 5 scenarios: status code, response shape (`tenant_id`/`name`/`tenant_key`), and both credential-handling paths (admin vs. non-admin/unissued) |
+| `POST /accounts`, `POST /transfers`, `GET /accounts/{id}` (tenant-scoped) | WS + milestone-02 |
+| `GET /accounts/{id}/entries`, `GET /health/trial-balance`, `GET /console/verdict` (dual-mode) | milestone-02 (entries), milestone-03 (trial-balance, console verdict) — each with both a `tenant_key`-scoped and an unscoped `OperatorKey` variant, `@console-compat` |
+
+Zero uncovered entry points.
+
+## Wave: DISTILL / [REF] Pre-requisites
+
+DESIGN + DEVOPS artifacts these scenarios depend on: `chi` nested route
+groups + `requireOperatorKey`/`requireTenantKey`/`requireTenantKeyOrOperatorKey`
+(DDD-22, not yet built — this is exactly what the scaffold and the 10 RED
+failures are waiting on) · composite `(tenant_id, id)` PK migration (DDD-24,
+not yet applied — this suite always migrates from zero, so the
+`legacy-backfilled` environment's own migration-safety proof is DEVOPS/DELIVER's
+concern, not exercised by this scenario set) · `two-tenant` and `clean`
+environments (`devops/environments.yaml`) — every scenario in this suite
+provisions its own tenants fresh per scenario (fresh container, OPS-11
+precedent), so it satisfies `two-tenant`'s preconditions by construction
+rather than depending on a pre-seeded fixture.
+
+## Wave: DISTILL / [REF] Pre-DELIVER fail-for-the-right-reason gate
+
+**PASS.** Run live against this environment's real Docker/Testcontainers
+toolchain, all 18 scenarios enabled: 8 passed, 10 failed, every failure
+classified `MISSING_FUNCTIONALITY` — zero `IMPORT_ERROR`/`FIXTURE_BROKEN`/
+`SETUP_FAILURE`, zero `WRONG_ASSERTION`/`OBSERVABLE_NOT_AT_PORT`. Full
+classification, including two genuine test-infrastructure bugs caught and
+fixed during this run (a panic-on-missing-credential and a
+nil-httptest-server race, both acceptance-suite-only, no production code
+touched beyond the one scaffold route): `docs/feature/multitenancy/distill/red-classification.md`.
+
+## Wave: DISTILL / [REF] Mandate-12 compliance
+
+Full evidence: `docs/feature/multitenancy/distill/wave-decisions.md` § Mandate-12.
+Summary: all four criteria met — typed domain module
+(`tests/acceptance/multitenancy/domain_types.go`, reusing `ledgercore`'s
+`Money`/`AccountKind` as this project's existing SSOT for those two nouns),
+typed `World` method signatures throughout, no business logic in step bodies,
+step-reuse-ratio 2.49× (informational, not gated).
+
+## Wave: DISTILL / [REF] Wave decisions summary
+
+Full narrative: `docs/feature/multitenancy/distill/wave-decisions.md`.
+Language: Go (detected from `go.mod`). Infrastructure policy: inherited,
+6 rows appended (5 driving, 1 driven-internal), zero rewritten. State-delta
+port: inherited, not re-bootstrapped. 18 scenarios (1 WS + 17 milestone),
+44% error/edge coverage. One RED scaffold (`POST /tenants`). Pre-DELIVER gate:
+PASS. Outcomes registry: 4 new rows (OUT-11..14), 4 extended in place
+(OUT-1/2/4/5), zero collisions. Tier B: not added (journeys too shallow /
+input space not domain-rich enough to clear Mandate 10's bar).
+
+**Handoff**: to `nw-software-crafter` (DELIVER wave), pending the Final Wave
+Review Gate (four parallel reviewers against this file's full DISCUSS→DESIGN→
+DEVOPS→DISTILL chain).
+
+---
+
+## Wave: DISTILL / [REF] Final Wave Review Gate — verdict
+
+Four reviewers dispatched in parallel (Haiku) against this file's full
+DISCUSS→DESIGN→DEVOPS→DISTILL chain, 2026-09-03:
+
+| Reviewer | Wave reviewed | Verdict | Blockers | High | Medium | Low |
+|---|---|---|---|---|---|---|
+| Eclipse (`nw-product-owner-reviewer`) | DISCUSS | approved | 0 | 0 | 1 | 1 |
+| Architect (`nw-solution-architect-reviewer`) | DESIGN | approved | 0 | 0 | 0 | 1 |
+| Forge (`nw-platform-architect-reviewer`) | DEVOPS | conditionally_approved | 0 | 0 | 0 | 3 |
+| Sentinel (`nw-acceptance-designer-reviewer`) | DISTILL + AT suite | conditionally_approved | 0 | 1 | 0 | 2 |
+
+**Zero blockers across all four reviewers.** Cross-wave consistency check: no
+contradictions surfaced — Architect's and Forge's independent findings both
+named the same OPS-11 (`scripts/race/main.go` `RACE_TENANT_KEY`) item without
+disagreement, which is convergence, not conflict.
+
+**Sentinel's one HIGH finding** — console-compat scenarios
+(`@console-compat`, milestone-02 line 69, milestone-03 lines 44/51) assert
+"unchanged in shape" via status + field presence, not a byte-for-byte diff
+against a captured pre-multitenancy golden response — is the *same* gap this
+wave's own `distill/wave-decisions.md` § Judgment calls already self-flagged
+before the review ran ("A literal byte-diff would need a captured
+pre-multitenancy response fixture this feature does not have... Flagged for
+DELIVER: if `console-compat`'s own CI job needs a stricter diff, that is an
+assertion-tightening task at GREEN time, not a DISTILL scope gap"). Per the
+gate's own rule ("zero blockers, zero high **or accepted-with-conditions
+with documented action items in DELIVER scope**"), this qualifies:
+zero blockers, one high with a pre-existing, independently-corroborated
+DELIVER action item. **Accepted with condition, not escalated for a revision
+cycle.**
+
+**Other findings, all low/medium, all either pre-existing tracked risks or
+DELIVER-scope action items already named in this file**:
+- OPS-11 (`scripts/race/main.go`) — named by both Architect and Forge; already
+  recorded as OPS-11 in § Wave: DEVOPS / OPS decisions.
+- Iteration-2 remediation not re-reviewed (Eclipse, medium) — a documented,
+  deliberate methodology choice per § Wave: DISCUSS's own text (review budget
+  spent on iteration 2; fixes mechanical and 1:1 traceable), not a fresh gap.
+- Cross-feature dependency on the not-yet-chartered `operator-authentication`
+  feature (Eclipse, low) — already tracked in § Wave: DISCUSS / Pre-requisites.
+- Environment/CI-job naming consistency, KPI threshold provenance (Forge, low
+  ×2) — already flagged as judgment calls in § Wave: DEVOPS.
+- DDD-18/I9 sign-off linkage (Sentinel, medium — reclassified low here: DESIGN's
+  `design/wave-decisions.md` § Domain Model already records the `nw-ddd-architect`
+  resolution in full, satisfying DoD item 7; no further action needed) and
+  Tier B rejection rationale (Sentinel, low, already explicit in
+  `distill/wave-decisions.md`).
+
+**Consolidated DELIVER-scope action items** (carried forward, not blocking
+this wave's handoff):
+1. Implement OPS-11 (`RACE_TENANT_KEY` in `scripts/race/main.go`) before
+   `race-02`/`race-03` are relied on post-slice-02.
+2. Evaluate whether `console-compat`'s CI job (OPS-12) needs a byte-for-byte
+   golden-response diff for the three dual-mode endpoints; tighten the three
+   `@console-compat` scenario assertions at GREEN time if so.
+3. Confirm `LEDGEROPS_DEMO_TENANT_KEY`/`Makefile` `AUTH`/`OPERATOR_AUTH` split
+   (OPS-10, DDD-23 Option C) is implemented before `demo-01..04`/`chaos-01`
+   are exercised against tenant-scoped routes.
+
+**Gate result: PASS.** Handoff to `nw-software-crafter` (DELIVER) is
+unblocked.
