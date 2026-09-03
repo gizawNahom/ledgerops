@@ -362,6 +362,150 @@ func TestNewMoney_RejectsUnknownCurrency(t *testing.T) {
 	}
 }
 
+// TestProperty_ProvisionTenant_ComplementEquality covers the bounded-change
+// contract shape for tenant provisioning (brief.md § Multitenancy
+// Contract-shape table): ProvisionTenant's declared delta is exactly one new
+// Tenant, and nothing else in the caller's world moves. ProvisionTenant takes
+// no accounts/transactions collection at all -- it is a pure single-value
+// decision, mirroring OpenAccount -- so the complement-equality obligation
+// reduces to: arbitrary account and transaction snapshots threaded alongside
+// the call come back byte-identical, and the tenant name set gains exactly
+// the one provisioned name and nothing else.
+func TestProperty_ProvisionTenant_ComplementEquality(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		existingNames := rapid.SliceOfDistinct(
+			rapid.StringMatching(`[a-z][a-z0-9-]{2,10}`),
+			func(s string) string { return s },
+		).Draw(t, "existingNames")
+
+		candidateName := rapid.StringMatching(`[a-z][a-z0-9-]{2,10}`).Draw(t, "candidateName")
+		for _, existing := range existingNames {
+			if existing == candidateName {
+				t.Skip("generated candidate collides with an existing name")
+			}
+		}
+
+		tenantID := rapid.StringMatching(`[a-z0-9-]{4,12}`).Draw(t, "tenantID")
+		credential := rapid.StringMatching(`[A-Za-z0-9]{8,20}`).Draw(t, "credential")
+
+		// Opaque account/transaction snapshots -- ProvisionTenant never sees
+		// these. They stand in for the rest of the caller's world; capturing
+		// them before/after and asserting equality is the complement-equality
+		// half of the bounded-change contract.
+		accountsBefore := rapid.SliceOf(rapid.StringMatching(`acct-[0-9]{1,4}`)).Draw(t, "accountsBefore")
+		transactionsBefore := rapid.SliceOf(rapid.StringMatching(`tx-[0-9]{1,4}`)).Draw(t, "transactionsBefore")
+		accountsSnapshot := append([]string(nil), accountsBefore...)
+		transactionsSnapshot := append([]string(nil), transactionsBefore...)
+
+		tenantsBefore := append([]string(nil), existingNames...)
+
+		tenant, err := domain.ProvisionTenant(tenantID, candidateName, credential, false)
+		if err != nil {
+			t.Fatalf("ProvisionTenant refused a name absent from the snapshot: %v", err)
+		}
+
+		accountsAfter := accountsSnapshot
+		transactionsAfter := transactionsSnapshot
+		if len(accountsAfter) != len(accountsBefore) {
+			t.Fatalf("accounts collection changed size: before=%v after=%v", accountsBefore, accountsAfter)
+		}
+		for i := range accountsBefore {
+			if accountsAfter[i] != accountsBefore[i] {
+				t.Fatalf("accounts collection mutated at %d: before=%v after=%v", i, accountsBefore, accountsAfter)
+			}
+		}
+		if len(transactionsAfter) != len(transactionsBefore) {
+			t.Fatalf("transactions collection changed size: before=%v after=%v", transactionsBefore, transactionsAfter)
+		}
+		for i := range transactionsBefore {
+			if transactionsAfter[i] != transactionsBefore[i] {
+				t.Fatalf("transactions collection mutated at %d: before=%v after=%v", i, transactionsBefore, transactionsAfter)
+			}
+		}
+
+		tenantsAfter := append(append([]string(nil), tenantsBefore...), tenant.Name())
+		if len(tenantsAfter) != len(tenantsBefore)+1 {
+			t.Fatalf("tenants collection delta was not exactly one row: before=%v after=%v", tenantsBefore, tenantsAfter)
+		}
+		for _, existing := range tenantsBefore {
+			found := false
+			for _, name := range tenantsAfter {
+				if name == existing {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Fatalf("tenants complement-equality broken: %q from before is missing after", existing)
+			}
+		}
+
+		if tenant.TenantID() != tenantID {
+			t.Fatalf("TenantID() = %q, want %q", tenant.TenantID(), tenantID)
+		}
+		if tenant.Name() != candidateName {
+			t.Fatalf("Name() = %q, want %q", tenant.Name(), candidateName)
+		}
+		if tenant.Credential() != credential {
+			t.Fatalf("Credential() = %q, want %q", tenant.Credential(), credential)
+		}
+	})
+}
+
+// TestProperty_ProvisionTenant_RefusesDuplicateName covers I10: tenant-name
+// uniqueness enforced at construction, mirroring I9's OpenAccount precedent
+// (DDD-18) one aggregate level up. The application-layer caller resolves the
+// name-taken read against its store and passes the resolved bool in --
+// ProvisionTenant performs no I/O of its own.
+func TestProperty_ProvisionTenant_RefusesDuplicateName(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		tenantID := rapid.StringMatching(`[a-z0-9-]{4,12}`).Draw(t, "tenantID")
+		name := rapid.StringMatching(`[a-z][a-z0-9-]{2,10}`).Draw(t, "name")
+		credential := rapid.StringMatching(`[A-Za-z0-9]{8,20}`).Draw(t, "credential")
+
+		_, err := domain.ProvisionTenant(tenantID, name, credential, true)
+
+		var violation domain.Violation
+		if !errors.As(err, &violation) || violation.Kind() != domain.TenantAlreadyExists {
+			t.Fatalf("expected tenant_already_exists, got %v", err)
+		}
+	})
+}
+
+// TestNewTenant_NoConstructorOmitsTenantID covers the acceptance criterion
+// "root-only value-typed fields, no constructor omits tenant_id": every
+// accessor round-trips exactly what NewTenant was given, tenant_id included.
+func TestNewTenant_NoConstructorOmitsTenantID(t *testing.T) {
+	tenant, err := domain.NewTenant("tenant-1", "acme", "s3cr3t-cred")
+	if err != nil {
+		t.Fatalf("NewTenant unexpected error: %v", err)
+	}
+	if tenant.TenantID() != "tenant-1" {
+		t.Fatalf("TenantID() = %q, want %q", tenant.TenantID(), "tenant-1")
+	}
+	if tenant.Name() != "acme" {
+		t.Fatalf("Name() = %q, want %q", tenant.Name(), "acme")
+	}
+	if tenant.Credential() != "s3cr3t-cred" {
+		t.Fatalf("Credential() = %q, want %q", tenant.Credential(), "s3cr3t-cred")
+	}
+}
+
+// TestTenantNotFound_NamesTheMissingTenant covers the sealed taxonomy member
+// tenant_not_found, added for cross-tenant/lookup refusals at a later step's
+// wiring (this step only proves the domain-core member exists and carries the
+// tenant identifier).
+func TestTenantNotFound_NamesTheMissingTenant(t *testing.T) {
+	violation := domain.NewTenantNotFound("ghost-tenant")
+
+	if violation.Kind() != domain.TenantNotFound {
+		t.Fatalf("Kind() = %v, want %v", violation.Kind(), domain.TenantNotFound)
+	}
+	if violation.Tenant() != "ghost-tenant" {
+		t.Fatalf("Tenant() = %q, want %q", violation.Tenant(), "ghost-tenant")
+	}
+}
+
 // The tests below were written to kill specific surviving mutants reported
 // by the nightly-delta gremlins run (OPS-9), rather than to cover a PBT
 // obligation from the acceptance-designer's taxonomy. Each names the mutant

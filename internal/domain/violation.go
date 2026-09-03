@@ -39,6 +39,19 @@ const (
 	// layer 3 the day POST /accounts accepts a currency. Do not delete for
 	// being uncovered.
 	CurrencyMismatch ViolationKind = "currency_mismatch"
+	// TenantAlreadyExists — provisioning a tenant under a name that already
+	// names one is refused (I10), mirroring AccountAlreadyExists (DDD-18) one
+	// aggregate level up. The identifier is already bound; a caller retry
+	// cannot be told apart from a name collision between two independent
+	// callers, so this is a refusal, never an idempotent success.
+	TenantAlreadyExists ViolationKind = "tenant_already_exists"
+	// TenantNotFound — a lookup names a tenant that was never provisioned.
+	// Cross-tenant account access does NOT use this member -- it reuses the
+	// existing UnknownAccount member unchanged (I8): a tenant-scoped query
+	// that cannot see another tenant's row returns nothing, which already
+	// maps to account_not_found today. This is a deliberate domain-modelling
+	// position, not an oversight.
+	TenantNotFound ViolationKind = "tenant_not_found"
 )
 
 // Violation is the single domain error type. It keeps the idiomatic Go
@@ -51,6 +64,7 @@ type Violation struct {
 	requested    Money
 	fromCurrency string
 	toCurrency   string
+	tenant       string
 	sealed       sealedViolation
 }
 
@@ -105,6 +119,17 @@ func NewCurrencyMismatch(fromCurrency, toCurrency string) Violation {
 	}
 }
 
+// NewTenantAlreadyExists names the tenant name that was already bound when
+// provisioning was attempted (I10).
+func NewTenantAlreadyExists(name string) Violation {
+	return Violation{kind: TenantAlreadyExists, tenant: name, sealed: sealedMarker{}}
+}
+
+// NewTenantNotFound names the tenant that could not be found.
+func NewTenantNotFound(tenantID string) Violation {
+	return Violation{kind: TenantNotFound, tenant: tenantID, sealed: sealedMarker{}}
+}
+
 // Error satisfies the error interface.
 func (v Violation) Error() string {
 	switch v.kind {
@@ -123,6 +148,10 @@ func (v Violation) Error() string {
 		return "invalid amount"
 	case CurrencyMismatch:
 		return fmt.Sprintf("currency mismatch: %s vs %s", v.fromCurrency, v.toCurrency)
+	case TenantAlreadyExists:
+		return fmt.Sprintf("tenant already exists: %s", v.tenant)
+	case TenantNotFound:
+		return fmt.Sprintf("tenant not found: %s", v.tenant)
 	default:
 		return string(v.kind)
 	}
@@ -156,4 +185,9 @@ func (v Violation) FromCurrency() string {
 
 func (v Violation) ToCurrency() string {
 	return v.toCurrency
+}
+
+// Tenant exposes the tenant a violation refers to, where it has one.
+func (v Violation) Tenant() string {
+	return v.tenant
 }
