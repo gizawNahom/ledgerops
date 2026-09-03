@@ -14,10 +14,17 @@ const (
 // Account is an immutable snapshot of a holder of value. Applying a movement
 // yields a new Account; there is no mutating method, so an Account holding an
 // illegal balance is never produced (DDD-15).
+//
+// tenantID scopes the snapshot to the Tenant aggregate that owns it (I8).
+// NewAccount leaves it at the zero value ("") — existing single-tenant call
+// sites are unaffected until they opt in via WithTenant, which is how the
+// snapshots domain.Post cross-checks against a TransferCommand's own
+// tenant_id get their value (brief.md § Domain Model / Multitenancy).
 type Account struct {
-	id      string
-	kind    AccountKind
-	balance Money
+	id       string
+	kind     AccountKind
+	balance  Money
+	tenantID string
 }
 
 // NewAccount is the smart constructor. It refuses a wallet opened with a
@@ -45,6 +52,20 @@ func (a Account) Balance() Money {
 	return a.balance
 }
 
+// TenantID exposes the tenant this snapshot is scoped to (I8). The zero
+// value ("") means no tenant has been assigned yet.
+func (a Account) TenantID() string {
+	return a.tenantID
+}
+
+// WithTenant returns a copy of the account scoped to the given tenant. Pure
+// and immutable like every other Account transformation (DDD-15) — there is
+// no mutating setter.
+func (a Account) WithTenant(tenantID string) Account {
+	a.tenantID = tenantID
+	return a
+}
+
 // Apply returns a new Account with the delta applied, or a violation when the
 // result would take a wallet below zero, or when the delta's currency does not
 // match the account's own. The I4 check happens on the way to constructing the
@@ -57,5 +78,5 @@ func (a Account) Apply(delta Money) (Account, error) {
 	if a.kind == Wallet && newBalance.MinorUnits() < 0 {
 		return Account{}, NewInsufficientFunds(a.id, a.balance, delta.Negate())
 	}
-	return Account{id: a.id, kind: a.kind, balance: newBalance}, nil
+	return Account{id: a.id, kind: a.kind, balance: newBalance, tenantID: a.tenantID}, nil
 }

@@ -633,6 +633,121 @@ func TestProperty_NewMoneyFromDecimalLiteral_ValidFracDigitsWithinScale(t *testi
 	})
 }
 
+// TestProperty_PostRefusesCrossTenantReference covers I8's construction-time
+// story: a TransferCommand naming a snapshot whose tenant_id differs from the
+// command's own tenant_id is refused with account_not_found, before any
+// balance math runs -- so the refusal fires even when the mismatched account
+// would otherwise have supported the movement (or would otherwise have been
+// refused for an unrelated reason, e.g. insufficient funds). Extends the
+// existing rapid harness for domain.Post (step 02-01).
+func TestProperty_PostRefusesCrossTenantReference(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		currency := genCurrency(t, "currency")
+
+		commandTenant := rapid.StringMatching(`tnt_[a-z0-9]{4}`).Draw(t, "commandTenant")
+		otherTenant := rapid.StringMatching(`tnt_[a-z0-9]{4}`).Draw(t, "otherTenant")
+		if commandTenant == otherTenant {
+			t.Skip("generator drew the same tenant twice -- not a cross-tenant case")
+		}
+
+		mismatchSide := rapid.SampledFrom([]string{"from", "to"}).Draw(t, "mismatchSide")
+
+		fromBalanceMinor := rapid.Int64Range(0, 1_000_000_000).Draw(t, "fromBalance")
+		fromBalance, err := domain.NewMoney(fromBalanceMinor, currency)
+		if err != nil {
+			t.Fatalf("NewMoney rejected a known currency: %v", err)
+		}
+		fromAccount, err := domain.NewAccount("from", domain.Wallet, fromBalance)
+		if err != nil {
+			t.Fatalf("NewAccount rejected a non-negative balance: %v", err)
+		}
+
+		toBalanceMinor := rapid.Int64Range(0, 1_000_000_000).Draw(t, "toBalance")
+		toBalance, err := domain.NewMoney(toBalanceMinor, currency)
+		if err != nil {
+			t.Fatalf("NewMoney rejected a known currency: %v", err)
+		}
+		toAccount, err := domain.NewAccount("to", domain.System, toBalance)
+		if err != nil {
+			t.Fatalf("NewAccount rejected a non-negative balance: %v", err)
+		}
+
+		var wantMismatchedID string
+		if mismatchSide == "from" {
+			fromAccount = fromAccount.WithTenant(otherTenant)
+			toAccount = toAccount.WithTenant(commandTenant)
+			wantMismatchedID = "from"
+		} else {
+			fromAccount = fromAccount.WithTenant(commandTenant)
+			toAccount = toAccount.WithTenant(otherTenant)
+			wantMismatchedID = "to"
+		}
+
+		// Deliberately request more than the wallet side can cover, so an
+		// insufficient-funds refusal is available as a competing outcome --
+		// the cross-tenant refusal must still win.
+		amountMinor := rapid.Int64Range(fromBalanceMinor+1, fromBalanceMinor+1_000_000).Draw(t, "amount")
+		amount, err := domain.NewMoney(amountMinor, currency)
+		if err != nil {
+			t.Fatalf("NewMoney rejected a known currency: %v", err)
+		}
+
+		cmd := domain.TransferCommand{From: "from", To: "to", Amount: amount, TenantID: commandTenant}
+		_, postErr := domain.Post(cmd, []domain.Account{fromAccount, toAccount}, time.Now(), "tx-cross-tenant")
+
+		var violation domain.Violation
+		if !errors.As(postErr, &violation) || violation.Kind() != domain.UnknownAccount {
+			t.Fatalf("expected account_not_found for a cross-tenant reference (even under insufficient funds), got %v", postErr)
+		}
+		if violation.Account() != wantMismatchedID {
+			t.Fatalf("cross-tenant refusal named %q, want %q", violation.Account(), wantMismatchedID)
+		}
+	})
+}
+
+// TestPost_CrossTenantRefusalReusesAccountNotFound covers the acceptance
+// criterion "Cross-tenant refusal reuses the existing account_not_found
+// member (I8 confirmed, no new taxonomy member)" with a pinned example: I1
+// and I4 keep their existing shape -- this is one additional branch in the
+// same pre-construction gate, not a restructuring.
+func TestPost_CrossTenantRefusalReusesAccountNotFound(t *testing.T) {
+	balance, err := domain.NewMoney(1_000, "USD")
+	if err != nil {
+		t.Fatalf("NewMoney rejected a known currency: %v", err)
+	}
+	fromAccount, err := domain.NewAccount("from", domain.Wallet, balance)
+	if err != nil {
+		t.Fatalf("NewAccount rejected a non-negative balance: %v", err)
+	}
+	fromAccount = fromAccount.WithTenant("tnt_alice")
+
+	zero, err := domain.NewMoney(0, "USD")
+	if err != nil {
+		t.Fatalf("NewMoney rejected a known currency: %v", err)
+	}
+	toAccount, err := domain.NewAccount("to", domain.System, zero)
+	if err != nil {
+		t.Fatalf("NewAccount rejected a non-negative balance: %v", err)
+	}
+	toAccount = toAccount.WithTenant("tnt_bob")
+
+	amount, err := domain.NewMoney(100, "USD")
+	if err != nil {
+		t.Fatalf("NewMoney rejected a known currency: %v", err)
+	}
+
+	cmd := domain.TransferCommand{From: "from", To: "to", Amount: amount, TenantID: "tnt_alice"}
+	_, postErr := domain.Post(cmd, []domain.Account{fromAccount, toAccount}, time.Now(), "tx-cross-tenant-pinned")
+
+	var violation domain.Violation
+	if !errors.As(postErr, &violation) || violation.Kind() != domain.UnknownAccount {
+		t.Fatalf("expected account_not_found (reused, no new taxonomy member), got %v", postErr)
+	}
+	if violation.Account() != "to" {
+		t.Fatalf("cross-tenant refusal named %q, want %q", violation.Account(), "to")
+	}
+}
+
 // TestNewMoneyFromDecimalLiteral_FracDigitsExceedingScaleIsRefused kills the
 // CONDITIONALS_BOUNDARY and CONDITIONALS_NEGATION mutants at post.go:126
 // (`len(fracDigits) > scale`): one fractional digit past the currency's

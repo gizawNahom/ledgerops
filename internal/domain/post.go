@@ -39,6 +39,19 @@ func Post(cmd TransferCommand, snapshots []Account, now time.Time, transactionID
 		return Posting{}, NewUnknownAccount(cmd.To)
 	}
 
+	// I8 (construction-time): a snapshot naming a different tenant than the
+	// command's own is refused here, before any balance math runs, so it
+	// takes precedence over InsufficientFunds. Reuses UnknownAccount rather
+	// than a new taxonomy member — from a tenant-scoped caller's point of
+	// view, another tenant's account does not exist (brief.md § Domain
+	// Model / Multitenancy, "Refusal kind for a cross-tenant reference").
+	if fromAccount.TenantID() != cmd.TenantID {
+		return Posting{}, NewUnknownAccount(cmd.From)
+	}
+	if toAccount.TenantID() != cmd.TenantID {
+		return Posting{}, NewUnknownAccount(cmd.To)
+	}
+
 	fromDelta := cmd.Amount.Negate()
 	toDelta := cmd.Amount
 
@@ -143,10 +156,17 @@ func NewMoneyFromDecimalLiteral(negative bool, wholeDigits, fracDigits, currency
 
 // TransferCommand is the movement as the integrator asked for it: one call, not
 // two legs (journey post-a-transfer, mental_model).
+//
+// TenantID is the caller's own tenant, checked against every touched
+// snapshot's tenant_id before any balance math runs (I8). Left at the zero
+// value (""), it matches accounts left at their own zero-value tenantID, so
+// single-tenant callers that have not opted into tenant scoping yet see no
+// behavior change.
 type TransferCommand struct {
-	From   string
-	To     string
-	Amount Money
+	From     string
+	To       string
+	Amount   Money
+	TenantID string
 }
 
 // Posting is the complete intended change: the transaction, its entries, and
