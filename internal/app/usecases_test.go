@@ -13,6 +13,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -384,4 +385,106 @@ func TestProperty_VerifyBooks_AgreeingBalancesAreReportedHealthy(t *testing.T) {
 			t.Fatalf("EntryCount = %d, want %d", report.EntryCount, len(entries))
 		}
 	})
+}
+
+// captureProvisioningUniverse snapshots the three collections
+// ProvisionTenant's bounded-change contract (step 01-03) is scoped over:
+// tenants (the one collection allowed to change), accounts, and
+// transactions (entries) — both of which must stay untouched by
+// provisioning a tenant.
+func captureProvisioningUniverse(store *fakeStore) statedelta.Snapshot {
+	return statedelta.Snapshot{
+		"tenants.count":      len(store.tenants),
+		"accounts.count":     len(store.accounts),
+		"transactions.count": len(store.entries),
+	}
+}
+
+var provisioningUniverse = []string{
+	"tenants.count",
+	"accounts.count",
+	"transactions.count",
+}
+
+// TestProperty_ProvisionTenant_BoundedChangeAddsExactlyOneTenant covers the
+// contract-shape (implementation_notes, step 01-03): provisioning a tenant is
+// bounded-change over the Tenant collection only — exactly one new tenant
+// row, and the accounts/transactions collections are untouched
+// (after.accounts == before.accounts, after.transactions ==
+// before.transactions). The minted tenant_id/tenant_key carry the tnt_/tk_
+// prefixes (credential format, brief.md § Multitenancy), and the plaintext
+// tenant_key is returned exactly once in ProvisionedTenant.
+func TestProperty_ProvisionTenant_BoundedChangeAddsExactlyOneTenant(t *testing.T) {
+	rapid.Check(t, func(rt *rapid.T) {
+		name := rapid.StringMatching(`[a-z][a-z0-9-]{2,10}`).Draw(rt, "name")
+
+		store := newFakeStore()
+		ledger := app.NewLedger(store, fixedClock, sequentialIDs())
+
+		before := captureProvisioningUniverse(store)
+		provisioned, err := ledger.ProvisionTenant(context.Background(), name)
+		if err != nil {
+			rt.Fatalf("unexpected refusal provisioning tenant %q: %v", name, err)
+		}
+		after := captureProvisioningUniverse(store)
+
+		statedelta.AssertStateDelta(t, before, after, provisioningUniverse, map[string]statedelta.Predicate{
+			"tenants.count": statedelta.SetTo(1),
+		})
+
+		if !strings.HasPrefix(provisioned.TenantID, "tnt_") {
+			rt.Fatalf("TenantID = %q, want tnt_ prefix", provisioned.TenantID)
+		}
+		if !strings.HasPrefix(provisioned.TenantKey, "tk_") {
+			rt.Fatalf("TenantKey = %q, want tk_ prefix", provisioned.TenantKey)
+		}
+		if provisioned.Name != name {
+			rt.Fatalf("Name = %q, want %q", provisioned.Name, name)
+		}
+		if !store.committed {
+			rt.Fatalf("ProvisionTenant succeeded without committing the unit of work")
+		}
+
+		stored, ok := store.tenants[name]
+		if !ok {
+			rt.Fatalf("tenant %q was not persisted", name)
+		}
+		if stored.TenantID() != provisioned.TenantID {
+			rt.Fatalf("persisted TenantID() = %q, want %q", stored.TenantID(), provisioned.TenantID)
+		}
+	})
+}
+
+// TestProvisionTenant_DuplicateNameRefusedWithNoRowWritten covers this step's
+// acceptance criterion verbatim: a duplicate tenant name is refused via
+// domain's tenant_already_exists before any row is written. The universe
+// (tenants included) must show zero change on the refusal path — the second
+// call's Write step never runs.
+//
+// bypass: single example, not a property — two fixed calls with the same
+// name is the whole scenario; a generated name changes nothing about what is
+// being proven (nw-tdd-methodology exempt category does not literally cover
+// this, but declaring the universe via AssertStateDelta below keeps the
+// state-delta discipline rather than a bare post-state assert).
+func TestProvisionTenant_DuplicateNameRefusedWithNoRowWritten(t *testing.T) {
+	store := newFakeStore()
+	ledger := app.NewLedger(store, fixedClock, sequentialIDs())
+	ctx := context.Background()
+
+	if _, err := ledger.ProvisionTenant(ctx, "acme"); err != nil {
+		t.Fatalf("unexpected error on first provisioning: %v", err)
+	}
+
+	before := captureProvisioningUniverse(store)
+	_, err := ledger.ProvisionTenant(ctx, "acme")
+	after := captureProvisioningUniverse(store)
+
+	var violation domain.Violation
+	if !errors.As(err, &violation) || violation.Kind() != domain.TenantAlreadyExists {
+		t.Fatalf("expected tenant_already_exists, got %v", err)
+	}
+
+	// No expected map: every universe slot, tenants.count included, defaults
+	// to Unchanged() — no row was written on the refusal path.
+	statedelta.AssertStateDelta(t, before, after, provisioningUniverse, map[string]statedelta.Predicate{})
 }

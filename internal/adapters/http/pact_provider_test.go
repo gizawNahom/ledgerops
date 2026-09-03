@@ -205,6 +205,7 @@ type pactFakeStore struct {
 	postings map[string]domain.Posting
 	entries  []domain.Entry
 	claims   map[string]ports.Claim
+	tenants  map[string]domain.Tenant
 }
 
 func newPactFakeStore() *pactFakeStore {
@@ -212,6 +213,7 @@ func newPactFakeStore() *pactFakeStore {
 		accounts: map[string]domain.Account{},
 		postings: map[string]domain.Posting{},
 		claims:   map[string]ports.Claim{},
+		tenants:  map[string]domain.Tenant{},
 	}
 }
 
@@ -249,6 +251,9 @@ func (u *pactFakeUnitOfWork) Transactions() ports.TransactionRepository {
 }
 func (u *pactFakeUnitOfWork) Idempotency() ports.IdempotencyStore {
 	return pactFakeIdempotencyStore{u.store}
+}
+func (u *pactFakeUnitOfWork) Tenants() ports.TenantRepository {
+	return pactFakeTenantRepository{u.store}
 }
 func (u *pactFakeUnitOfWork) Commit(ctx context.Context) error   { return nil }
 func (u *pactFakeUnitOfWork) Rollback(ctx context.Context) error { return nil }
@@ -403,4 +408,29 @@ func (r pactFakeIdempotencyStore) Claim(ctx context.Context, key, fingerprint, t
 func (r pactFakeIdempotencyStore) Lookup(ctx context.Context, key string) (ports.Claim, bool, error) {
 	claim, ok := r.store.claims[key]
 	return claim, ok, nil
+}
+
+// pactFakeTenantRepository joined the other pact fakes as of step 01-03
+// (multitenancy) — no pact interaction in this suite exercises
+// ProvisionTenant today, but ports.UnitOfWork now requires Tenants(), so this
+// keeps pactFakeUnitOfWork satisfying the interface with the same
+// input-validation discipline as its siblings.
+type pactFakeTenantRepository struct{ store *pactFakeStore }
+
+var _ ports.TenantRepository = pactFakeTenantRepository{}
+
+func (r pactFakeTenantRepository) ByName(ctx context.Context, name string) (domain.Tenant, error) {
+	tenant, ok := r.store.tenants[name]
+	if !ok {
+		return domain.Tenant{}, domain.NewTenantNotFound(name)
+	}
+	return tenant, nil
+}
+
+func (r pactFakeTenantRepository) Create(ctx context.Context, tenant domain.Tenant) error {
+	if _, exists := r.store.tenants[tenant.Name()]; exists {
+		return fmt.Errorf("pactFakeTenantRepository: tenant name %q already exists", tenant.Name())
+	}
+	r.store.tenants[tenant.Name()] = tenant
+	return nil
 }

@@ -30,6 +30,7 @@ type fakeStore struct {
 	postings  map[string]domain.Posting
 	entries   []domain.Entry
 	claims    map[string]ports.Claim
+	tenants   map[string]domain.Tenant
 	committed bool
 }
 
@@ -42,6 +43,7 @@ func newFakeStore(accounts ...domain.Account) *fakeStore {
 		accounts: byID,
 		postings: map[string]domain.Posting{},
 		claims:   map[string]ports.Claim{},
+		tenants:  map[string]domain.Tenant{},
 	}
 }
 
@@ -61,6 +63,7 @@ func (u *fakeUnitOfWork) Transactions() ports.TransactionRepository {
 	return fakeTransactionRepository{u.store}
 }
 func (u *fakeUnitOfWork) Idempotency() ports.IdempotencyStore { return fakeIdempotencyStore{u.store} }
+func (u *fakeUnitOfWork) Tenants() ports.TenantRepository     { return fakeTenantRepository{u.store} }
 
 func (u *fakeUnitOfWork) Commit(ctx context.Context) error {
 	u.store.committed = true
@@ -229,4 +232,30 @@ func (r fakeIdempotencyStore) Claim(ctx context.Context, key, fingerprint, trans
 func (r fakeIdempotencyStore) Lookup(ctx context.Context, key string) (ports.Claim, bool, error) {
 	claim, ok := r.store.claims[key]
 	return claim, ok, nil
+}
+
+// fakeTenantRepository validates like the real tenantRepository
+// (nw-tdd-methodology's test-double-input-validation doctrine): ByName
+// answers TenantNotFound for an absent name, exactly as
+// postgres.tenantRepository.ByName does, and Create rejects a name already
+// bound so a fake covering ProvisionTenant's I10 refusal path never diverges
+// from the real adapter's behaviour under the unique constraint.
+type fakeTenantRepository struct{ store *fakeStore }
+
+var _ ports.TenantRepository = fakeTenantRepository{}
+
+func (r fakeTenantRepository) ByName(ctx context.Context, name string) (domain.Tenant, error) {
+	tenant, ok := r.store.tenants[name]
+	if !ok {
+		return domain.Tenant{}, domain.NewTenantNotFound(name)
+	}
+	return tenant, nil
+}
+
+func (r fakeTenantRepository) Create(ctx context.Context, tenant domain.Tenant) error {
+	if _, exists := r.store.tenants[tenant.Name()]; exists {
+		return fmt.Errorf("fakeTenantRepository: tenant name %q already exists", tenant.Name())
+	}
+	r.store.tenants[tenant.Name()] = tenant
+	return nil
 }

@@ -192,6 +192,13 @@ func (u *unitOfWork) Idempotency() ports.IdempotencyStore {
 	return idempotencyStore{tx: u.tx}
 }
 
+// Tenants is real as of step 01-03 (multitenancy): tenantRepository shares
+// this unit of work's *pgx.Tx exactly like the other three repositories,
+// which is what makes ProvisionTenant's read-then-create atomic.
+func (u *unitOfWork) Tenants() ports.TenantRepository {
+	return tenantRepository{tx: u.tx}
+}
+
 // Commit and Rollback are idiomatic pgx.Tx passthroughs. A commit or
 // rollback attempted twice (e.g. Commit succeeding, then a deferred Rollback
 // firing anyway) is left to pgx's own error, which callers treat as

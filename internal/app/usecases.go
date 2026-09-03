@@ -256,6 +256,77 @@ func (l *Ledger) accountAlreadyOpen(ctx context.Context, uow ports.UnitOfWork, a
 	return false, fmt.Errorf("checking whether account %q is already open: %w", accountID, err)
 }
 
+// ProvisionTenant mints a new tenant's identity and credential, and stores
+// it — the Read → Decide → Write sandwich, one aggregate level up from
+// CreateAccount, structurally identical on purpose (DDD-26):
+//
+//	Read   (impure): open the unit of work, look up whether name is already
+//	                 bound (I10 courtesy check)
+//	Decide (PURE):   domain.ProvisionTenant — refuses tenant_already_exists
+//	                 before anything is written
+//	Write  (impure): persist the tenant row (the adapter hashes the
+//	                 credential; the plaintext never reaches storage)
+//
+// tenant_id and tenant_key are both minted via the existing IDGenerator port,
+// tnt_/tk_-prefixed at this call site — no new randomness source (DDD-26).
+// The plaintext tenant_key is returned to the caller here, in
+// ProvisionedTenant, exactly once; nothing this function calls, and nothing
+// downstream of it, retains it.
+func (l *Ledger) ProvisionTenant(ctx context.Context, name string) (ProvisionedTenant, error) {
+	return withUnitOfWork(ctx, l.store, fmt.Sprintf("provisioning tenant %q", name),
+		func(uow ports.UnitOfWork) (ProvisionedTenant, error) {
+			alreadyTaken, err := l.tenantNameAlreadyTaken(ctx, uow, name)
+			if err != nil {
+				return ProvisionedTenant{}, err
+			}
+
+			tenantID := "tnt_" + l.nextID()
+			tenantKey := "tk_" + l.nextID()
+
+			tenant, err := domain.ProvisionTenant(tenantID, name, tenantKey, alreadyTaken)
+			if err != nil {
+				return ProvisionedTenant{}, err
+			}
+
+			if err := uow.Tenants().Create(ctx, tenant); err != nil {
+				return ProvisionedTenant{}, fmt.Errorf("provisioning tenant %q: %w", name, err)
+			}
+
+			return ProvisionedTenant{
+				TenantID:  tenant.TenantID(),
+				Name:      tenant.Name(),
+				TenantKey: tenant.Credential(),
+			}, nil
+		})
+}
+
+// tenantNameAlreadyTaken performs the impure read behind the I10 courtesy
+// check: whether a tenant is already bound to this name. TenantNotFound is
+// the expected shape of "no", not an error to propagate; anything else (a
+// genuine infrastructure failure) is — mirroring accountAlreadyOpen exactly,
+// one aggregate level up.
+func (l *Ledger) tenantNameAlreadyTaken(ctx context.Context, uow ports.UnitOfWork, name string) (bool, error) {
+	_, err := uow.Tenants().ByName(ctx, name)
+	if err == nil {
+		return true, nil
+	}
+	var violation domain.Violation
+	if errors.As(err, &violation) && violation.Kind() == domain.TenantNotFound {
+		return false, nil
+	}
+	return false, fmt.Errorf("checking whether tenant name %q is already taken: %w", name, err)
+}
+
+// ProvisionedTenant is what a successful ProvisionTenant answers with. This
+// is the one and only place TenantKey ever appears as plaintext — the
+// caller (the HTTP handler, step 01-04) shows it to the operator once and
+// retains it nowhere.
+type ProvisionedTenant struct {
+	TenantID  string
+	Name      string
+	TenantKey string
+}
+
 // GetBalance reads one account's stored balance.
 func (l *Ledger) GetBalance(ctx context.Context, accountID string) (domain.Account, error) {
 	return withUnitOfWork(ctx, l.store, fmt.Sprintf("reading balance for %q", accountID),

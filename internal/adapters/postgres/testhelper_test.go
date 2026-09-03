@@ -24,6 +24,16 @@ import (
 // (OPS-10) — the same shape every repository test in this package needs.
 func migratedStore(t *testing.T) ports.Store {
 	t.Helper()
+	store, _ := migratedStoreWithDSN(t)
+	return store
+}
+
+// migratedStoreWithDSN is migratedStore plus the application-role DSN, for
+// the rare test (TestTenantRepository_Create_NeverStoresThePlaintextCredential)
+// that must read a column — credential_hash — no driven port exposes, to
+// prove the plaintext credential never reaches it.
+func migratedStoreWithDSN(t *testing.T) (ports.Store, string) {
+	t.Helper()
 	ctx := context.Background()
 
 	container, err := tcpostgres.Run(ctx,
@@ -74,7 +84,7 @@ func migratedStore(t *testing.T) ports.Store {
 	t.Cleanup(func() {
 		_ = store.Close()
 	})
-	return store
+	return store, appDSN
 }
 
 // beginUOW is a small convenience so every repository test does not repeat
