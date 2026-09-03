@@ -887,3 +887,306 @@ instead:
   new colliding outcomes or leave the registry silently stale.
 - **Assessment: clean.** No feature/registry conflict found; five existing
   rows are flagged for a shape update, not a collision.
+
+---
+
+## Wave: DEVOPS / [REF] Prior wave consultation
+
+*Owner: nw-platform-architect (Apex).*
+
+Read in full before writing anything below:
+
+- ✓ `docs/feature/multitenancy/feature-delta.md` § Wave: DISCUSS / Outcome
+  KPIs (the KPI table and its scope note + the console-compatibility
+  guardrail added by the 2026-09-03 amendment)
+- ✓ `docs/feature/multitenancy/feature-delta.md` §§ Wave: DESIGN / System
+  Architecture, Domain Model, Application Architecture (in full)
+- ✓ `docs/feature/multitenancy/design/wave-decisions.md` (in full)
+- ✓ `docs/feature/multitenancy/slices/slice-01-provision-a-tenant.md`
+- ✓ `docs/feature/multitenancy/slices/slice-02-operate-within-a-tenant.md`
+- ✓ `docs/feature/multitenancy/slices/slice-03-verify-one-tenants-books.md`
+- ✓ `docs/feature/ledger-core/feature-delta.md` § Wave: DEVOPS (full section,
+  including the 2026-08-29 `Mutation CI wiring + load testing` amendment)
+- ✓ `docs/feature/ledger-core/devops/environments.yaml`
+- ✓ `docs/product/kpi-contracts.yaml`
+- ✓ `Makefile`, `docker-compose.yml`, `internal/adapters/http/router.go`,
+  `cmd/api/main.go`, `scripts/race/main.go` — verified the DDD-23 credential
+  mechanics directly against the code rather than assumed from the decision
+  record's prose (see § OPS decisions, OPS-10)
+
+**Contradiction check (per the skill's Prior Wave Consultation step)**: none
+found. DESIGN's own system-architecture leg already confirmed zero new
+system-level footprint — same one Go binary, one PostgreSQL 16 instance, no
+hosted environment, no sharding, tens-to-low-hundreds of tenants inside the
+already-validated 300 rps envelope. Every DEVOPS decision below (deployment
+target, orchestration, deployment strategy, mutation testing) is therefore an
+unchanged carry-forward from `ledger-core`'s own DEVOPS wave, not a new
+architectural commitment that could conflict with DESIGN.
+
+---
+
+## Wave: DEVOPS / [REF] OPS decisions
+
+| ID | Decision | Rationale |
+|---|---|---|
+| OPS-1 | No hosted environment — unchanged from `ledger-core` OPS-1 | Confirmed by DESIGN's system-architecture leg: zero new system-level footprint. All three outcome KPIs remain CI assertions, not production telemetry |
+| OPS-2 | Docker Compose, single Go binary + one PostgreSQL 16 — unchanged from `ledger-core` OPS-2 | Tenancy is a data-partitioning dimension, not a new deployable. Nothing new to orchestrate |
+| OPS-3 | GitHub Actions — unchanged from `ledger-core` OPS-3 | Same brownfield CI, extended not replaced |
+| OPS-4 | Brownfield — both existing infrastructure and CI/CD reused and extended (user Decision 4: "Yes, both") | `.github/workflows/ci.yml`, `nightly.yml`, `load-test.yml`, `Makefile`, and `docker-compose.yml` all already exist and are the target of this wave's edits, not a greenfield design |
+| OPS-5 | Observability stack unchanged: `log/slog` JSON logs + Prometheus/Grafana, both scaffold-status per `ledger-core`'s RCA — this feature's three outcome KPIs are wired as new CI-gate jobs, not new production telemetry | No hosted environment exists to observe (OPS-1); building telemetry infrastructure for it now would be the same "furniture" `ledger-core` OPS-5 already rejected |
+| OPS-6 | Recreate deployment; rollback is redeploy-previous-tag, with a new time-boxed caveat — see § Deployment strategy | One binary, one database, one operator, no traffic whose interruption matters. Unchanged from `ledger-core` OPS-6, but this feature's migration (DDD-24) narrows the previously-unconditional rollback safety window — named explicitly rather than silently inherited |
+| OPS-7 | No continuous-learning capability | Conditional on existing monitoring/alerting infrastructure; there is none (same finding as `ledger-core` OPS-7) |
+| OPS-8 | Trunk-based development, full gate suite on every push — unchanged from `ledger-core` OPS-8 | Same cadence, same branch-protection contract; two new required jobs added (§ CI/CD pipeline outline), not a new branching model |
+| OPS-9 | nightly-delta mutation testing — already locked project-wide in `CLAUDE.md` § Mutation Testing Strategy | Not re-asked, not re-written; confirmed applicable to this feature's new domain code (`Tenant` aggregate, I8's construction-time cross-check inside `Post`) under the existing policy |
+| OPS-10 | **New.** DDD-23 Option C implementation spec: a second, fixed demo/dev credential `LEDGEROPS_DEMO_TENANT_KEY` (mirrors `LEDGEROPS_OPERATOR_KEY`'s existing env-var pattern in `docker-compose.yml`'s `app` service and `cmd/api/main.go`'s `os.Getenv` wiring), seeded by DDD-24's migration to the same `tnt_legacy_seed` sentinel tenant. `Makefile`'s `AUTH` variable is repointed from `Authorization: Bearer demo-operator-key` to `Authorization: Bearer <LEDGEROPS_DEMO_TENANT_KEY's value>` — every `demo-01`/`demo-02`/`demo-03`/`chaos-01` recipe body stays byte-for-byte unchanged, only the variable's value changes, exactly as DDD-23 specified. A new `OPERATOR_AUTH := Authorization: Bearer demo-operator-key` variable is added alongside `AUTH` so provisioning (`POST /tenants`, admin-only) and the new console-compatibility scenarios keep an explicit path to the unscoped `OperatorKey`, since `AUTH` no longer carries it | Records DDD-23 precisely enough that DELIVER does not have to re-derive the mechanism — this was DESIGN's explicit hand-off (`wave-decisions.md` §"What DESIGN decided vs. what DEVOPS/DELIVER builds") |
+| OPS-11 | **New, judgment call — flagged for review.** `scripts/race/main.go`'s `RACE_OPERATOR_KEY` (default `demo-operator-key`) is a *separate* credential path from `Makefile`'s `AUTH`, not covered by DDD-23's text, which names only `demo-01`/`02`/`03`/`chaos-01`. `race-02`/`race-03` call the same now-`tenant_key`-only routes (`POST /accounts`, `POST /transfers`) via this script, so they will start failing (`401`) the moment slice 02 lands, unless also repointed. Spec: add `RACE_TENANT_KEY` env var to `scripts/race/main.go` (new flag/env, defaulting to the same `LEDGEROPS_DEMO_TENANT_KEY` value), used for the account/transfer calls; `RACE_OPERATOR_KEY` is retained only if a future race scenario needs admin-only calls (none do today — kept for symmetry with the AUTH/OPERATOR_AUTH split above, not because a current scenario needs it) | DESIGN's DDD-23 record verified the `Makefile` and `router.go` directly but did not check `scripts/race/main.go` — a genuine gap this wave's own verification (not assumed from the decision record's prose) surfaced. Named here so DELIVER does not discover it mid-slice-02 as a surprise regression in `race-02`/`race-03` |
+| OPS-12 | **New.** Two new required CI jobs, `tenant-isolation-gates` and `console-compat` — see § CI/CD pipeline outline and § Monitoring contracts | Mirrors how `ledger-core`'s `invariant-gates` job carries I1/I3/I4/I7; I8/I9/I10 and the console-compatibility guardrail need the equivalent treatment, as correctness gates via the normal acceptance suite — no new concurrency-race environment is introduced, because none of the three new invariants or the guardrail are contention properties (unlike I4/I7, which `contended` exists for) |
+
+---
+
+## Wave: DEVOPS / [REF] Environment matrix
+
+Machine artifact: `docs/feature/multitenancy/devops/environments.yaml`. This
+file is additive to, not a replacement for,
+`docs/feature/ledger-core/devops/environments.yaml` — `contended`,
+`corrupted`, and `load` are inherited unchanged (I4/I7's race properties and
+the k6 load profile are untouched by this feature) and are **not**
+duplicated here.
+
+| Environment | Platform | Preconditions | Exercises |
+|---|---|---|---|
+| `clean` (extended) | linux · macos · wsl | docker compose available · no prior volumes · migration includes DDD-24's composite-PK change and `tnt_legacy_seed` seed · `LEDGEROPS_DEMO_TENANT_KEY` present alongside `LEDGEROPS_OPERATOR_KEY` | `demo-01..04`, `chaos-01` (AUTH-value change, OPS-10) |
+| `ci` (extended) | GitHub Actions ubuntu-latest | same as `ledger-core`'s `ci` · Testcontainers-provisioned PostgreSQL now carries the composite-PK schema from migration 0 | Every push; all KPI gates, including the three new ones |
+| `legacy-backfilled` (new) | linux · macos · wsl | reached from a pre-migration snapshot carrying pre-existing single-tenant rows · DDD-24's migration applied over it · `tnt_legacy_seed` backfill verified to own every pre-existing row | Migration safety for DDD-24's composite-PK cascade; the "existing-data migration must respect expand-only discipline" pre-requisite (`feature-delta.md` § DISCUSS Pre-requisites #6) |
+| `two-tenant` (new) | linux · macos · wsl | `tnt_legacy_seed` (migration-seeded) plus one freshly `POST /tenants`-provisioned tenant, both with distinct `tenant_key`s · at least one account per tenant | I8 cross-tenant refusal, I9/I10 uniqueness scoping, dual-mode console-compat scenarios (unscoped `OperatorKey` vs. scoped `tenant_key`), per-tenant trial-balance correctness |
+
+**Judgment call, flagged for review**: `two-tenant` and `legacy-backfilled`
+are new environment names not present in `ledger-core`'s matrix — introduced
+because this feature's KPIs (cross-tenant refusal, per-tenant trial-balance
+correctness) are structurally about a *second* tenant's presence, which no
+existing environment models. No new concurrency-race environment
+(`contended`-style) was introduced, per the coordinator's explicit
+instruction: I8/I9/I10 are correctness gates via the normal acceptance
+suite, not contention properties.
+
+---
+
+## Wave: DEVOPS / [REF] CI/CD pipeline outline
+
+Extends `.github/workflows/ci.yml`, unchanged trigger model (`push` all
+branches + `pull_request`, trunk-based, OPS-8). Ten required jobs, up from
+`ledger-core`'s eight — two new, both blocking.
+
+| # | Job | Needs | PostgreSQL | Gate |
+|---|---|---|---|---|
+| 1–6 | `lint`, `build`, `unit`, `property`, `integration`, `append-only-proof` | unchanged from `ledger-core` | as before | unchanged — `exhaustive` linter now additionally covers `tenant_already_exists`/`tenant_not_found` (DDD-25) on both switch surfaces named in `ledger-core`'s § Pre-requisites |
+| 7 | `invariant-gates` | 5 | Testcontainers | unchanged scope (`race-02`, `race-03`, `corrupt-04`, trial-balance zero) — now run inside the `tnt_legacy_seed` tenant's scope by construction, since `race-02`/`race-03` are repointed to `RACE_TENANT_KEY` (OPS-11). Continues to emit KPI-1..4 |
+| 8 | **`tenant-isolation-gates`** (new) | 5 | Testcontainers | Provisions the `two-tenant` environment, then: (a) adversarial cross-tenant read/write attempts across every slice's acceptance scenarios, asserting 100% refusal; (b) per-tenant trial-balance check while the other tenant is drifted or mid-transaction, asserting zero cross-tenant leakage; (c) I9/I10 duplicate-name-across-tenants scenarios. Emits the two new I8/I9/I10-related KPI rows to the job summary (§ Monitoring contracts) |
+| 9 | **`console-compat`** (new) | 5 | Testcontainers | Runs the three CI-gated dual-mode acceptance scenarios slices 02/03 own (unscoped `OperatorKey` vs. scoped `tenant_key` variants of `GET /console/verdict`, `GET /accounts/{id}/entries`, `GET /health/trial-balance`), asserting byte-identical shape/status to the pre-multitenancy contract. Blocking — this is the CI-gated form of the console-compatibility guardrail (§ DISCUSS Outcome KPIs, Guardrail Metrics) |
+| 10 | `demo` | 2 | docker compose | `make demo-01..04`, `chaos-01` from a clean checkout. **New**: `demo-04` (provision a tenant, then post that tenant's first transfer) emits `tenant_onboard_transfer_seconds`, mirroring KPI-5's `demo_first_green_seconds` pattern |
+
+Branch protection on `main`: all ten jobs required (was eight), linear
+history, no force-push — same contract, wider gate set.
+
+`.github/workflows/nightly.yml` — unchanged trigger and job list
+(`mutation-delta`, `slice-cycle-time`, `demo-cold`); `mutation-delta`'s scope
+(`internal/domain/`) now also covers the new `Tenant` aggregate and I8's
+cross-check inside `Post`, with no change to the job's own mechanics (§
+Mutation testing strategy).
+
+`.github/workflows/load-test.yml` — unchanged. OPS-12 (`ledger-core`'s, not
+this feature's OPS-12) scopes it to `POST /transfers` only, `workflow_dispatch`
+only, non-blocking; this feature adds a `tenant_id`/`tenant_key` dimension to
+that same route but does not change the load-test's trigger, scope, or
+blocking posture. Not re-designed here.
+
+---
+
+## Wave: DEVOPS / [REF] Monitoring contracts
+
+Full contract with field names and thresholds:
+`docs/product/kpi-contracts.yaml` (extended, see § SSOT updates below).
+
+| KPI | Target | Instrument | Assertion | Blocks build |
+|---|---|---|---|---|
+| Cross-tenant access refusal | 100% of attempts, across the full acceptance suite | `tenant-isolation-gates` job → `cross_tenant_attempts`, `cross_tenant_refused` | `cross_tenant_refused == cross_tenant_attempts AND cross_tenant_attempts > 0` | yes |
+| Tenant onboarding to first transfer | Both complete within a single `make demo-04` run | `demo` job wall-clock → `tenant_onboard_transfer_seconds` | `demo-04` exits 0 **and** `tenant_onboard_transfer_seconds < 300`, mirroring KPI-5's threshold per DISCUSS's own stated "mirrors KPI-5's pattern" | yes |
+| Per-tenant trial-balance correctness | 100% of CI runs report the checked tenant's own state only | `tenant-isolation-gates` job → `checked_tenant_id`, `imbalance_minor`, `other_tenant_leaked` | `other_tenant_leaked == false` | yes |
+| Console-compatibility guardrail (new, 2026-09-03 amendment) | Byte-identical response shape/status for unscoped `OperatorKey` calls to the three console-facing endpoints | `console-compat` job → `response_diff` per endpoint | `response_diff == none` for all three endpoints | yes |
+
+**Judgment call, flagged for review**: the `< 300` numeric threshold on
+tenant onboarding is not stated as a number in DISCUSS's KPI table (only
+"within a single `make demo-0N` run") — applied here because DISCUSS itself
+says this KPI "mirrors KPI-5's pattern," and KPI-5's own threshold is 300s;
+adopting it directly rather than inventing a different number.
+
+Guardrail inheritance: existing single-tenant KPIs 1–4 continue to gate via
+`invariant-gates` (job 7), now running inside `tnt_legacy_seed`'s tenant
+scope by construction. No change to their thresholds.
+
+---
+
+## Wave: DEVOPS / [REF] Deployment strategy
+
+**Recreate — unchanged from `ledger-core` OPS-6.** Same rationale: one
+binary, one database, one operator, no traffic whose interruption matters.
+
+**Rollback contract, extended with a new time-boxed caveat (Core Principle
+7 — rollback designed before rollout, not assumed inherited unconditionally):**
+DDD-24's migration is expand-only in the D7 sense (no `DELETE` from the
+entry table) but is **not** purely additive at the schema level — `accounts`'
+bare `PRIMARY KEY` becomes composite `(tenant_id, id)`. A pre-multitenancy
+binary queries `accounts` by `id` alone, assuming global uniqueness. That
+assumption stays true — and rollback stays safe — **only as long as every
+account belongs to `tnt_legacy_seed`**, i.e. until slice 01 provisions a
+second tenant and slice 02 lets that tenant create its own account. **Rollback
+window**: safe from migration application up to (not including) the first
+`POST /tenants` call in a given environment followed by that tenant's first
+`POST /accounts`. Once a second tenant has accounts, redeploying the previous
+binary is unsafe (it would silently query across tenants by `id`, reproducing
+exactly the I8 violation this feature exists to prevent) — rollback past that
+point requires rolling back to the *pre-DDD-24* schema via a contracting
+migration, a deliberate separate release, same as `ledger-core`'s own
+"contracting migrations are a separate deliberate release" rule.
+
+This caveat is new information DEVOPS is surfacing, not present in DESIGN's
+migration-shape decision (DDD-24) or `ledger-core`'s original rollback
+contract — flagged in § Pre-requisites and carried into
+`docs/feature/multitenancy/devops/wave-decisions.md` § Upstream Changes.
+
+---
+
+## Wave: DEVOPS / [REF] Mutation testing strategy
+
+**nightly-delta** — already locked project-wide in `CLAUDE.md` § Mutation
+Testing Strategy. Not re-asked, not re-written here, confirmed applicable
+to this feature (Core Principle 9 / Decision 9, already elicited).
+
+Primary mutation target extends `ledger-core`'s (`internal/domain/`,
+centered on the pure `Post` function) to include the new `Tenant` aggregate
+and I8's construction-time cross-check inside `Post` — the place a surviving
+mutant would mean tenant isolation is untested, not merely under-covered.
+No change to the `mutation-delta` job's trigger, scope-detection mechanism,
+or non-blocking posture (`continue-on-error: true`); the intersection step
+against `internal/domain/` (per `ledger-core`'s 2026-08-29 amendment)
+automatically picks up the new files without a job edit.
+
+---
+
+## Wave: DEVOPS / [REF] Observability stack
+
+| Signal | Choice | Status |
+|---|---|---|
+| Logs | `log/slog`, JSON to stdout — unchanged tool, one new field | Scaffold status unchanged from `ledger-core`'s corrected RCA finding (per user Decision 5, not claimed more implemented than it is). `tenant_id` added to the conditional field set on posting/idempotency/violation log lines, alongside the existing `transaction_id`/`account_ids`/etc. |
+| Metrics | `prometheus/client_golang`, exposition at `GET /metrics` — unchanged, scaffold | **No new per-tenant metric labels added.** Superseding note: `ledger-core`'s own § Pre-requisites said "no per-tenant labels on any metric or log field... adding them later is a schema change; inventing them now is speculative" under D8's single-tenant assumption — that assumption is now gone, but the underlying reason to defer *metrics* labels specifically still holds: no hosted environment exists to scrape them (OPS-1/OPS-5), so a `tenant_id` metric label would be exactly the "furniture" `ledger-core` OPS-5 rejected. The log field is added because it costs nothing extra to a debugging session reading CI job artifacts; the metric label is deferred because it has a real cardinality/schema cost with no observer to justify it yet |
+| Traces | none | unchanged — out |
+| Alerting | none | unchanged — out of scope |
+
+---
+
+## Wave: DEVOPS / [REF] Branching strategy
+
+**Trunk-based development — unchanged from `ledger-core` OPS-8.** Full gate
+suite on every push to every branch. Required-job count on `main` rises from
+eight to ten (§ CI/CD pipeline outline); no change to the branching model
+itself, tag convention (`slice-NN-shipped`), or branch protection contract
+beyond the wider required-checks list.
+
+---
+
+## Wave: DEVOPS / [REF] Coexistence matrix
+
+| Tool | Must not break | Note |
+|---|---|---|
+| `make demo-01`…`demo-03`, `chaos-01` | yes | Recipe bodies byte-for-byte unchanged (DDD-23 Option C); only `AUTH`'s *value* changes, from `demo-operator-key` to the seeded demo tenant credential |
+| `make demo-04` (new) | yes, from the commit that introduces it | Joins the permanently-retained demo set, same convention `ledger-core`'s coexistence matrix already established for `demo-01..05` |
+| `make race-02`, `race-03` | yes | **At risk without OPS-11's fix** — `scripts/race/main.go`'s hardcoded `RACE_OPERATOR_KEY` default breaks once `POST /accounts`/`POST /transfers` become `tenant_key`-only; repointed to `RACE_TENANT_KEY` (OPS-11) |
+| `docker compose` dev stack | yes | Unchanged — `LEDGEROPS_DEMO_TENANT_KEY` is an additive env var on the `app` service, no existing var removed |
+| `golang-migrate` | yes | DDD-24's migration stays plain reviewable SQL, one file, expand-only in the D7 sense |
+| Console (`ledger-core-console`, unscoped `OperatorKey` calls) | yes, CI-gated (new — was manual-only before this feature) | `console-compat` job (§ CI/CD pipeline outline) makes this a blocking gate rather than the prior manual dogfood-only guarantee (`kpi-contracts.yaml` KPI-C1/C2/C3, which remain that feature's own separate, non-CI responsibility, not duplicated here) |
+| `pre-commit` | yes | Still not installed, unchanged from `ledger-core` |
+
+---
+
+## Wave: DEVOPS / [REF] Pre-requisites
+
+DESIGN constraints the platform must satisfy:
+
+- **Zero new system-level footprint** (`nw-system-designer`, confirmed) — one
+  binary, one PostgreSQL instance, no hosted environment; nothing in this
+  wave's pipeline/infra changes contradicts that
+- **I8 construction-time enforcement** (`nw-ddd-architect`, DDD resolution) —
+  `tenant-isolation-gates` (job 8) is the CI surface that proves the
+  construction-time cross-check actually refuses cross-tenant access; it is
+  not itself the enforcement mechanism (that is domain code, DELIVER's job)
+- **DDD-24 migration shape** — one expand-only (D7 sense) migration, composite
+  `(tenant_id, id)` PK on `accounts`, cascading composite FKs on `entries`,
+  `tenant_id` column on `transactions`, `tnt_legacy_seed` sentinel backfill.
+  The `legacy-backfilled` environment (§ Environment matrix) is this wave's
+  proof surface for it
+- **DDD-23 Option C** — `LEDGEROPS_DEMO_TENANT_KEY` seeding + `Makefile`
+  `AUTH`/`OPERATOR_AUTH` split (OPS-10), extended to `scripts/race/main.go`
+  (OPS-11, this wave's own finding, not DESIGN's)
+- **Console-compatibility hard constraint** (DISCUSS 2026-09-03 amendment,
+  reconfirmed by the console-deferral confirmation) — unscoped `OperatorKey`
+  calls to the three named console-facing endpoints must keep succeeding
+  identically *throughout*, checked at each slice's own acceptance suite
+  before that slice ships, not only at feature completion. `console-compat`
+  (job 9) is the CI mechanism that makes "throughout" checkable rather than
+  aspirational
+- **Rollback time-boxing** (this wave's own finding, § Deployment strategy) —
+  rollback to a pre-multitenancy binary is safe only until a second tenant's
+  accounts exist; DELIVER and any future operator must know this before
+  relying on Recreate's usual unconditional rollback safety
+- **Mutation testing (nightly-delta)** — unchanged project policy,
+  `CLAUDE.md`, applies unmodified to this feature's new domain code
+
+---
+
+## Wave: DEVOPS / [REF] Wave decisions summary
+
+**Deployment**: none hosted — Docker Compose locally, Recreate strategy,
+unchanged from `ledger-core`, with a new time-boxed rollback caveat tied to
+DDD-24's composite-PK migration (§ Deployment strategy).
+
+**CI/CD**: GitHub Actions, ten required jobs on every push (was eight),
+trunk-based — two new jobs (`tenant-isolation-gates`, `console-compat`), both
+blocking.
+
+**Observability**: `slog` JSON logs + Prometheus exposition, unchanged tools;
+one new log field (`tenant_id`), no new metric labels (deferred, no hosted
+environment to justify the cardinality cost).
+
+**Mutation testing**: nightly-delta, unchanged project policy, scope
+automatically extends to the new `Tenant` aggregate.
+
+**Constraints established**: `LEDGEROPS_DEMO_TENANT_KEY` env var (mirrors
+`LEDGEROPS_OPERATOR_KEY`) · `Makefile` `AUTH`/`OPERATOR_AUTH` split ·
+`scripts/race/main.go` `RACE_TENANT_KEY` (this wave's own finding, OPS-11) ·
+rollback safety window ends at the first second-tenant account · console
+byte-identical compatibility is now CI-gated, not manual-only.
+
+**Upstream changes**: one — the rollback time-boxing caveat (§ Deployment
+strategy) is new information not present in DESIGN's DDD-24 record. Written
+to `docs/feature/multitenancy/devops/wave-decisions.md` § Upstream Changes
+per the skill's back-propagation contract; no `upstream-changes.md` file
+required, since this narrows an operational safety window rather than
+requiring an architecture change.
+
+**Judgment calls made in this wave, flagged for the user's review before
+DISTILL**: exact new environment names (`two-tenant`, `legacy-backfilled`) ·
+exact new CI job names (`tenant-isolation-gates`, `console-compat`) · the new
+demo target number (`demo-04`) · the `< 300s` numeric threshold applied to
+the tenant-onboarding KPI (anchored to DISCUSS's own "mirrors KPI-5" framing,
+not independently invented) · OPS-11's `scripts/race/main.go` fix, which
+DESIGN's DDD-23 record did not name.
+
+**Peer review**: not invoked. None of the per-wave trigger conditions apply —
+no novel deployment target, no new CI/CD framework, no observability-stack
+rewrite (one field added to an existing scaffold), no new security posture
+beyond DESIGN's already-decided credential mechanism (DDD-22/23). Default
+(skip, proceed to DISTILL) taken per the skill's explicit trigger list.
+
+**Handoff**: to `nw-acceptance-designer` (DISTILL wave). Deliverables:
+this section + `docs/feature/multitenancy/devops/environments.yaml` +
+`docs/feature/multitenancy/devops/wave-decisions.md`.

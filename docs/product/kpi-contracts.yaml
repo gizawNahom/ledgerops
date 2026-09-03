@@ -1,14 +1,17 @@
 # kpi-contracts.yaml — instrumentation SSOT
 #
-# One entry per outcome KPI. Source of the targets: the DISCUSS wave's
-# § Outcome KPIs table (docs/feature/ledger-core/feature-delta.md:183).
-# This file adds the DEVOPS layer: where the number comes from, what emits it,
-# and what makes the build fail.
+# One entry per outcome KPI, across all features. Source of the targets: each
+# feature's own DISCUSS wave § Outcome KPIs table
+# (docs/feature/ledger-core/feature-delta.md:183 for KPI-1..6, KPI-C1..C3;
+# docs/feature/multitenancy/feature-delta.md § Wave: DISCUSS / Outcome KPIs
+# for KPI-M1..M4). This file adds the DEVOPS layer: where the number comes
+# from, what emits it, and what makes the build fail.
 #
-# Character of this set: five of six KPIs are CI assertions, not production
-# telemetry. ledger-core has no hosted environment (DEVOPS D1), and its
-# outcomes are correctness properties rather than usage or performance. A KPI
-# here is therefore normally a gate, and its "dashboard" is the CI job summary.
+# Character of this set: nearly all KPIs are CI assertions, not production
+# telemetry. There is no hosted environment for any feature in this project
+# (DEVOPS D1/OPS-1), and outcomes are correctness properties rather than usage
+# or performance. A KPI here is therefore normally a gate, and its "dashboard"
+# is the CI job summary.
 
 schema_version: "0.1"
 
@@ -199,6 +202,94 @@ kpis:
       incentive to under-scope a slice rather than to work faster, so it is
       reported and read by a human. Requires the `slice-NN-shipped` tag
       convention to be honoured by DELIVER.
+
+  - id: KPI-M1
+    name: Cross-tenant access refusal
+    feature: multitenancy
+    target: "100% of adversarial cross-tenant attempts refused, across the full acceptance suite"
+    class: gate
+    collected_by:
+      surface: "tenant-isolation-gates CI job — adversarial cross-tenant read/write scenarios in every slice's acceptance suite"
+      fields: ["cross_tenant_attempts", "cross_tenant_refused"]
+      environment: [two-tenant, ci]
+    assertion: "cross_tenant_refused == cross_tenant_attempts AND cross_tenant_attempts > 0"
+    emitted_as:
+      ci_job: tenant-isolation-gates
+      summary_line: "cross_tenant_attempts=<n> refused=<n>"
+    fails_build: true
+    note: >
+      North Star per DISCUSS § Outcome KPIs — this is a security property,
+      not an optimization target; 100% is the only acceptable value. Scope
+      note: measures tenant-credential-initiated cross-tenant access only —
+      the future platform-mediated settlement feature (jobs.yaml J8) is a
+      distinct, deliberately-authorized channel this KPI does not cover.
+      The attempts > 0 denominator guards against a harness that quietly
+      ran zero adversarial attempts and passed vacuously — same pattern as
+      ledger-core's KPI-2/KPI-3 iteration-count assertions.
+
+  - id: KPI-M2
+    name: Tenant onboarding to first transfer
+    feature: multitenancy
+    target: "Provision a tenant and post that tenant's first successful transfer within a single make demo-04 run"
+    class: gate
+    collected_by:
+      surface: "CI demo job wall-clock, make demo-04 (provision tenant, first transfer)"
+      fields: ["tenant_onboard_transfer_seconds"]
+      environment: [clean, ci]
+    assertion: "demo-04 exits 0 AND tenant_onboard_transfer_seconds < 300"
+    emitted_as:
+      ci_job: demo
+      summary_line: "tenant_onboard_transfer_seconds=<n>"
+    fails_build: true
+    note: >
+      Mirrors KPI-5's pattern (DISCUSS's own stated framing). The 300s
+      threshold is adopted directly from KPI-5 rather than independently
+      invented, since DISCUSS did not state a separate number for this KPI.
+      Same CI-runner-as-warm-image-proxy caveat as KPI-5 applies.
+
+  - id: KPI-M3
+    name: Per-tenant trial-balance correctness
+    feature: multitenancy
+    target: "100% of CI runs report the checked tenant's own state only, never another tenant's, while that other tenant is drifted or mid-transaction"
+    class: gate
+    collected_by:
+      surface: "tenant-isolation-gates CI job — GET /health/trial-balance?tenant_id=... against the two-tenant environment"
+      fields: ["checked_tenant_id", "imbalance_minor", "other_tenant_leaked"]
+      environment: [two-tenant, ci]
+    assertion: "other_tenant_leaked == false"
+    emitted_as:
+      ci_job: tenant-isolation-gates
+      summary_line: "trial_balance_tenant=<id> imbalance_minor=<n> leaked=<bool>"
+    fails_build: true
+    note: >
+      Mirrors KPI-1's pattern (invariant-gates-style job). Not gated in the
+      contended/corrupted concurrency-race environments ledger-core's KPI-1
+      partially uses — I8/I9/I10 are correctness properties proven via the
+      normal acceptance suite, not contention properties, per this feature's
+      own DEVOPS scope decision.
+
+  - id: KPI-M4
+    name: Console-compatibility guardrail
+    feature: multitenancy
+    target: "Byte-identical response shape and status for unscoped OperatorKey calls to GET /console/verdict, GET /accounts/{id}/entries, and GET /health/trial-balance, throughout every slice"
+    class: gate
+    collected_by:
+      surface: "console-compat CI job — dual-mode acceptance scenarios (unscoped OperatorKey vs scoped tenant_key) in slices 02/03's own acceptance suites"
+      fields: ["endpoint", "response_diff"]
+      environment: [two-tenant, ci]
+    assertion: "response_diff == none for all three endpoints"
+    emitted_as:
+      ci_job: console-compat
+      summary_line: "console_compat_endpoint=<name> diff=<none|detected>"
+    fails_build: true
+    note: >
+      Added 2026-09-03 amendment to DISCUSS's Guardrail Metrics — enforced as
+      a CI-gated API-contract guarantee, deliberately not gated on
+      ledger-core-console's own manual, non-CI KPIs (KPI-C1/C2/C3 below,
+      fails_build: false), per peer-review iteration 2's remediation
+      (feature-delta.md § Wave: DISCUSS / Changed Assumptions). KPI-C1/C2/C3
+      remain that feature's own separate self-reported responsibility, not
+      duplicated here.
 
 runtime_instrumentation:
   # Secondary tier. No hosted environment exists, so these exist to be correct

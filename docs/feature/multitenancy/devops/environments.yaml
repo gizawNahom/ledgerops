@@ -1,0 +1,133 @@
+# environments.yaml — multitenancy
+#
+# Additive to, not a replacement for, docs/feature/ledger-core/devops/environments.yaml.
+# `contended`, `corrupted`, and `load` are inherited unchanged from that file —
+# I4/I7's concurrency-race properties and the k6 load profile are untouched by
+# this feature, and I8/I9/I10 are correctness gates proven via the normal
+# acceptance suite, not contention properties, so no new race environment is
+# introduced (explicit scope decision, not an oversight).
+#
+# Consumed by DISTILL for Mandate 4 (Environmental Realism) and by DELIVER
+# step "run acceptance tests against every environment".
+
+schema_version: "0.1"
+feature_id: multitenancy
+extends: docs/feature/ledger-core/devops/environments.yaml
+
+target_environments:
+  - name: clean
+    description: >
+      Fresh clone, empty database, migrations applied from zero — extended
+      from ledger-core's `clean`. Migration 0 now includes DDD-24's
+      composite-(tenant_id, id) PK change and the tnt_legacy_seed sentinel
+      seed; LEDGEROPS_DEMO_TENANT_KEY is present alongside
+      LEDGEROPS_OPERATOR_KEY in the app service's environment.
+    platform: [linux, macos, wsl]
+    preconditions:
+      - "docker compose available"
+      - "no named volumes from a prior run"
+      - "PostgreSQL 16 reachable, schema at migration 0 (post-DDD-24 shape)"
+      - "LEDGEROPS_DEMO_TENANT_KEY set alongside LEDGEROPS_OPERATOR_KEY"
+    used_by: ["make demo-01..04", "make chaos-01", "Tenant onboarding to first transfer KPI"]
+
+  - name: ci
+    description: >
+      GitHub Actions ubuntu-latest; PostgreSQL 16 supplied per test package by
+      Testcontainers (OPS-11, ledger-core) — extended from ledger-core's `ci`.
+      No new CI mechanism introduced; the schema Testcontainers provisions
+      now carries DDD-24's composite-PK shape from migration 0.
+    platform: [linux]
+    preconditions:
+      - "Docker daemon available to the runner"
+      - "testcontainers-go pulls postgres:16 (pinned by digest)"
+      - "app role holds no UPDATE/DELETE on the entry table"
+      - "migration role holds DDL, applied before the app role connects"
+      - "PBT seed printed to the job log and archived on failure"
+    used_by: ["every push", "all outcome-KPI gates, including the three new ones"]
+
+  - name: legacy-backfilled
+    description: >
+      New. A pre-existing single-tenant database (rows created before this
+      feature) with DDD-24's migration applied over it — the same shape
+      `populated` models in ledger-core's own matrix, but specific to the
+      composite-PK cascade and the tnt_legacy_seed backfill this feature's
+      migration performs.
+    platform: [linux, macos, wsl]
+    preconditions:
+      - "at least one pre-existing account/transaction/entry set, created before migration"
+      - "DDD-24 migration applied: accounts' PK becomes composite (tenant_id, id); entries' FKs cascade to composite; transactions gains tenant_id"
+      - "every pre-existing row backfilled to tnt_legacy_seed, none orphaned"
+      - "migration is expand-only in the D7 sense — no DELETE from the entry table"
+    used_by: ["migration safety proof for DDD-24", "DISCUSS Pre-requisites #6 (existing-data migration must respect expand-only discipline)"]
+    rationale: >
+      A migration validated only against `clean` proves nothing about the
+      case that actually exists in operation — same reasoning ledger-core's
+      own `populated` environment used, applied here to the specific
+      composite-PK cascade this feature introduces.
+
+  - name: two-tenant
+    description: >
+      New. tnt_legacy_seed (migration-seeded) plus one freshly
+      POST /tenants-provisioned tenant, both holding distinct tenant_keys,
+      each with at least one account. The adversarial pairing this feature's
+      own outcome KPIs are structurally about.
+    platform: [linux, macos, wsl]
+    preconditions:
+      - "tnt_legacy_seed present with at least one account (from legacy-backfilled or a fresh migration seed)"
+      - "a second tenant provisioned via POST /tenants with its own tenant_key"
+      - "each tenant has at least one account under its own tenant_key"
+      - "OPERATOR_AUTH (unscoped OperatorKey) available for console-compat scenarios"
+    used_by:
+      - "I8 cross-tenant refusal (tenant-isolation-gates job)"
+      - "I9/I10 duplicate-name-across-tenants scenarios"
+      - "Per-tenant trial-balance correctness KPI"
+      - "console-compat job's dual-mode (unscoped OperatorKey vs scoped tenant_key) scenarios"
+    rationale: >
+      Judgment call, flagged for review: no existing ledger-core environment
+      models a second tenant's presence, because tenancy did not exist before
+      this feature. Introduced rather than overloading `ci` or `clean`,
+      because the preconditions (two distinct credentials, two account sets)
+      are specific enough to warrant naming, mirroring how `contended` and
+      `corrupted` were split out from `populated` in ledger-core's own matrix
+      for the same reason.
+
+coexistence_matrix:
+  - tool: "make demo-01 .. make demo-03, make chaos-01"
+    must_not_break: true
+    note: "Recipe bodies byte-for-byte unchanged (DDD-23 Option C) — only Makefile's AUTH variable's value changes."
+  - tool: "make demo-04 (new)"
+    must_not_break: true
+    note: "Joins the permanently-retained demo set from the commit that introduces it, same convention ledger-core established for demo-01..05."
+  - tool: "make race-02, make race-03"
+    must_not_break: true
+    note: "At risk without OPS-11's fix — scripts/race/main.go's hardcoded RACE_OPERATOR_KEY default breaks once POST /accounts / POST /transfers become tenant_key-only. Repointed to RACE_TENANT_KEY."
+  - tool: docker compose (local dev stack)
+    must_not_break: true
+    note: "LEDGEROPS_DEMO_TENANT_KEY is additive to the app service's environment; no existing var removed."
+  - tool: golang-migrate
+    must_not_break: true
+    note: "DDD-24's migration stays plain reviewable SQL, one file, expand-only in the D7 sense."
+  - tool: "ledger-core-console (unscoped OperatorKey calls)"
+    must_not_break: true
+    note: "Now CI-gated via the console-compat job (was manual-dogfood-only before this feature; kpi-contracts.yaml KPI-C1/C2/C3 remain that feature's own separate, non-CI responsibility)."
+  - tool: pre-commit
+    must_not_break: true
+    note: "Still not installed, unchanged from ledger-core."
+
+platform_coverage:
+  Linux: ["Ubuntu 22.04", "Ubuntu 24.04"]
+  WSL: ["WSL2"]
+  macOS: ["13.x", "14.x"]
+  CI: ["GitHub Actions ubuntu-latest"]
+  PostgreSQL: ["16"]
+  Go: ["1.23", "1.24"]
+  Node: ["20 LTS", "22 LTS"]
+
+deployment_assumptions:
+  - "There is no hosted environment. `clean` and `ci` remain the whole matrix until one exists — `legacy-backfilled` and `two-tenant` are CI/local proof environments, not deployment targets."
+  - "`docker compose up` MUST be idempotent, including with LEDGEROPS_DEMO_TENANT_KEY present."
+  - "Migrations MUST be idempotent and expand-only in the D7 sense — DDD-24's composite-PK change is a structural change to accounts' key shape, not merely additive, and MUST NOT DELETE from the entry table."
+  - "Rollback to a pre-multitenancy binary is safe ONLY until a second tenant's accounts exist — see feature-delta.md § Wave: DEVOPS / Deployment strategy for the full rollback-window contract. This is a new constraint this feature introduces; ledger-core's rollback contract had no such window."
+  - "The application database role MUST NOT hold UPDATE or DELETE on the entry table — unchanged from ledger-core, unaffected by the composite-PK change."
+  - "`make demo-NN` MUST succeed on a clean clone with no manual setup step beyond `docker compose up` — demo-04 included from the commit that introduces it."
+  - "Teardown MUST remove only ledgerops volumes and containers, never a developer's other PostgreSQL data — unchanged."
