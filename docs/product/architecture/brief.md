@@ -114,6 +114,79 @@ infrastructure, and stays with DELIVER. Full verification:
 `docs/feature/ledger-core-console/feature-delta.md` § Wave: DESIGN /
 System-Level Scope Confirmation.
 
+### Multitenancy (`multitenancy`, confirmed 2026-09-03)
+
+Verified during `multitenancy`'s DESIGN wave, not assumed: this feature
+introduces no new system-level architecture concern. Checked against the
+feature's own artifacts (`docs/feature/multitenancy/feature-delta.md`, its
+three slice briefs, `onboard-and-isolate-a-tenant.yaml`) and the brownfield
+code (`internal/adapters/postgres/migrations/`,
+`internal/adapters/http/router.go`), not taken on the coordinator's word.
+
+**Back-of-envelope (why this stays infra-neutral)**: tenant provisioning is
+operator-driven only, no self-service (D7) — tenant count is bounded by
+manual operator action, order of magnitude tens to low hundreds, not
+thousands. At even 100 tenants x 100 accounts each, that is 10,000 account
+rows and a proportionate entries volume — trivial for one PostgreSQL
+instance. The existing k6 capacity profile (`tests/load/transfers.js`)
+validated a 300 rps ceiling against this same schema shape on a single
+instance (2026-09-02); multitenancy adds a `tenant_id` filter/key to the
+same query shapes (`POST /transfers`, `GET /accounts/{id}`, entries,
+trial-balance) without raising aggregate throughput — DISCUSS's own
+Requirements Completeness section states performance/scale NFRs are "not
+newly introduced" by this feature. No headroom concern at this scale.
+
+**What stays unchanged**:
+- **Deployment topology**: one Go binary, one PostgreSQL 16 instance, no
+  hosted environment (`clean`/`ci` remain the entire matrix). `POST
+  /tenants` is a new HTTP port on the existing service, not a new
+  deployable.
+- **Single-database assumption**: tenancy is a data-partitioning dimension
+  (`tenant_id` as a scoping key within the existing schema), not sharding
+  across databases or instances. The row-count estimate above is well
+  short of where `tenant_id`-as-shard-key would become relevant.
+- **OPS-10's two-role model**: the new `tenants` table and any `tenant_id`
+  column/constraint get the same `GRANT` treatment already established —
+  DDL stays `ledgerops_migrate`-only, the service connects as
+  `ledgerops_app` with the same least-privilege shape. No third role is
+  introduced by this feature. (The future platform-mediated settlement
+  feature, `jobs.yaml` J8, is the one place a third, settlement-scoped
+  credential is anticipated — explicitly deferred to that feature's own
+  DESIGN, per this feature's § Changed Assumptions.)
+- **Backup/restore boundary**: remains whole-instance, covering every
+  tenant uniformly. No per-tenant backup/restore requirement was raised by
+  any story (tenant offboarding and credential rotation are both
+  out-of-scope).
+- **Connection pooling / noisy-neighbor isolation**: not addressed by this
+  feature, and correctly so — DISCUSS's Requirements Completeness section
+  scopes I8 as a security/data-isolation property, not a
+  performance-isolation (bulkhead) property. No per-tenant pool or bulkhead
+  is introduced. Revisit only if a future feature adds a per-tenant
+  throughput SLA.
+- **Startup substrate probe**: the composition root's existing
+  wire-then-probe sequence (`cmd/api/`, OPS-10 — refuses to start unless the
+  app-role connection opens a transaction and `UPDATE` on entries is
+  refused) already covers the substrate this feature's new table and
+  tenant-scoped queries also depend on. No new substrate is introduced, so
+  no new startup probe is required.
+
+**Left to the next architects, not decided here**: whether `accounts`' bare
+`PRIMARY KEY` becomes a composite `(tenant_id, account_id)` key, how
+`entries` carries or derives `tenant_id`, and the expand-only migration
+shape for both — these are schema/domain decisions for `nw-ddd-architect`
+and `nw-solution-architect` (DDD-18 rescoping, feature-delta.md §
+Pre-requisites #1 and #6). Flagged as an interface point, not designed
+here.
+
+**Escape hatch (documented, not built)**, consistent with the posture
+above: if tenant count or per-tenant account/entry volume grows past the
+low-hundreds/thousands range assumed above, a composite index on
+`(tenant_id, account_id)` — on top of whatever primary-key shape
+`nw-ddd-architect` chooses — is the first lever. Not needed now.
+
+Full verification: `docs/feature/multitenancy/feature-delta.md` § Wave:
+DESIGN / System Architecture.
+
 ---
 
 ## Domain Model
@@ -122,8 +195,11 @@ System-Level Scope Confirmation.
 
 ### Bounded context
 
-One context: **Ledger**. No context mapping is required at this stage — tenancy
-was deferred (D8), and there is no second context to integrate with.
+One context: **Ledger**. No context mapping is required at this stage —
+tenancy was originally deferred (`ledger-core` D8), and now that it is being
+built (`multitenancy`, confirmed 2026-09-03), it remains a partition
+dimension *within* this context, not a second context to integrate with —
+see § Multitenancy below for the full confirmation.
 
 ### Ubiquitous language
 
@@ -138,6 +214,8 @@ was deferred (D8), and there is no second context to integrate with.
 | Wallet account | May never go negative (I4) |
 | System account | The counterparty value enters from. May go negative by design |
 | Verdict | The YES/NO statement of whether the ledger balances: "Books balance: YES" when no account has drifted, "NO" when at least one has. Not a new concept — already load-bearing in `ledger-core`'s own domain modelling (DDD-21, "the verdict withholds; it never accuses") and its HTTP contract (`GET /console/verdict`), but never previously entered into this table. Added here, backfilling a glossary gap `ledger-core-console`'s DESIGN surfaced, not introducing a new domain concept |
+| Tenant | An organization using ledgerops through its own scoped credential; owns a namespace of Accounts, Transactions, and Entries invisible to every other tenant (I8). Not ledgerops' own end-customer-facing concept — `vision.md` rules that out — a tenant is who an integrating developer represents, not a new persona (`multitenancy`, confirmed 2026-09-03) |
+| Tenant key | The credential scoped to exactly one tenant, minted at provisioning; distinct from the platform-admin credential (`OperatorKey`), which continues to act unscoped (`multitenancy`, confirmed 2026-09-03) |
 
 ### Aggregates
 
@@ -148,11 +226,17 @@ module, not methods that mutate it.
 **Transaction** *(aggregate root)* — owns its Entries. I1 (entries sum to zero
 per currency) is a predicate over the entry list, checked before the value is
 constructed. Immutable once written (D7), and immutable in memory besides.
-Entries have no identity outside their transaction.
+Entries have no identity outside their transaction. Gains an implicit
+`tenant_id` (`multitenancy`, confirmed 2026-09-03), equal to every touched
+account's own `tenant_id` — checked alongside I1, before construction, not
+after. See § Multitenancy below.
 
 **Account** *(aggregate root)* — owns `balance` and `type`. Applying a debit
 yields a *new* Account value; the I4 check for wallet accounts happens on the way
 to constructing it, so an Account holding an illegal balance is never produced.
+Gains a `tenant_id` field (`multitenancy`, confirmed 2026-09-03), immutable
+once set — no tenant reassignment is possible or in scope. See § Multitenancy
+below for the full rescoping.
 
 ### Functional modeling decisions
 
@@ -254,8 +338,10 @@ recorded here so it reads as a decision rather than an oversight.
 | I3 | Stored balance equals the sum of its entries | Not enforced — *verified* by slice 04. Deliberate: it is the cross-check |
 | I4 | No wallet account balance is negative | Domain core, under row locks held by the application layer |
 | I7 | The same request applied twice changes state once | Application layer, via a unique constraint on the idempotency key |
+| I8 | A tenant's credential can never read, write, or affect another tenant's account, transaction, or entry | Domain core, **by construction** (`multitenancy`, confirmed 2026-09-03) — see § Multitenancy below |
 | D7 | Entries are never updated or deleted | Database: `UPDATE`/`DELETE` revoked from `ledgerops_app` (OPS-10), plus a rule/trigger. CI asserts the composite refusal |
-| DDD-18 | An account name identifies exactly one account | Domain core (pure `OpenAccount` over the read snapshot), plus a unique constraint on the account name created **with** the table — migrations are expand-only, so adding it later against history containing duplicates would fail |
+| I9 (renumbered from DDD-18, 2026-09-03) | An account identifier identifies exactly one account **within a tenant** — rescoped from global uniqueness | Domain core (pure `OpenAccount` over the tenant-scoped read snapshot), plus a `(tenant_id, account_id)` composite unique constraint — physical migration shape is `nw-solution-architect`'s to design, expand-only discipline applies |
+| I10 | A tenant name identifies exactly one tenant | Domain core (pure `ProvisionTenant` over the read snapshot of existing tenant names), plus a unique constraint on tenant name — structurally identical to I9's pattern, one aggregate level up |
 
 The DDD-18 row was added 2026-08-19 by `nw-solution-architect`, a cross-section
 edit into `nw-ddd-architect`'s territory. It records a decision already taken in
@@ -264,6 +350,18 @@ one, and it is the enforcement half of a refusal that would otherwise have no
 declared enforcement site. The narrower rule DESIGN is holding itself to: an
 architect may record its own decisions and correct false claims in another's
 section, with the edit annotated; it may not decide domain model there.
+
+**Renumbered 2026-09-03 by `nw-ddd-architect`**, per `multitenancy`'s own DESIGN
+pre-requisite (`feature-delta.md` § Pre-requisites #1) and the explicit
+invitation left in § For Acceptance Designer above. DDD-18 is now **I9**: every
+other occupant of this table is either a numbered invariant (I1/I3/I4/I7) or a
+locked decision that reads like one (D7); DDD-18 was neither — it was a
+decision-ID borrowed to label an invariant row, exactly the friction the
+paragraph above already flags. Two siblings were added at the same time: **I8**
+(tenant isolation — new, not a rescoping) and **I10** (tenant-name uniqueness —
+new, at the Tenant aggregate, structurally identical to I9's pattern one level
+up). Full rationale for all three: § Multitenancy below and
+`adr-011-tenant-partition-not-context.md`.
 
 Note on I3: it is the only invariant deliberately left unenforced. Enforcing it
 would mean deriving balances, which removes the independent check that makes
@@ -312,6 +410,210 @@ bounded context, aggregate, or invariant. Full verification:
 `docs/feature/ledger-core-console/feature-delta.md` § Wave: DESIGN / Domain
 Model Scope Confirmation.
 
+### Multitenancy (`multitenancy`, confirmed 2026-09-03)
+
+Domain-level leg of `multitenancy`'s DESIGN wave (system -> **domain** ->
+application). System-level scope was already confirmed a no-op (§ System
+Architecture above); this subsection is the real domain-modelling work that
+confirmation unblocked. Full narrative:
+`docs/feature/multitenancy/feature-delta.md` § Wave: DESIGN / Domain Model.
+
+**Bounded context: confirmed, not asserted.** DISCUSS's own Scope Assessment
+flagged "1 bounded context... tenant is a partition dimension within it, not
+a new context" as tentative, for this review. Confirmed correct by the
+primary discovery heuristic (language divergence): every existing term in
+§ Ubiquitous language above — Account, Entry, Transaction, Posting, Trial
+balance, Drift, Verdict — means exactly the same thing to every tenant's
+integrating developer and to the platform operator. Nothing about *tenant*
+introduces a second vocabulary or a second team boundary; it introduces a
+scoping *dimension* orthogonal to what those words already mean. One
+context, **Ledger**, unchanged.
+
+**Tenant is a new aggregate root, not a value object, and not a new
+context.** It has an identity (`tenant_id`) that persists across the one
+lifecycle event this feature grants it (provisioning) — that is what makes
+it an entity/aggregate root rather than a value type (identity assigned
+once, tracked, never re-derived from attributes). It owns exactly two other
+fields, both value-typed: `name` and `credential` (the `tenant_key`, opaque
+to the domain beyond "exists, is distinct per tenant" — verification/hashing
+mechanics belong to `nw-solution-architect`, per `feature-delta.md`
+§ Pre-requisites #3). Root-only, value-typed properties — Vernon's rule 2
+(small aggregates) is satisfied by inspection; there is no second entity to
+promote or flatten.
+
+Vernon's rule 1 (true invariants) draws Tenant's boundary at exactly "name
+uniqueness" (I10, below) — nothing else about a tenant needs transactional
+consistency with anything else in this feature, since renaming, rotation,
+and offboarding are all out of scope. Rule 3 (reference by identity): Account
+and Transaction hold a `tenant_id` value, never a `Tenant` object graph — this
+is what keeps posting from becoming a three-aggregate unit of work. Rule 4
+(eventual consistency across the boundary): not exercised — Tenant's own
+lifecycle (provision-only) never needs to coordinate with Account/Transaction
+in the same transaction; `ProvisionTenant` writes only the new Tenant record.
+
+**Aggregate boundary = bounded-change contract, per aggregate touched by this
+feature:**
+
+*Tenant (new)*
+- **Full observable state**: `{tenant_id, name, credential}`. No child
+  entities, no event log (this context stays state-based — see ES/CQRS
+  assessment below).
+- **`ProvisionTenant(name)` declared delta**: exactly one new
+  `{tenant_id, name, credential}` triple comes into existence. Nothing else
+  in the Tenant collection changes.
+- **Complement equality (the crafter-facing contract)**:
+  `after.tenants.without(new_tenant_id) == before.tenants.without(new_tenant_id)`
+  — this is US-1's own edge case ("the first tenant's calls are unaffected")
+  made assertable. Additionally: no Account, Transaction, or Entry belonging
+  to any existing tenant changes — `ProvisionTenant`'s declared delta touches
+  only the Tenant collection, full stop.
+
+*Account (existing, rescoped)*
+- **Full observable state**: `{tenant_id (new field), id, kind, balance}`.
+  `tenant_id` is set once at construction and immutable thereafter — mirrors
+  `id` and `kind`'s existing immutability in `Apply`
+  (`internal/domain/account.go:52-61` already reconstructs `id`/`kind`
+  unchanged; `tenant_id` joins that set).
+- **`NewAccount(tenant_id, id, kind, balance)` declared delta**: one new
+  Account row-equivalent, scoped to `tenant_id`. **`Apply(delta)` declared
+  delta**: `balance` only; `tenant_id`, `id`, `kind` are the complement.
+- **Complement equality (I8, expressed at Account level)**: for a command
+  scoped to `tenant_id = T`,
+  `after.accounts.without(touched_ids) == before.accounts.without(touched_ids)`,
+  **and** `touched_ids` is provably a same-tenant set *before* the command
+  can be expressed at all — not merely checked against a wider candidate set
+  after the fact. That "provably before" clause is the entire content of
+  "construction-time," decided below.
+
+*Transaction (existing, gains an implicit tenant scope)*
+- **Full observable state**: `{id, recorded_at, tenant_id (new — equal to
+  every touched account's tenant_id), entries[]}`.
+- **`Post(...)` declared delta**: one new Transaction plus its Entries;
+  append-only, so the declared delta is pure addition, never mutation of an
+  existing row (mirrors D7's existing entries discipline).
+- **Complement equality**: no existing Transaction or Entry, in this tenant
+  or any other, changes. I1 already checks "entries sum to zero" as a
+  predicate before construction; the tenant check below is a second
+  predicate in the same pre-construction gate, not a separate later pass.
+
+**I8 enforcement mechanism: construction-time, agreeing with D9's
+recommendation.** D9 named the two options and recommended construction-time
+without deciding it; evaluated here rather than rubber-stamped, because
+"carries a tenant_id" needs a concrete meaning for `Post`'s signature to
+actually be construction-time and not a repository query that merely happens
+to filter correctly today. Concretely:
+
+1. `tenant_id` becomes a required field on the `Account` value type (§
+   above) — there is no smart-constructor path that produces an `Account`
+   without one, exactly as there is no path that produces a
+   negative-balance `Wallet` (DDD-15's own pattern, transplanted).
+2. `AccountRepository`'s query and lock-acquisition ports
+   (`internal/app/ports`) take `tenant_id` as a required parameter, not an
+   optional filter — a call site cannot compile a query that omits it. This
+   is the "impossible to express" half.
+3. `Post` — already the single pure decide-function taking the transfer
+   command and the *already-locked* account snapshots — cross-checks that
+   every touched snapshot's `tenant_id` equals the command's own
+   `tenant_id`, refusing **before** constructing the `Transaction` value,
+   exactly where I1 checks the sum and I4 checks the balance floor. This is
+   the "checked, not merely queried-around" half — even if a repository
+   query were ever miswired to return a cross-tenant row (a bug, not a
+   designed path), `Post` still refuses to build a `Transaction` out of it.
+
+Rejected alternative — **verification-time (I3-style drift scan)**: I3 is
+deliberately the *one* invariant this codebase leaves unenforced-by-
+construction, precisely because deriving balances would remove the
+independent cross-check that makes slice 04 meaningful (§ Invariants note on
+I3, above). I8 has no such reason to stay soft — there is no independent
+value in occasionally *discovering* that tenant B's data leaked into tenant
+A's read, the way there is independent value in occasionally discovering a
+stored balance drifted. A security property with a known, cheap
+by-construction fix should not be given I3's treatment; that would be
+borrowing I3's shape without inheriting its rationale.
+
+**Refusal kind for a cross-tenant reference — a domain-modelling position,
+not a punt.** `feature-delta.md` § Pre-requisites #4 frames "404 vs 403" as
+an open DESIGN question. At the domain layer this collapses to a smaller
+question DDD-12/DDD-17 already force to be explicit: which sealed
+`ViolationKind` fires? Recommendation: **reuse `account_not_found`,
+introduce no new taxonomy member.** From a `tenant_key` scoped to tenant A,
+an account belonging to tenant B is not merely forbidden — it is not in A's
+observable universe at all, which is exactly what `account_not_found`
+already means (DDD-17: 404, minimal-information-leak posture, consistent
+with `adr-009-unavailability-is-not-a-refusal.md`'s own restraint about not
+over-claiming what the caller is told). Inventing a distinguishable
+`cross_tenant_forbidden` kind would grow both `exhaustive`-linted switch
+surfaces for zero behavioral gain, and would hand a tenant-existence oracle
+to any caller willing to compare 403 against 404 — the opposite of what I8
+exists to guarantee. This resolves the domain half of Pre-requisites #4
+outright: reusing the sealed kind *forces* 404 as a matter of already-
+committed taxonomy discipline, not a fresh wire-level style choice. Handed
+to `nw-solution-architect` to confirm at the HTTP-adapter mapping layer (no
+new work there — `account_not_found -> 404` is already the existing DDD-17
+table row) and to close the loop on the credential-verification mechanism
+itself (Pre-requisites #3), which is genuinely an application-layer concern
+this architect does not own.
+
+**Unscoped `GET /health/trial-balance` / `GET /console/verdict` semantics —
+also a domain-modelling position.** Pre-requisites #5 asks whether the
+unscoped call means "platform-wide aggregate" or "a designated default
+tenant" now that Tenant exists. "Designated default tenant" is rejected
+outright at the domain level: it would require inventing a distinguished
+Tenant value with no provisioning story (D7 makes provisioning
+operator-driven only; nothing provisions a "default" one), and it would make
+an already-shipped, uninvolved concept (Trial balance) implicitly *about*
+whichever tenant got the designation — a modelling accident, not a decision.
+"Platform-wide aggregate" is the coherent reading: Trial balance was always
+defined as "the sum of all entries across the ledger" (§ Ubiquitous
+language, unchanged by this feature); scoping it to one tenant (US-3, new)
+and leaving it unscoped (existing, unchanged) are the *same* computation
+over two different entry sets — all entries, or entries filtered to one
+`tenant_id` — not two different domain concepts requiring two definitions.
+No new aggregate, no new invariant, one optional `tenant_id` scope parameter
+on the existing verification computation. This satisfies the
+console-compatibility hard constraint (`feature-delta.md` § Driving ports)
+for free, since "all entries" is exactly what the unscoped call already
+computes today. Wire-level mechanics (how an absent query parameter maps to
+"all entries" at the HTTP boundary) are `nw-solution-architect`'s to finish.
+
+**ES/CQRS: not warranted, reconfirmed rather than assumed.** Running the
+four-question heuristic against Tenant specifically, not just re-citing
+`adr-003-stored-balances.md`: audit trail — no new requirement beyond what
+Account/Transaction already carry (entries stay the append-only log);
+temporal queries — none named by any story; multiple views — none,
+`ProvisionTenant` has exactly one shape and one consumer (the operator);
+complex state transitions — Tenant's entire lifecycle in this feature is
+"created," strictly simpler than Account's own (open -> apply -> apply ->
+...). All four answers are "no," more decisively than they were for
+Account/Transaction, which already didn't clear the bar. State-based
+storage, unchanged.
+
+**Context map**: still degenerate — one node, no edges, C4-compatible for
+completeness:
+
+```mermaid
+flowchart LR
+    subgraph Core
+        Ledger["Ledger context<br/><i>Account, Transaction, Entry, Tenant</i>"]
+    end
+```
+
+**Handed to `nw-solution-architect`, not decided here**: credential
+mechanism / `tenant_key` verification and its relationship to
+`requireOperatorKey` (Pre-requisites #3); the HTTP-adapter wire mapping
+confirming `account_not_found -> 404` for cross-tenant reads (mechanical,
+given the domain position above); the query-parameter mechanics of unscoped
+trial-balance meaning "all entries" (mechanical, given the domain position
+above); the physical `(tenant_id, account_id)` migration shape and whether
+`accounts.id` stays a bare column or becomes composite (schema/expand-only
+mechanics, `feature-delta.md` § Pre-requisites #6, `slice-02`'s own
+recommended pre-slice SPIKE).
+
+Full rationale: `adr-011-tenant-partition-not-context.md`. DoD item 7
+(`feature-delta.md`) — "DDD-18's rescoping explicitly confirmed by
+`nw-ddd-architect`" — is satisfied by this subsection and the renumbered I9
+row above.
+
 ---
 
 ## Application Architecture
@@ -344,6 +646,15 @@ insertion).
 | Entrypoint | `cmd/api/` | Wiring and configuration | CREATE NEW |
 | Console SPA | `web/console/` | TypeScript SPA: verdict, drift list, entry drill-down | CREATE NEW |
 
+**`multitenancy` (confirmed 2026-09-03)**: no new top-level component. Domain
+core, Application, Ports, Postgres adapter, and HTTP adapter are each
+**EXTEND**ed in place (new `ViolationKind` members and `Post` cross-check in
+Domain core; `ProvisionTenant` use case in Application; `TenantRepository`/
+`TenantKeyResolver`/`TenantScope` in Ports; a `tenants` table, migration, and
+tenant-scoped queries in the Postgres adapter; three new/reused auth
+middlewares and a new route in the HTTP adapter). Full detail: § Multitenancy
+below.
+
 ### Driving ports (inbound)
 
 | Port | Surface | Slice |
@@ -355,6 +666,14 @@ insertion).
 | `GET /health/trial-balance` | HTTP | 04 |
 | `GET /console`, `GET /console/*` | HTTP, static (unauthenticated) | `ledger-core-console` DEVOPS |
 | Console SPA | Browser | 04, 05 |
+| `POST /tenants` | HTTP (new) | `multitenancy` slice 01 |
+
+**`multitenancy` (confirmed 2026-09-03)**: `POST /accounts`, `POST /transfers`,
+`GET /accounts/{id}`, `GET /accounts/{id}/entries`, and `GET
+/health/trial-balance` are all extended by `multitenancy` slices 02–03 —
+tenant-scoped in addition to (not instead of) their behavior above. Full
+credential-to-port mapping, the dual-mode design, and the new `POST /tenants`
+port: § Multitenancy below.
 
 `GET /console` and `GET /console/*` serve the built SPA shell and its assets
 from `web/console/dist` (Vite's `build.outDir`), added by
@@ -377,6 +696,8 @@ interface.
 | `IdempotencyStore` | interface | `postgres` | Unique constraint on key; stores request fingerprint + transaction_id |
 | `Clock` | function type | `system` / `fake` | Injected so entry timestamps are deterministic in tests |
 | `IDGenerator` | function type | `uuid` / `fake` | Injected for the same reason |
+| `TenantRepository` | interface (`UnitOfWork`-scoped) | `postgres` | `multitenancy` — reads a tenant by name/id, creates a tenant row inside the same unit of work as the I10 courtesy check, mirroring `AccountRepository`'s existing read+write shape |
+| `TenantKeyResolver` | function type | `postgres` / `fake` | `multitenancy` — the one-operation lookup from a presented bearer token's hash to a `tenant_id`, called directly by the HTTP auth middleware ahead of any `Ledger` use case. Hybrid-by-arity (DDD-13): single operation, so a function type, exactly like `Clock`/`IDGenerator` |
 
 The split is not a compromise between paradigms — it follows the effect
 structure. `Clock` and `IDGenerator` are single, independent effects, so as
@@ -404,7 +725,9 @@ rejected alternatives: `adr-008-refusal-taxonomy-boundary.md`.
 | `missing_idempotency_key` | HTTP adapter | 400 |
 | `unidentified_caller` | HTTP adapter (auth middleware) | 401 |
 | `account_not_found` | Domain core — `Post` | 404 |
+| `tenant_not_found` | Domain core — `VerifyBooks` tenant-scoped lookup (`multitenancy`, DDD-25) | 404 |
 | `account_already_exists` | Domain core — `OpenAccount` | 409 |
+| `tenant_already_exists` | Domain core — `ProvisionTenant` (`multitenancy`, DDD-25) | 409 |
 | `idempotency_key_conflict` | Application shell | 409 |
 | `invalid_amount` | Domain core — `NewMoney` / `Post` | 422 |
 | `insufficient_funds` | Domain core — `Post` | 422 |
@@ -413,6 +736,32 @@ rejected alternatives: `adr-008-refusal-taxonomy-boundary.md`.
 **Status follows the decision site**: 400 the request was not a command · 401
 the caller was not identified · 404 the command named something absent · 409 the
 identifier is already bound to something else · 422 the rules refuse it.
+
+**`multitenancy` (confirmed 2026-09-03) — two new sealed members, one reused
+member confirmed at the wire, `unidentified_caller` grows a second and third
+decision site.** Full rationale: § Multitenancy below, DDD-25.
+
+- `tenant_not_found` and `tenant_already_exists` are **new** `domain.ViolationKind`
+  members — this is a distinct addition from ADR-011's own statement that "the
+  sealed `ViolationKind` taxonomy does not grow a new member for cross-tenant
+  access." That statement was scoped narrowly to the I8 cross-tenant-*read*
+  case (resolved by reusing `account_not_found`, below); I10 (tenant identity
+  uniqueness) needs its own pair, symmetric to how `account_not_found` /
+  `account_already_exists` already exist for I9 one aggregate level down. Both
+  grow the `exhaustive`-linted switch surfaces DDD-12's obligation already
+  names (owner: DEVOPS).
+- **Cross-tenant account reference (I8) reuses `account_not_found` at the wire,
+  confirmed, not merely inherited**: a tenant-scoped query (`AccountRepository.Get`,
+  `.LockForUpdate`) that cannot see another tenant's row returns nothing, which
+  is exactly the shape `Post` and the existing handlers already treat as
+  `account_not_found` → 404. No new HTTP-adapter mapping code path is added —
+  this is the existing DDD-17 table row, unchanged, now also reached by a
+  tenant-scoped query returning zero rows instead of only by a truly-unknown id.
+- `unidentified_caller` (401) now has **three** decision sites instead of one:
+  `requireOperatorKey` (unchanged), a new `requireTenantKey`, and a new
+  dual-mode `requireTenantKeyOrOperatorKey` — all three answer the identical
+  wire shape (`401 {"error":"unidentified_caller"}`), so the sealed member does
+  not grow, only the number of places deciding it does. § Multitenancy below.
 
 `unbalanced` stays a `domain.ViolationKind` member and is not a wire member — it
 guards the Transaction smart constructor against a defect in the rulebook, and
@@ -480,6 +829,18 @@ it proves nothing about the database this binary is pointed at.
 This table is trivially satisfied for slice 01 and stops being trivial from
 slice 02 onward, when the posting path already exists and must be extended
 rather than duplicated.
+
+**`multitenancy` reuse pass (confirmed 2026-09-03, DDD-26):**
+
+| Existing Component | File | Overlap | Decision | Justification |
+|---|---|---|---|---|
+| `requireOperatorKey` middleware | `internal/adapters/http/router.go:144-158` | Exact admin-gate contract (`Authorization: Bearer <key>`, 401 `unidentified_caller`) that `POST /tenants` needs verbatim, and that `GET /console/verdict`/`GET /health/trial-balance` must keep using unchanged | **EXTEND (mount on an additional route, zero body changes)** | `POST /tenants` is admin-only per D7; mounting the existing, unmodified function onto one more route is the cleanest possible reuse — no new code, no new risk to the console-facing routes' byte-identical behavior |
+| Bearer-token parsing (`presented := r.Header.Get("Authorization")`, `"Bearer "+expected` comparison) inside `requireOperatorKey` | `internal/adapters/http/router.go:146-148` | Identical header-parsing/compare primitive needed by the two new middlewares below | **EXTEND — factor out as a shared helper** (e.g. `bearerToken(r)`, `isOperatorKey(presented, expected)`), called by all three middlewares | Reuse at the right grain: the primitive (header parsing, constant-shape compare) is genuinely shared; the surrounding control flow is not (see next two rows). Rejected: copy-pasting the parse/compare into each new middleware — would let the three refusal shapes drift out of sync silently, the exact defect class DDD-17's "one wire vocabulary" section exists to prevent |
+| `requireTenantKey` (new: verifies a `tenant_key` via `TenantKeyResolver`, injects `tenant_id` into context) | *(new file, `internal/adapters/http/` package — same component, not a new one)* | Shares the bearer-header contract with `requireOperatorKey` (above) | **CREATE NEW** | Not "the existing class has too many dependencies" (an invalid justification) — the reverse: `requireOperatorKey`'s entire value is being a zero-dependency closure over one static string; forcing it to also perform a keyed database lookup would hand it a dependency (`TenantKeyResolver`) its actual job never needs, breaking single-responsibility for both callers that still only need the static-secret check (`POST /tenants`, unscoped verdict/trial-balance). Static-secret comparison and keyed-identity resolution are different mechanisms that happen to share a header format — the header-parsing primitive is reused (row above); the mechanism is not |
+| `requireTenantKeyOrOperatorKey` (new: dual-mode — tries the `requireOperatorKey` comparison first, falls back to `TenantKeyResolver`) | *(new file, same package)* | Composes the exact `isOperatorKey` primitive (row 2) plus `requireTenantKey`'s resolver call | **CREATE NEW**, composed from the two reused primitives above | The two-branch control flow (admin-check-then-tenant-check-then-refuse) exists nowhere today and is specific to `GET /accounts/{id}/entries`'s console-compatibility requirement only — DDD-23 (resolved 2026-09-03, Option C) confirmed `POST /accounts`/`POST /transfers`/`GET /accounts/{id}` stay single-mode (`requireTenantKey` only, no `OperatorKey` fallback), so this middleware is not reused a third time |
+| `TenantRepository`, `ProvisionTenant` use case | *(none)* | No existing tenant persistence or provisioning code anywhere (confirmed by the DDD-architect's and system-designer's brownfield reads, and by this architect's own `Glob`/`Grep` over `internal/`) | **CREATE NEW** | Greenfield — mirrors `AccountRepository`/`CreateAccount`'s existing shape (read-then-decide-then-write inside one `UnitOfWork`, DDD-15/DDD-18 pattern) rather than inventing a new persistence idiom |
+| `crypto/sha256` (credential hashing) | `internal/adapters/http/handlers.go:10` | Already imported and used in this exact package (idempotency-key fingerprinting) | **EXTEND (reuse the already-imported stdlib package, zero new dependency)** | Tenant credentials are high-entropy random tokens (below), not low-entropy user passwords — a fast cryptographic hash is the correct tool, and this package already imports it for the same class of problem (hashing a caller-presented secret for storage/lookup) |
+| `IDGenerator` port (`uuid.NewString()`, `crypto/rand`-backed per `google/uuid`'s v4 implementation) | `cmd/api/main.go:58`, `internal/app/ports/ports.go` | Already a cryptographically-random, 122-bit string generator, wired as a driven port | **EXTEND (reuse for `tenant_id` and `tenant_key` generation, prefixed `tnt_`/`tk_` mirroring the existing `txn_` convention)** | No new randomness source or driven port is needed — `IDGenerator` already provides exactly the entropy a bearer credential requires (Earned Trust note: `crypto/rand`'s only failure mode is the OS CSPRNG being unavailable, which Go's own runtime treats as an unrecoverable panic rather than a silent weak fallback — this project's own fail-loud posture, e.g. the entries-append-only trigger raising rather than silently permitting, extends here without a bespoke probe) |
 
 **Console SPA reuse pass** (`ledger-core-console`, confirmed 2026-08-25):
 
@@ -752,6 +1113,196 @@ Testcontainers (OPS-11), so local and CI runs take the same code path.
 
 ---
 
+## Multitenancy (`multitenancy`, confirmed 2026-09-03)
+
+*Application-level leg of `multitenancy`'s DESIGN wave (system →
+`nw-system-designer`, done → domain → `nw-ddd-architect`, done →
+**application, this section** → `nw-solution-architect`). Full narrative:
+`docs/feature/multitenancy/feature-delta.md` § Wave: DESIGN / Application
+Architecture. ADRs: `adr-012-tenant-credential-mechanism.md`,
+`adr-013-multitenancy-migration-shape.md`.*
+
+### Credential mechanism (Pre-requisite #3)
+
+**D8's provisional recommendation — reuse `OperatorKey` as platform-admin,
+add `tenant_key` as a new type — is structurally sound, evaluated rather than
+rubber-stamped, with one correction.** `router.go`'s current shape applies
+*one* middleware uniformly to *one* `chi.Router` group containing every
+protected route. That shape does not fit once different routes require
+different credential sets — the fix is `chi`'s native nested-group support,
+not a rework of `requireOperatorKey` itself.
+
+**Confirmed credential-to-port mapping** (DISCUSS's own table flagged this as
+"DESIGN confirmation, not a new decision" — confirmed as originally stated,
+below; DDD-23 (resolved, see § Backward compatibility subsection below)
+settled the one open question this table raised, in favor of the mapping
+already shown here, not against it):
+
+| Port | Valid credential(s) | Middleware |
+|---|---|---|
+| `POST /tenants` | `OperatorKey` only | `requireOperatorKey` (unchanged, mounted on a new route) |
+| `GET /console/verdict` | `OperatorKey` only, unscoped | `requireOperatorKey` (unchanged) |
+| `GET /health/trial-balance` | `OperatorKey` only; optional `?tenant_id=` scopes the *query*, not the credential | `requireOperatorKey` (unchanged) |
+| `GET /accounts/{id}/entries` | `OperatorKey` (unscoped, existing) **or** `tenant_key` (scoped, new) — dual-mode | `requireTenantKeyOrOperatorKey` (new) |
+| `POST /accounts`, `POST /transfers`, `GET /accounts/{id}` | `tenant_key` only — **confirmed by DDD-23** (resolved 2026-09-03): `OperatorKey` is never accepted here | `requireTenantKey` (new) |
+
+**New middleware, composed not duplicated (DDD-22):**
+
+- `bearerToken(r *http.Request) (string, bool)` — extracted from
+  `requireOperatorKey`'s existing header-parsing line, shared by all three
+  middlewares (Reuse Analysis above).
+- `requireTenantKey(resolve ports.TenantKeyResolver) func(http.Handler) http.Handler`
+  — looks up the presented bearer token's SHA-256 hash via `TenantKeyResolver`;
+  not found → `401 {"error":"unidentified_caller"}` (identical wire shape to
+  `requireOperatorKey`'s refusal); found → injects `tenant_id` into the request
+  context (a typed context key, not a bare string, so a handler cannot
+  accidentally read the wrong context value).
+- `requireTenantKeyOrOperatorKey(operatorKey string, resolve ports.TenantKeyResolver) func(http.Handler) http.Handler`
+  — tries the exact `isOperatorKey` comparison `requireOperatorKey` already
+  performs *first* (cheap, no I/O, byte-identical to today's check); on match,
+  injects the "unscoped/admin" context marker and proceeds — this is what
+  makes the `OperatorKey` branch of this endpoint byte-identical to today,
+  not merely similar. On no match, falls back to the `TenantKeyResolver`
+  lookup exactly as `requireTenantKey` does. Refuses `401 unidentified_caller`
+  only if both fail.
+
+**`TenantScope` — a closed, two-constructor type, not a nullable string
+(`internal/app/ports`):**
+
+```
+type TenantScope struct { /* unexported */ }
+func ScopedToTenant(tenantID string) TenantScope
+func Unscoped() TenantScope
+func (s TenantScope) Resolve() (tenantID string, scoped bool)
+```
+
+Used *only* where DDD-architect's domain position already establishes
+"unscoped" as a legitimate, intentional state (`EntriesFor`, `TrialBalance`,
+`ComputedBalances` — read-only, platform-wide-aggregate is a real answer, not
+a bug). Every write-path port (`AccountRepository.LockForUpdate` /`.Create`
+/`.ApplyDeltas`/`.Get`/`.All`) keeps `tenant_id` as a **plain, required
+`string`** parameter — never `TenantScope` — because there is no legitimate
+unscoped state for a write or a single-tenant read; construction-time
+enforcement (I8, DDD-architect's decision) means the type system should make
+"forgot to scope" and "deliberately unscoped" impossible to confuse, not
+paper over the difference with one nullable field.
+
+**Credential format and storage (no new dependency — Reuse Analysis above):**
+`tenant_id = "tnt_" + uuid.NewString()`, `tenant_key = "tk_" + uuid.NewString()`
+— both via the existing `IDGenerator` port, prefixed to match the existing
+`txn_` convention (`cmd/api/main.go`). The plaintext `tenant_key` is returned
+to the caller exactly once, at provisioning, and never stored: `tenants.credential_hash`
+holds `sha256(tenant_key)` (hex-encoded), using the `crypto/sha256` package
+already imported by `internal/adapters/http/handlers.go`. Lookup hashes the
+presented bearer token and queries by the hash — the plaintext key never
+reaches a `WHERE` clause or a log line.
+
+**Contract-shape classification (Core Principle 12), per new/changed component:**
+
+| Component | Contract shape | Declared mutation set / universe | Assertion mechanism for the crafter |
+|---|---|---|---|
+| `ProvisionTenant` (app + domain) | bounded-change | Exactly one new Tenant row; Tenant collection only (DDD-architect's complement-equality contract, restated) | `after.tenants.without(new_id) == before.tenants.without(new_id)` **and** `after.accounts == before.accounts` **and** `after.transactions == before.transactions` |
+| `TenantKeyResolver` | pure-function (return-only) | None — must never gain a write/touch method (e.g. no "update last-used-at") | Interface exposes exactly one method returning `(tenantID string, ok bool, err error)`; a lint/review check that no second method is ever added |
+| `requireTenantKey` / `requireTenantKeyOrOperatorKey` | bounded-change | Request-context annotation only (`tenant_id` or "unscoped/admin" marker); touches no store | Assert the middleware calls no driven port with a Create/Apply/Append verb — it only calls `TenantKeyResolver` (a read) |
+| `AccountRepository.{LockForUpdate,Create,ApplyDeltas,Get,All}` (tenant_id now required) | bounded-change (existing pattern, extended) | Declared delta scoped to the one `tenant_id`'s own account rows | Existing complement-equality contract, with the universe narrowed from "the whole table" to "this tenant's rows" |
+| `TransactionRepository.EntriesFor(scope, accountID)`, `.TrialBalance(scope)`, `.ComputedBalances(scope)` | pure-function (return-only) | None (read-only); universe = `scope`'s declared entry set (one tenant's, or all) | A regression scenario asserting the *unscoped* call's result is byte-identical before/after this feature ships (DoD item 3a) |
+| `Post` (existing, gains the I8 cross-check) | pure-function (return-only), unchanged shape | None — same as today; the cross-check is a new refusal branch inside the same pure decision, not a new effect | Existing PBT harness, extended with a tenant-mismatch generator |
+
+**Read/write driving-port split (Core Principle 12) — already satisfied, not
+newly built**: `GET /accounts/{id}/entries` (dual-mode) and `GET
+/health/trial-balance` are read-only driving ports and expose no write
+method; `POST /tenants` is a distinct, single-purpose write port. No driving
+port mixes read and write. `TenantRepository` (a **driven** port) does mix
+read (`Get`) and write (`Create`) inside one `UnitOfWork` — this is the same
+accepted pattern `AccountRepository`/`TransactionRepository` already use for
+the identical reason (an atomic check-then-create needs a shared transaction
+handle); the read/write-split mandate targets driving ports, not
+transaction-scoped driven repositories.
+
+### Migration shape (Pre-requisite #6) — the pre-slice SPIKE question, answered
+
+**Yes, `(tenant_id, account_id)` composite uniqueness is expressible as a
+single expand-only migration against the current schema — with one
+structural cascade the SPIKE question's framing did not anticipate.** Full
+reasoning and the exact SQL shape: `adr-013-multitenancy-migration-shape.md`.
+Summary:
+
+1. **New `tenants` table** — `tenant_id text PRIMARY KEY, name text UNIQUE NOT NULL, credential_hash text UNIQUE NOT NULL` (I10, both halves: uniqueness and lookup-by-key). `GRANT SELECT, INSERT` only to `ledgerops_app` — no `UPDATE`/`DELETE`, a free consequence of renaming/rotation/offboarding being out of scope, not a deliberate D7-style control.
+2. **`accounts.id`'s bare `PRIMARY KEY` cannot stay** — US-2's own AC requires two tenants to open an account named `wallet-1` independently, which a global primary key on `id` structurally forbids. `accounts` gains `tenant_id text NOT NULL DEFAULT 'tnt_legacy_seed' REFERENCES tenants(tenant_id)` and the primary key becomes `(tenant_id, id)`. The `DEFAULT` (not merely nullable) is what keeps a hypothetical still-running pre-multitenancy binary's `INSERT` (which never mentions `tenant_id`) succeeding against the new schema.
+3. **Cascade the SPIKE didn't name**: once `accounts.id` is no longer independently unique, `entries.account_id REFERENCES accounts(id)` and `entries.counterparty_id REFERENCES accounts(id)` are no longer valid foreign keys — Postgres requires an FK target to be unique. `entries` gains `tenant_id text NOT NULL REFERENCES tenants(tenant_id)`, and both foreign keys become composite: `FOREIGN KEY (tenant_id, account_id) REFERENCES accounts (tenant_id, id)` (and the same shape for `counterparty_id`). `transactions` gains a plain (non-key) `tenant_id text NOT NULL REFERENCES tenants(tenant_id)` column — transaction ids stay globally unique (UUIDs, no rescoping need), so no PK change there.
+4. **One migration, one file, migration-seeded sentinel tenant** (`tnt_legacy_seed`) backfills every pre-existing `accounts` row before the composite PK is applied — Postgres DDL is transactional, and there is no hosted environment (dev/CI only), so a single-transaction backfill carries none of the production-scale-migration risk the "two releases" add-backfill-retire pattern exists to manage. This is *not* the renaming pattern that clause governs; it is a bounded, one-time structural correction with no data at risk.
+5. **Expand-only discipline, checked against its actual letter**: the literal ban ("no migration may `DELETE` from or drop **the entry table**") is not violated — no table is dropped, no entry row is deleted or rewritten in content, only a column is added and two FK constraints are widened from stricter to a tenant-scoped shape. The broader "previous binary keeps running" property holds up to (not through) the point a second tenant actually opens a duplicate-named account — an inherent, reasoned consequence of the feature's own purpose, not an oversight. Rejected alternative: a surrogate UUID row-identity with `id`/`tenant_id` demoted to a plain unique constraint — rejected as unnecessary indirection (the human-facing `{account_id}` path parameter already *is* `accounts.id`; introducing a second physical identity purely to avoid a constraint change duplicates identity concepts for no behavioral gain, against simplest-solution-first).
+
+### Backward compatibility for already-shipped, `OperatorKey`-authenticated demo/chaos/race targets (DDD-23 — resolved 2026-09-03, was open)
+
+Verified directly against `Makefile`: `demo-01`, `demo-02`, `demo-03`, and
+`chaos-01` all call `POST /accounts`, `POST /transfers`, and `GET
+/accounts/{id}` using the shared `AUTH := Authorization: Bearer
+demo-operator-key` variable — the *same* three routes this feature's Driving
+ports mapping above scopes to `tenant_key` only. This is exactly the risk
+slice-01's own Learning Hypothesis named ("if issuing and verifying a second
+credential type turns out to require restructuring the existing
+`requireOperatorKey` middleware in ways that touch already-shipped,
+non-tenant-scoped surfaces... that is signal the interim auth decision needs
+revisiting before slice 02") — confirmed as real signal, not resolved
+silently. Two structurally sound options were presented, with a genuine
+product/security-posture trade-off between them:
+
+- **Option A — `OperatorKey` implicitly resolves to a seeded legacy tenant**
+  (`tnt_legacy_seed`, the same sentinel the migration backfills) for
+  `POST /accounts`/`POST /transfers`/`GET /accounts/{id}` too (a third
+  dual-mode route family, same `requireTenantKeyOrOperatorKey` primitive).
+  Zero Makefile changes — literally byte-identical. Cost: `OperatorKey` gains
+  tenant-*write* authority, not just admin/read authority, which is new
+  capability beyond what US-1's own elevator pitch ("platform-admin
+  credential" for provisioning) suggested.
+- **Option C**: seed a second fixed dev/demo
+  credential (`LEDGEROPS_DEMO_TENANT_KEY`, mirroring `LEDGEROPS_OPERATOR_KEY`'s
+  existing pattern) bound to the same legacy tenant, and update the
+  Makefile's `AUTH` variable's *value* only — every demo/chaos/race recipe
+  body stays byte-for-byte unchanged, only the shared credential the variable
+  holds changes from the admin secret to a seeded tenant secret. Keeps
+  `OperatorKey`'s role conceptually pure (admin actions + unscoped reads,
+  never a tenant's own write authority), consistent with I8's isolation
+  ethos and this project's correctness/auditability-ranked-first quality
+  attributes. Cost: touches `Makefile` (a DEVOPS/DELIVER-owned file, not
+  touched by this architect), and requires the composition root to seed a
+  second fixed secret at startup/migration time — a small, precedented
+  addition (`demo-operator-key` is already a hardcoded dev secret).
+
+Either option was implementable without wasted work: both reuse the
+identical `requireTenantKeyOrOperatorKey` primitive and the identical
+`tnt_legacy_seed` tenant already required by the migration (§ above) for
+schema reasons independent of this question.
+
+**Resolved 2026-09-03 (user decision, relayed by the coordinator; additive
+note, not a rewrite of the analysis above, the same convention this
+project's own DISCUSS-wave "Changed Assumptions" amendments use) — Option C.**
+`OperatorKey` gains no tenant-write authority; `POST /accounts`/`POST
+/transfers`/`GET /accounts/{id}` stay `tenant_key`-only, exactly as the
+credential-to-port mapping table above already states. `demo-01`/`02`/`03`/
+`chaos-01` are kept passing by seeding a second, fixed demo tenant credential
+and re-pointing the `Makefile`'s shared `AUTH` variable's value to it. User's
+stated rationale: preserves the admin/tenant-credential boundary this section
+already draws; accepts the named cost (a DEVOPS-owned file touched, one more
+seeded dev secret). **DEVOPS/DELIVER inheritance, stated explicitly so it is
+a requirement inherited rather than a discovery** — mirrors how DDD-12's
+`exhaustive`-linter obligation is handed to DEVOPS elsewhere in this brief:
+DESIGN's job ends at this decision record; seeding
+`LEDGEROPS_DEMO_TENANT_KEY` (or equivalent) and editing the `Makefile`'s
+`AUTH` value is a DEVOPS/DELIVER implementation task, not built in this wave.
+Full record: `docs/feature/multitenancy/feature-delta.md` § Wave: DESIGN /
+Application Architecture, `docs/feature/multitenancy/design/wave-decisions.md`.
+
+### Open questions for the user
+
+**None.** DDD-22, DDD-24, and DDD-25 were confirmed, evidence-grounded
+decisions from this leg's first pass. DDD-23 (above) was the one genuine
+product/security trade-off left open at that point; it is now resolved
+(Option C) by the user's direct decision.
+
+---
+
 ## For Acceptance Designer
 
 *Owner: nw-solution-architect · consumed by nw-acceptance-designer (DISTILL)*
@@ -806,3 +1357,35 @@ the account-name uniqueness rule DDD-18 depends on. The row was added by
 `nw-solution-architect` and annotated as a cross-section edit; review it, and
 renumber it if that table should use an `I`-series identifier rather than the
 decision id.
+
+**`multitenancy` (confirmed 2026-09-03)** — additions to this section, not a
+replacement:
+
+| Port | Surface | Slice (`multitenancy`) | Credential |
+|---|---|---|---|
+| `POST /tenants` | HTTP | 01 | `OperatorKey` only |
+| `POST /accounts`, `POST /transfers`, `GET /accounts/{id}` | HTTP | 02 | `tenant_key` only — **confirmed by DDD-23** (resolved 2026-09-03): `OperatorKey` is never accepted here; `demo-01`/`02`/`03`/`chaos-01`'s continued use of `OperatorKey` is handled by seeding a second, `tenant_key`-shaped demo credential (DEVOPS/DELIVER task), not by this port accepting `OperatorKey` |
+| `GET /accounts/{id}/entries` | HTTP — dual-mode | 02 | `tenant_key` (scoped) or `OperatorKey` (unscoped, must be byte-identical to today) |
+| `GET /health/trial-balance?tenant_id=` | HTTP — optional query param | 03 | `OperatorKey` only |
+
+New refusal-taxonomy members reachable through these ports: `tenant_already_exists`
+(409, `POST /tenants` on a duplicate name) and `tenant_not_found` (404, `GET
+/health/trial-balance?tenant_id=` naming an unprovisioned tenant). Both are
+new `domain.ViolationKind` members — DISTILL should author scenarios that
+reach both, and CI's `exhaustive` linter (DDD-12/DDD-17) will fail the build
+if either is missed on the wire-mapping switch.
+
+**Mandatory CI-gated byte-identical scenarios (DoD item 3a, hard constraint,
+not optional coverage)**: an unscoped `OperatorKey` call to each of `GET
+/accounts/{id}/entries`, `GET /health/trial-balance`, and `GET
+/console/verdict` must be asserted byte-identical in shape and status to
+today's contract, in the same slice that changes that endpoint's
+tenant-scoping behavior (slice 02 for entries, slice 03 for
+verdict/trial-balance) — see § Multitenancy above, Contract-shape table, row
+`TransactionRepository.EntriesFor`/`.TrialBalance`.
+
+**Test infrastructure, extended**: `TenantRepository` and `TenantKeyResolver`
+join the "never faked, real PostgreSQL" row above (WS strategy C — isolation
+is a property of the real store's constraint behavior, a fake would model the
+very thing under test). `IDGenerator`'s existing fake is reused unchanged for
+`tenant_id`/`tenant_key` generation in tests — no new fake type is needed.

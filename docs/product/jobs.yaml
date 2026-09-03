@@ -125,10 +125,76 @@ jobs:
     slice: "04"
     consumed_by: [ledger-core (backend, GET /console/verdict, GET /health/trial-balance), ledger-core-console (browser verdict + drift UI, US-1/US-2/US-4)]
 
-deferred:
   - id: J6
-    title: Tenant isolation
-    reason: >
-      Dropped from ledger-core scope by user decision on 2026-08-17. The service is
-      single-tenant for now. Revisit before any third party's money is held.
+    persona: P1
+    story: >
+      When I build a product on ledgerops that will serve more than one customer
+      organization, I want each customer's accounts, transactions, and balances
+      completely isolated from every other customer sharing the platform, so I
+      can take on a third party's money without becoming the reason it mixes
+      with anyone else's.
+    dimensions:
+      functional: Partition every account, transaction, and balance query by tenant, with no cross-tenant read or write path.
+      emotional: Stop being personally liable for one customer's mistake or breach leaking into another's books.
+      social: Be trusted to hold money for multiple unrelated third parties on shared infrastructure.
+    forces:
+      push: A single shared account namespace lets two customers collide on names, and a shared credential lets one customer's integration bug reach another's balance.
+      pull: Every request is scoped to exactly one tenant, provably, before any domain rule runs.
+      anxiety: Trusting a shared deployment with money belonging to parties who do not trust each other.
+      habit: Running one ledgerops instance per customer, or trusting a shared instance with no isolation guarantee.
     invariant: I8
+    importance: 9
+    satisfaction: 1
+    opportunity: 17
+    slice: "01-02"
+    reactivated: >
+      2026-09-03, by feature `multitenancy`. Originally dropped from ledger-core
+      scope 2026-08-17 (single-tenant deferral). Reactivation trigger: the
+      deferral's own stated condition — "revisit before any third party's money
+      is held" — is what this feature exists to satisfy.
+
+  - id: J7
+    persona: P2
+    story: >
+      When I operate a shared ledgerops deployment on behalf of more than one
+      tenant, I want to onboard a new tenant and check that tenant's books
+      balance on their own, without auditing every account by hand to convince
+      myself nothing leaked between customers, so I can take on a new customer
+      without personally re-verifying the whole platform's isolation guarantee.
+    dimensions:
+      functional: Provision a new tenant and verify one tenant's trial balance independent of every other tenant's state.
+      emotional: Trust the platform's isolation by construction, not by manual cross-checking.
+      social: Onboard a new customer without asking them to trust a promise nobody has demonstrated.
+    forces:
+      push: There is no way to ask "does this one customer's slice of the ledger balance?" once more than one customer shares a deployment.
+      pull: A per-tenant verdict, exactly as trustworthy as today's single-tenant one.
+      anxiety: Onboarding tenant two accidentally proves tenant one's isolation was never real.
+      habit: One ledgerops deployment per customer, so there is nothing to isolate.
+    invariant: null
+    importance: 7
+    satisfaction: 1
+    opportunity: 13
+    slice: "01-03"
+
+deferred:
+  - id: J8
+    title: Inter-tenant settlement (platform-mediated)
+    reason: >
+      Raised during multitenancy's DISCUSS wave (2026-09-03) — the user needs
+      rare inter-company settlement between two tenants. Resolved shape: two
+      linked transactions through a platform clearing account, run as a saga
+      (initiated -> A debited -> settled, reversed if the B-leg fails); each
+      tenant's own ledger stays independently zero-sum. Authorization is
+      platform-mediated settlement authority — a tenant's own credential only
+      ever touches its own accounts, so isolation (J6) is never violated by
+      this mechanism. Likely extends the existing two-role service-credential
+      precedent (ledger-core OPS-10: ledgerops_app vs ledgerops_migrate) with
+      a third, platform-settlement-scoped credential — noted for this
+      feature's own future DESIGN pass, not decided here. Kept out of
+      `multitenancy` deliberately: depends on tenant isolation shipping
+      first, and folding it into slice 02 would bloat that slice and muddy
+      the isolation-proof (race) demo. Revisit as its own follow-on feature
+      once multitenancy's isolation slices are done.
+    depends_on: multitenancy
+    invariant: null
+    persona: [P1, P2]
