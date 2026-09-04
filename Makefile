@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 
-.PHONY: up down wait-app demo-01 demo-02 demo-03 chaos-01 race-02 race-03
+.PHONY: up down wait-app demo-01 demo-02 demo-03 demo-04 chaos-01 race-02 race-03
 
 # --- stack lifecycle -------------------------------------------------------
 
@@ -86,6 +86,39 @@ demo-03: wait-app
 	@diff <(grep -o '"transaction_id":"[^"]*"' /tmp/demo-03-first.json) <(grep -o '"transaction_id":"[^"]*"' /tmp/demo-03-second.json) \
 		&& echo "PASS: both answers name the same transaction" \
 		|| (echo "FAIL: retry returned a different transaction"; exit 1)
+
+# --- demo-04: US-4, provision a tenant, then post its first transfer -------
+#
+# Unlike demo-01..03 (which reuse the pre-seeded tnt_legacy_seed tenant via
+# $(AUTH)), demo-04's whole point is proving a FRESH tenant's onboarding
+# end-to-end: provision a brand-new tenant via POST /tenants using
+# $(OPERATOR_AUTH) (admin-only route), capture the returned tenant_key from
+# the response JSON, open an account and post that tenant's first transfer
+# using THAT freshly-minted key (never $(AUTH)). Emits
+# tenant_onboard_transfer_seconds on stdout in the same parseable
+# `name=value` form KPI-5's demo_first_green_seconds uses (date +%s
+# before/after wrapped around the whole provision-to-first-transfer
+# sequence), so the CI job step can capture it the same way.
+
+demo-04: wait-app
+	@echo "== demo-04: provision a tenant, then post its first transfer =="
+	@START=$$(date +%s); \
+	curl -s -X POST $(APP_URL)/tenants -H "$(OPERATOR_AUTH)" -H 'Content-Type: application/json' -d '{"name":"demo-04-tenant"}' | tee /tmp/demo-04-tenant.json; \
+	echo ""; \
+	TENANT_KEY="$$(grep -o '"tenant_key":"[^"]*"' /tmp/demo-04-tenant.json | cut -d'"' -f4)"; \
+	if [ -z "$$TENANT_KEY" ]; then echo "FAIL: no tenant_key returned by POST /tenants"; exit 1; fi; \
+	echo "-- provisioned fresh tenant, tenant_key=$$TENANT_KEY --"; \
+	curl -s -o /dev/null -X POST $(APP_URL)/accounts -H "Authorization: Bearer $$TENANT_KEY" -H 'Content-Type: application/json' -d '{"account_id":"treasury-04","type":"system"}'; \
+	curl -s -o /dev/null -X POST $(APP_URL)/accounts -H "Authorization: Bearer $$TENANT_KEY" -H 'Content-Type: application/json' -d '{"account_id":"alice-04","type":"wallet"}'; \
+	curl -s -o /dev/null -X POST $(APP_URL)/transfers -H "Authorization: Bearer $$TENANT_KEY" -H 'Idempotency-Key: demo-04-fund' -H 'Content-Type: application/json' -d '{"from":"treasury-04","to":"alice-04","amount":"100.00"}'; \
+	echo "-- posting the fresh tenant's first transfer, expect 201 --"; \
+	RESPONSE="$$(curl -s -w '\nHTTP_CODE:%{http_code}' -X POST $(APP_URL)/transfers -H "Authorization: Bearer $$TENANT_KEY" -H 'Idempotency-Key: demo-04-first-transfer' -H 'Content-Type: application/json' -d '{"from":"treasury-04","to":"alice-04","amount":"10.00"}')"; \
+	echo "$$RESPONSE"; \
+	HTTP_CODE="$$(echo "$$RESPONSE" | grep -o 'HTTP_CODE:[0-9]*' | cut -d: -f2)"; \
+	if [ "$$HTTP_CODE" != "201" ]; then echo "FAIL: fresh tenant's first transfer returned HTTP $$HTTP_CODE"; exit 1; fi; \
+	END=$$(date +%s); \
+	DURATION=$$((END - START)); \
+	echo "tenant_onboard_transfer_seconds=$$DURATION"
 
 # --- chaos-01: kill mid-write, verify no half-applied movement -------------
 
