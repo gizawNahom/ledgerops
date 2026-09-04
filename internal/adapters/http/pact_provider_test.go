@@ -26,6 +26,8 @@ package http_test
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -50,16 +52,19 @@ type httpDoer interface {
 	Do(req *http.Request) (*http.Response, error)
 }
 
-// callJSON drives one request through the real front door (POST /accounts,
-// POST /transfers) exactly as the acceptance suite's Ledger.call does,
-// carrying the operator key every provider-state setup call needs.
+// callJSON drives one request through the real front door carrying the
+// platform-admin operator key -- the credential every /tenants provisioning
+// call still requires (DDD-22 leaves that gate untouched).
 func callJSON(ctx context.Context, client httpDoer, baseURL, method, path string, body any) error {
-	return callJSONWithIdempotencyKey(ctx, client, baseURL, method, path, "", body)
+	return callJSONAs(ctx, client, baseURL, method, path, pactOperatorKey, "", body)
 }
 
-// callJSONWithIdempotencyKey is callJSON plus the Idempotency-Key header
-// POST /transfers requires (ADR-005).
-func callJSONWithIdempotencyKey(ctx context.Context, client httpDoer, baseURL, method, path, idempotencyKey string, body any) error {
+// callJSONAs is callJSON generalized over which
+// bearer credential rides in the Authorization header -- POST /accounts and
+// POST /transfers no longer accept the operator key at all as of step 02-03
+// (DDD-23 Option C), so this test's own seed helpers below present a
+// provisioned tenant's own key instead.
+func callJSONAs(ctx context.Context, client httpDoer, baseURL, method, path, bearerKey, idempotencyKey string, body any) error {
 	encoded, err := json.Marshal(body)
 	if err != nil {
 		return fmt.Errorf("encoding %s %s body: %w", method, path, err)
@@ -69,7 +74,7 @@ func callJSONWithIdempotencyKey(ctx context.Context, client httpDoer, baseURL, m
 		return fmt.Errorf("building %s %s request: %w", method, path, err)
 	}
 	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("Authorization", "Bearer "+pactOperatorKey)
+	request.Header.Set("Authorization", "Bearer "+bearerKey)
 	if idempotencyKey != "" {
 		request.Header.Set("Idempotency-Key", idempotencyKey)
 	}
@@ -86,6 +91,65 @@ func callJSONWithIdempotencyKey(ctx context.Context, client httpDoer, baseURL, m
 		return fmt.Errorf("%s %s: status %d, body %v", method, path, response.StatusCode, problem)
 	}
 	return nil
+}
+
+// provisionPactTenant provisions a tenant through the real front door (POST
+// /tenants, still operator-key-gated -- unchanged by step 02-03) and returns
+// its issued tenant_key, so a seed helper can present a real tenant
+// credential to POST /accounts and POST /transfers instead of the operator
+// key those routes stopped accepting.
+func provisionPactTenant(ctx context.Context, client httpDoer, baseURL, name string) (string, error) {
+	encoded, err := json.Marshal(map[string]any{"name": name})
+	if err != nil {
+		return "", fmt.Errorf("encoding /tenants body: %w", err)
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/tenants", bytes.NewReader(encoded))
+	if err != nil {
+		return "", fmt.Errorf("building POST /tenants request: %w", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer "+pactOperatorKey)
+
+	response, err := client.Do(request)
+	if err != nil {
+		return "", fmt.Errorf("POST /tenants: %w", err)
+	}
+	defer response.Body.Close()
+
+	var payload struct {
+		TenantKey string `json:"tenant_key"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		return "", fmt.Errorf("decoding POST /tenants response: %w", err)
+	}
+	if response.StatusCode != http.StatusCreated || payload.TenantKey == "" {
+		return "", fmt.Errorf("POST /tenants for %q: status %d, no tenant_key issued", name, response.StatusCode)
+	}
+	return payload.TenantKey, nil
+}
+
+// pactTenantKeyResolver returns a ports.TenantKeyResolver over the fake
+// store's provisioned tenants -- the in-process equivalent of
+// postgres.NewTenantKeyResolver (which queries a real tenants table), sized
+// for this test's fake store rather than a real database.
+func pactTenantKeyResolver(store *pactFakeStore) ports.TenantKeyResolver {
+	return func(ctx context.Context, credentialHash string) (string, bool, error) {
+		for _, tenant := range store.tenants {
+			if pactHashCredential(tenant.Credential()) == credentialHash {
+				return tenant.TenantID(), true, nil
+			}
+		}
+		return "", false, nil
+	}
+}
+
+// pactHashCredential mirrors postgres.hashCredential's digest/encoding shape
+// (sha256, hex-encoded) -- the same shape router.go's hashBearerToken
+// produces from a presented bearer token, so the two sides of this fake
+// resolver agree on what "the same credential" means.
+func pactHashCredential(credential string) string {
+	sum := sha256.Sum256([]byte(credential))
+	return hex.EncodeToString(sum[:])
 }
 
 // pactOperatorKey MUST equal the literal Authorization value the consumer
@@ -105,10 +169,11 @@ func TestPactProvider_HonorsConsoleContract(t *testing.T) {
 	store := newPactFakeStore()
 
 	handler := apphttp.NewRouter(apphttp.Deps{
-		Store:       store,
-		OperatorKey: pactOperatorKey,
-		Clock:       func() time.Time { return time.Date(2026, 8, 20, 10, 0, 0, 0, time.UTC) },
-		IDGenerator: sequentialTransactionIDs(),
+		Store:             store,
+		OperatorKey:       pactOperatorKey,
+		Clock:             func() time.Time { return time.Date(2026, 8, 20, 10, 0, 0, 0, time.UTC) },
+		IDGenerator:       sequentialTransactionIDs(),
+		TenantKeyResolver: pactTenantKeyResolver(store),
 	})
 	server := httptest.NewServer(handler)
 	defer server.Close()
@@ -144,20 +209,25 @@ func TestPactProvider_HonorsConsoleContract(t *testing.T) {
 	}
 }
 
-// seedAccountWithOneEntry opens alice-demo and a funding account through the
-// real driving ports (POST /accounts, POST /transfers) and settles one
-// transfer into alice-demo, so GET /accounts/alice-demo/entries has at least
-// one row to answer with.
+// seedAccountWithOneEntry provisions a tenant, then opens alice-demo and a
+// funding account under that tenant's own key through the real driving
+// ports (POST /accounts, POST /transfers -- tenant-key-only as of step
+// 02-03, DDD-23 Option C) and settles one transfer into alice-demo, so GET
+// /accounts/alice-demo/entries has at least one row to answer with.
 func seedAccountWithOneEntry(ctx context.Context, client httpDoer, baseURL string, store *pactFakeStore) error {
-	if err := callJSON(ctx, client, baseURL, "POST", "/accounts",
+	tenantKey, err := provisionPactTenant(ctx, client, baseURL, "pact-seed-alice-demo")
+	if err != nil {
+		return err
+	}
+	if err := callJSONAs(ctx, client, baseURL, "POST", "/accounts", tenantKey, "",
 		map[string]any{"account_id": "treasury-alice", "type": "system"}); err != nil {
 		return err
 	}
-	if err := callJSON(ctx, client, baseURL, "POST", "/accounts",
+	if err := callJSONAs(ctx, client, baseURL, "POST", "/accounts", tenantKey, "",
 		map[string]any{"account_id": "alice-demo", "type": "wallet"}); err != nil {
 		return err
 	}
-	if err := callJSONWithIdempotencyKey(ctx, client, baseURL, "POST", "/transfers", "seed-alice-demo-entry",
+	if err := callJSONAs(ctx, client, baseURL, "POST", "/transfers", tenantKey, "seed-alice-demo-entry",
 		map[string]any{"from": "treasury-alice", "to": "alice-demo", "amount": "12.34"}); err != nil {
 		return err
 	}
@@ -173,7 +243,11 @@ func seedAccountWithOneEntry(ctx context.Context, client httpDoer, baseURL strin
 // suite.
 func seedOneDriftedAccount(ctx context.Context, client httpDoer, baseURL string, store *pactFakeStore) error {
 	const driftedAccountID = "acct-42"
-	if err := callJSON(ctx, client, baseURL, "POST", "/accounts",
+	tenantKey, err := provisionPactTenant(ctx, client, baseURL, "pact-seed-drifted")
+	if err != nil {
+		return err
+	}
+	if err := callJSONAs(ctx, client, baseURL, "POST", "/accounts", tenantKey, "",
 		map[string]any{"account_id": driftedAccountID, "type": "wallet"}); err != nil {
 		return err
 	}
