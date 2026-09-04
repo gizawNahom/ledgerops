@@ -1,0 +1,272 @@
+{
+  "roadmap": {
+    "project_id": "multitenancy",
+    "created_at": "2026-09-03T15:52:40Z",
+    "total_steps": 12
+  },
+  "phases": [
+    {
+      "id": "01",
+      "name": "Slice 01 — Provision a tenant",
+      "steps": [
+        {
+          "id": "01-01",
+          "name": "Tenant schema migration: composite tenant PKs and legacy backfill",
+          "criteria": [
+            "tenants table stores tenant_id, name, credential_hash with both columns unique",
+            "accounts gains tenant_id (default tnt_legacy_seed) and composite (tenant_id, id) primary key",
+            "entries and transactions gain tenant_id; entries' account/counterparty FKs become composite tenant-scoped",
+            "Migration is single file, expand-only, no DELETE/DROP; pre-existing rows backfill to tnt_legacy_seed"
+          ],
+          "test_file": "",
+          "scenario_name": "",
+          "files_to_modify": [
+            "internal/adapters/postgres/migrations/0003_tenants.up.sql",
+            "internal/adapters/postgres/migrations/0003_tenants.down.sql"
+          ],
+          "implementation_notes": "ADR-013/DDD-24 shape. tenants: tenant_id PK, name UNIQUE NOT NULL, credential_hash UNIQUE NOT NULL, GRANT SELECT,INSERT only (no UPDATE/DELETE). accounts: tenant_id DEFAULT 'tnt_legacy_seed' REFERENCES tenants; PK -> (tenant_id, id). entries: tenant_id REFERENCES tenants; FK(tenant_id,account_id)/(tenant_id,counterparty_id) -> accounts(tenant_id,id). transactions: plain tenant_id column, no PK change (UUIDs stay unique). One transaction, backfill before composite PK applied. Enables the legacy-backfilled environment's migration-safety proof."
+        },
+        {
+          "id": "01-02",
+          "name": "Tenant domain aggregate and sealed refusal taxonomy extension",
+          "criteria": [
+            "Tenant aggregate holds {tenant_id, name, credential}; root-only value-typed fields, no constructor omits tenant_id",
+            "I10: tenant-name uniqueness enforced at construction, mirrors I9's account-uniqueness precedent",
+            "New sealed ViolationKind members tenant_already_exists and tenant_not_found added to the exhaustive switch",
+            "Cross-tenant account access reuses existing account_not_found member; I8 gets no new taxonomy member"
+          ],
+          "test_file": "",
+          "scenario_name": "",
+          "files_to_modify": [
+            "internal/domain/tenant.go",
+            "internal/domain/violation.go"
+          ],
+          "implementation_notes": "Pure domain layer, no I/O. Contract shape: bounded-change — ProvisionTenant's declared delta is exactly one new Tenant row, complement-equality against Tenant/Account/Transaction collections (brief.md § Multitenancy Contract-shape table). Unit tests: property-based via rapid (pgregory.net/rapid), paired with state-delta/complement-equality assertions per this contract shape. Table-driven single-example tests are fallback only. Acceptance scenarios (godog) are pre-authored by DISTILL — this step's job is GREEN, not authoring new ones."
+        },
+        {
+          "id": "01-03",
+          "name": "TenantRepository and ProvisionTenant use case",
+          "criteria": [
+            "TenantRepository port: Create and lookup-by-name, driven from a UnitOfWork, mirrors AccountRepository's read-decide-write shape",
+            "ProvisionTenant mints tenant_id/tenant_key via existing IDGenerator (tnt_/tk_ prefixes), stores sha256(tenant_key) hash only",
+            "Duplicate tenant name refused via domain's tenant_already_exists before any row is written",
+            "TenantKeyResolver port declared: pure-function, single lookup method, no write/touch method ever added"
+          ],
+          "test_file": "",
+          "scenario_name": "",
+          "files_to_modify": [
+            "internal/app/ports/ports.go",
+            "internal/adapters/postgres/tenants.go",
+            "internal/app/usecases.go"
+          ],
+          "implementation_notes": "Reuse IDGenerator + crypto/sha256 (zero new dependency, DDD-26). TenantRepository mixes read/write inside one UnitOfWork — same accepted pattern as AccountRepository (atomic check-then-create), not a driving-port read/write mix. TenantKeyResolver: pure-function contract shape, exactly one method returning (tenantID string, ok bool, err error) — reviewer checks no second method is added. PBT via rapid for ProvisionTenant's bounded-change contract; Testcontainers-backed single-example test verifies TenantRepository wiring only."
+        },
+        {
+          "id": "01-04",
+          "name": "POST /tenants route: real provisioning, admin-gated",
+          "criteria": [
+            "POST /tenants (requireOperatorKey, unmodified) replaces the scaffold with a real ProvisionTenant call",
+            "Response names tenant_id, name, tenant_key; tenant_key distinct from the platform-admin credential",
+            "Duplicate name refused 409 tenant_already_exists; wrong/missing/tenant-scoped credential refused 401 unidentified_caller",
+            "tenant_already_exists/tenant_not_found wired on both exhaustive-linted switch surfaces (domain and HTTP wire mapping)"
+          ],
+          "test_file": "tests/acceptance/multitenancy/milestone-01-provision-a-tenant.feature",
+          "scenario_name": "Provisioning a tenant issues a scoped credential",
+          "files_to_modify": [
+            "internal/adapters/http/router.go",
+            "internal/adapters/http/handlers.go"
+          ],
+          "implementation_notes": "Un-skips (remove @pending) all 5 milestone-01 scenarios: Provisioning issues a scoped credential; Two tenants provisioned independently; Duplicate name refused; Tenant's own credential cannot provision; Unissued credential cannot provision. requireOperatorKey unchanged (DDD-22 EXTEND) — wrong/tenant credentials already refused by its existing string-compare, no new logic needed there. Adapter/integration test against real PostgreSQL (Testcontainers) stays single-example. demo-01..05 regression guard: this step touches no Makefile/AUTH surface, so unaffected."
+        }
+      ]
+    },
+    {
+      "id": "02",
+      "name": "Slice 02 — Operate within a tenant, invisible to every other tenant",
+      "steps": [
+        {
+          "id": "02-01",
+          "name": "I8 construction-time cross-tenant check in Post",
+          "criteria": [
+            "Post gains a pre-construction cross-tenant check: from/to accounts naming different tenant_id refused before balance math runs",
+            "Cross-tenant refusal reuses the existing account_not_found member (I8 confirmed, no new taxonomy member)",
+            "Existing invariants I1, I4 unchanged in shape; one new refusal branch inside the same pure decision"
+          ],
+          "test_file": "",
+          "scenario_name": "",
+          "files_to_modify": [
+            "internal/domain/post.go"
+          ],
+          "implementation_notes": "Contract shape: pure-function (return-only), unchanged shape — the cross-check is a new refusal branch inside the same pure decision, not a new effect (brief.md § Multitenancy Contract-shape table). PBT via rapid, existing harness extended with a tenant-mismatch generator; do not rewrite Post's existing shape. End-to-end proof of this branch lands with step 02-04's route wiring, not here."
+        },
+        {
+          "id": "02-02",
+          "name": "Tenant-scoped AccountRepository and TransactionRepository",
+          "criteria": [
+            "AccountRepository.{LockForUpdate,Create,ApplyDeltas,Get,All} take a required tenant_id string param, never TenantScope",
+            "Account-name uniqueness (I9/DDD-18) rescoped from global to (tenant_id, account_id)",
+            "TransactionRepository.Append/.Get gain required tenant_id; queries scoped by tenant_id at the WHERE clause",
+            "EntriesFor/TrialBalance/ComputedBalances gain TenantScope (closed ScopedToTenant/Unscoped constructors), never a nullable string"
+          ],
+          "test_file": "",
+          "scenario_name": "",
+          "files_to_modify": [
+            "internal/app/ports/ports.go",
+            "internal/adapters/postgres/accounts.go",
+            "internal/adapters/postgres/transactions.go"
+          ],
+          "implementation_notes": "TenantScope lives in internal/app/ports: type TenantScope struct{unexported}; ScopedToTenant(tenantID)/Unscoped() constructors; Resolve() (tenantID string, scoped bool). Only read ports with a legitimate unscoped state get TenantScope — write paths and single-tenant reads keep plain required tenant_id (construction-time enforcement, I8). Contract shape: bounded-change (existing pattern, extended) — complement-equality universe narrowed to one tenant's rows. PBT via rapid + single-example Testcontainers adapter tests."
+        },
+        {
+          "id": "02-03",
+          "name": "requireTenantKey and requireTenantKeyOrOperatorKey middlewares",
+          "criteria": [
+            "bearerToken/isOperatorKey primitive extracted from requireOperatorKey, shared by all three middlewares",
+            "requireTenantKey resolves the bearer token via TenantKeyResolver; injects a typed tenant_id context key or refuses 401",
+            "requireTenantKeyOrOperatorKey tries the OperatorKey compare first (byte-identical to today), falls back to tenant lookup",
+            "POST /accounts, POST /transfers, GET /accounts/{id} mounted under a requireTenantKey-only chi group (DDD-23 Option C)"
+          ],
+          "test_file": "",
+          "scenario_name": "",
+          "files_to_modify": [
+            "internal/adapters/http/router.go"
+          ],
+          "implementation_notes": "DDD-22: EXTEND requireOperatorKey (factor out the shared header primitive), CREATE NEW the two tenant middlewares (keyed DB lookup differs in mechanism from static-secret compare). Contract shape: bounded-change — context annotation only; assert the middleware calls no driven port with a Create/Apply/Append verb, only TenantKeyResolver (a read). Typed context key, not a bare string, so a handler cannot read the wrong context value."
+        },
+        {
+          "id": "02-04",
+          "name": "Wire tenant-scoped routes and dual-mode entries",
+          "criteria": [
+            "POST /accounts, POST /transfers, GET /accounts/{id} pass the caller's tenant_id from context into Ledger calls",
+            "GET /accounts/{id}/entries dual-mode: tenant_key sees own entries; unscoped OperatorKey call byte-identical to today",
+            "Cross-tenant read/write refused as account_not_found (404); malformed/missing credential refused 401 before tenant logic runs",
+            "Existing single-tenant invariants I1, I3, I4, I7 hold unchanged from the caller's point of view"
+          ],
+          "test_file": "tests/acceptance/multitenancy/walking-skeleton.feature",
+          "scenario_name": "A newly onboarded tenant operates invisibly to an existing tenant",
+          "files_to_modify": [
+            "internal/adapters/http/router.go",
+            "internal/adapters/http/handlers.go"
+          ],
+          "implementation_notes": "Un-skips the walking skeleton plus all 7 milestone-02 scenarios (tests/acceptance/multitenancy/milestone-02-operate-within-a-tenant.feature): same-name reuse across tenants, account invisible to another tenant, cross-tenant transfer refused, single-tenant invariants unchanged, malformed credential refused, entries scoped, unscoped entries byte-identical. requireTenantKeyOrOperatorKey (02-03) gates entries; requireTenantKey gates accounts/transfers. Acceptance scenarios pre-authored by DISTILL — GREEN only, no new authoring. Adapter tests against real PostgreSQL stay single-example."
+        },
+        {
+          "id": "02-05",
+          "name": "Demo tenant credential, Makefile AUTH split, and ledgercore suite fix (OPS-13, scope expanded 2026-09-04)",
+          "criteria": [
+            "LEDGEROPS_DEMO_TENANT_KEY env var seeded to tnt_legacy_seed's credential (mirrors LEDGEROPS_OPERATOR_KEY pattern)",
+            "Makefile AUTH repointed to the seeded tenant key; new OPERATOR_AUTH variable added for admin-only calls",
+            "demo-01..03 and chaos-01 recipe bodies stay byte-for-byte unchanged; only AUTH's value changes",
+            "scripts/race/main.go gains RACE_TENANT_KEY (defaults to LEDGEROPS_DEMO_TENANT_KEY's value) for account/transfer calls",
+            "tests/acceptance/ledgercore's own test world (ledger_world.go) seeds/uses a tenant credential bound to tnt_legacy_seed for POST /accounts, POST /transfers, GET /accounts/{id} step definitions, replacing the hardcoded OperatorKey use on those three routes only — OperatorKey stays correct for every other ledgercore step (unscoped reads, provisioning-adjacent admin calls)",
+            "go test ./tests/acceptance/ledgercore/... returns to its pre-multitenancy pass rate (93/93, or the project's existing baseline) — CI's blocking integration job is restored"
+          ],
+          "test_file": "",
+          "scenario_name": "",
+          "files_to_modify": [
+            "cmd/api/main.go",
+            "docker-compose.yml",
+            "Makefile",
+            "scripts/race/main.go",
+            "tests/acceptance/ledgercore/ledger_world.go"
+          ],
+          "implementation_notes": "OPS-10/OPS-11/OPS-13 DEVOPS-inherited (DESIGN recorded OPS-10; DELIVER discovered and self-recorded OPS-11 and OPS-13; DELIVER implements all three). tnt_legacy_seed's credential_hash must correspond to a known plaintext seeded at migration/startup — composition root wire-then-probe (Earned Trust, Core Principle 13) should refuse startup with health.startup.refused if the seed lookup fails. race-02/race-03 currently call now-tenant_key-only routes via RACE_OPERATOR_KEY — this fixes them before slice-02 lands (review-gate action item 1). OPS-13 (added 2026-09-04, feature-delta.md § Wave: DELIVER / Upstream Issues): tests/acceptance/ledgercore/ledger_world.go hardcodes OperatorKey for every request (ledger_world.go:144,480), which now fails 80/93 scenarios in CI's blocking integration job since DDD-23 made POST /accounts/POST /transfers/GET /accounts/{id} tenant-key-only. Fix mirrors OPS-11 exactly: seed a tenant credential for this suite's own world, repoint only the three affected step definitions' Authorization header, leave every other step's OperatorKey usage untouched. Single-example integration verification (Makefile/script/world.go wiring, not an invariant)."
+        }
+      ]
+    },
+    {
+      "id": "03",
+      "name": "Slice 03 — Verify one tenant's books without seeing another's",
+      "steps": [
+        {
+          "id": "03-01",
+          "name": "Tenant-scoped GET /health/trial-balance",
+          "criteria": [
+            "VerifyBooks accepts TenantScope; tenant-scoped call filters entries/accounts to that tenant, unscoped aggregates platform-wide",
+            "GET /health/trial-balance?tenant_id= scopes the query using OperatorKey (existing DDD-22 mapping); unscoped call keeps succeeding",
+            "Unprovisioned tenant_id refused 404 tenant_not_found before any scan runs",
+            "Tenant-scoped verdict names only that tenant's drift (account, delta); never mentions another tenant"
+          ],
+          "test_file": "",
+          "scenario_name": "",
+          "files_to_modify": [
+            "internal/app/usecases.go",
+            "internal/adapters/http/handlers.go"
+          ],
+          "implementation_notes": "TransactionRepository.TrialBalance/ComputedBalances already gained TenantScope in step 02-02; this step wires the ?tenant_id= query param through VerifyBooks. Contract shape: pure-function (return-only) — read-only, universe = scope's declared entry set (brief.md § Multitenancy Contract-shape table). Regression assertion: unscoped call's result byte-identical to the pre-feature contract (DoD item 3a). PBT via rapid for the scoped-filter logic; single-example adapter test for the query wiring."
+        },
+        {
+          "id": "03-02",
+          "name": "Console verdict dual-mode compat",
+          "criteria": [
+            "GET /console/verdict (shared verdictHandler) keeps answering unscoped OperatorKey calls byte-identical to today's shape/status",
+            "Tenant's clean books report YES independent of another tenant's drift; drift named without exposing other tenants",
+            "Checking an unprovisioned tenant is refused, not silently answered YES",
+            "No account belonging to another tenant appears in any tenant-scoped or unscoped response"
+          ],
+          "test_file": "tests/acceptance/multitenancy/milestone-03-verify-one-tenants-books.feature",
+          "scenario_name": "A tenant's clean books report YES independent of another tenant's state",
+          "files_to_modify": [
+            "internal/adapters/http/handlers.go",
+            "internal/adapters/http/router.go"
+          ],
+          "implementation_notes": "Un-skips milestone-03's 5 scenarios: clean books YES, drift named without leaking, unprovisioned tenant refused, unscoped trial-balance byte-identical, unscoped console verdict byte-identical. verdictHandler is shared between both routes by construction (cannot disagree) — this step's dual-mode fix on one fixes both, per the console-compatibility hard constraint. @console-compat scenarios assert shape/status match; byte-for-byte golden-diff tightening is a DELIVER action item (review-gate finding 2), not required here."
+        },
+        {
+          "id": "03-03",
+          "name": "demo-04 target and new CI gate jobs",
+          "criteria": [
+            "demo-04 provisions a tenant and posts its first transfer on a clean clone, emits tenant_onboard_transfer_seconds",
+            "tenant-isolation-gates CI job asserts 100% cross-tenant refusal and per-tenant trial-balance leak-free across the suite",
+            "console-compat CI job asserts byte-identical unscoped-OperatorKey responses for entries/trial-balance/verdict",
+            "Ten required jobs gate main; existing eight unchanged, two new (tenant-isolation-gates, console-compat) blocking"
+          ],
+          "test_file": "",
+          "scenario_name": "",
+          "files_to_modify": [
+            "Makefile",
+            ".github/workflows/ci.yml"
+          ],
+          "implementation_notes": "OPS-12: DEVOPS recorded the decision, DELIVER builds the CI YAML — this project's established precedent (DEVOPS records, DELIVER implements CI). Folded into one atomic step because both jobs consume the same two-tenant Testcontainers environment already exercised by 02-04/03-02's scenarios — no new fake/mock, real HTTP + real PostgreSQL. tenant-isolation-gates provisions the two-tenant environment then runs the adversarial cross-tenant scenarios; console-compat runs the 3 @console-compat scenarios. Both gate branch protection alongside existing invariant-gates."
+        }
+      ]
+    }
+  ],
+  "implementation_scope": {
+    "source_directories": [
+      "internal/domain/",
+      "internal/app/",
+      "internal/app/ports/",
+      "internal/adapters/postgres/",
+      "internal/adapters/http/",
+      "cmd/api/",
+      "scripts/race/"
+    ],
+    "test_directories": [
+      "tests/acceptance/multitenancy/",
+      "internal/domain/",
+      "internal/app/"
+    ],
+    "excluded_patterns": [
+      "*.pb.go",
+      "vendor/**"
+    ]
+  },
+  "validation": {
+    "status": "approved",
+    "reviewer": "nw-acceptance-designer-reviewer",
+    "approved_at": "2026-09-03T19:04:00Z"
+  },
+  "reviews": [
+    {
+      "reviewer": "nw-acceptance-designer-reviewer",
+      "date": "2026-09-03",
+      "verdict": "APPROVED",
+      "blocking_issues": [],
+      "flags": [
+        "step 02-04 covers 8 scenarios (walking skeleton + all 7 milestone-02 scenarios) — @sizing-review-needed, non-blocking, justified by DISCUSS D2 walking-skeleton-scope decision (slices 01-02 together)"
+      ],
+      "notes": "All 18 DISTILL scenarios traced to a step, zero orphans. DDD-22..26 fidelity confirmed. All 3 DISTILL-carried action items (RACE_TENANT_KEY, LEDGEROPS_DEMO_TENANT_KEY/Makefile split, console-compat byte-diff note) present in steps 02-04/02-05/03-02. Walking-skeleton Phase-2 placement confirmed sound, not a defect."
+    }
+  ]
+}

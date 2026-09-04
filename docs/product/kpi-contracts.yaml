@@ -226,6 +226,11 @@ kpis:
       The attempts > 0 denominator guards against a harness that quietly
       ran zero adversarial attempts and passed vacuously — same pattern as
       ledger-core's KPI-2/KPI-3 iteration-count assertions.
+    measured:
+      date: "2026-09-05"
+      result: "18/18 multitenancy acceptance scenarios passing (102/102 steps), including every adversarial cross-tenant read/write scenario"
+      evidence: "docs/feature/multitenancy/feature-delta.md § Wave: DELIVER / Demo Evidence"
+      status: PASS
 
   - id: KPI-M2
     name: Tenant onboarding to first transfer
@@ -246,6 +251,11 @@ kpis:
       threshold is adopted directly from KPI-5 rather than independently
       invented, since DISCUSS did not state a separate number for this KPI.
       Same CI-runner-as-warm-image-proxy caveat as KPI-5 applies.
+    measured:
+      date: "2026-09-05"
+      result: "tenant_onboard_transfer_seconds=0, well under the 300s threshold"
+      evidence: "docs/feature/multitenancy/feature-delta.md § Wave: DELIVER / Demo Evidence (make demo-04)"
+      status: PASS
 
   - id: KPI-M3
     name: Per-tenant trial-balance correctness
@@ -267,6 +277,11 @@ kpis:
       partially uses — I8/I9/I10 are correctness properties proven via the
       normal acceptance suite, not contention properties, per this feature's
       own DEVOPS scope decision.
+    measured:
+      date: "2026-09-05"
+      result: "18/18 multitenancy acceptance scenarios passing, including US-3's isolated per-tenant verdict scenarios; scoped GET /health/trial-balance?tenant_id=tnt_1 verified to name only that tenant"
+      evidence: "docs/feature/multitenancy/feature-delta.md § Wave: DELIVER / Demo Evidence"
+      status: PASS
 
   - id: KPI-M4
     name: Console-compatibility guardrail
@@ -290,6 +305,11 @@ kpis:
       (feature-delta.md § Wave: DISCUSS / Changed Assumptions). KPI-C1/C2/C3
       remain that feature's own separate self-reported responsibility, not
       duplicated here.
+    measured:
+      date: "2026-09-05"
+      result: "the 3 @console-compat scenarios (within the 18) passing, plus the pre-existing tests/acceptance/ledgercore suite restored to a full pass (296.8s) after OPS-13's fix - the regression proof that unscoped OperatorKey calls to all three named endpoints kept working throughout"
+      evidence: "docs/feature/multitenancy/feature-delta.md § Wave: DELIVER / Demo Evidence"
+      status: PASS
 
 runtime_instrumentation:
   # Secondary tier. No hosted environment exists, so these exist to be correct

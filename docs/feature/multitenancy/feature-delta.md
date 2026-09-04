@@ -1452,3 +1452,157 @@ this wave's handoff):
 
 **Gate result: PASS.** Handoff to `nw-software-crafter` (DELIVER) is
 unblocked.
+
+---
+
+## Wave: DELIVER / [WHY] Upstream Issues
+
+**Deviation found during step 02-01 (2026-09-03), tracked not blocking.**
+`brief.md` § Domain Model / Multitenancy states I8's enforcement mechanism
+concretely: *"tenant_id becomes a required field on the Account value
+type... there is no smart-constructor path that produces an Account
+without one."* Step 02-01 (I8 construction-time cross-tenant check in
+`Post`) implemented the `Post`-side cross-check but, to stay within its
+declared `files_to_modify` (`internal/domain/post.go` only), gave
+`Account` an **optional** `tenantID` (default `""`) plus a `WithTenant()`
+wither, rather than making `tenant_id` a required `NewAccount` constructor
+parameter — the latter would ripple into every existing `NewAccount` call
+site across `internal/adapters/postgres`, `internal/adapters/http`,
+`internal/app`, and their tests, none of which were in step 02-01's scope.
+
+**Risk while open**: two accounts that both skip `WithTenant()` both read
+`tenantID == ""`, which `Post`'s new cross-check would treat as
+same-tenant (vacuously) rather than refuse — construction-time enforcement
+is not yet true at the domain layer, only convention-level via whichever
+callers remember to call `WithTenant()`.
+
+**Resolution, user-confirmed 2026-09-03**: accept the interim state; step
+02-02 ("Tenant-scoped AccountRepository and TransactionRepository") is
+expanded in scope to close the gap — make `Account.tenantID` a required
+`NewAccount` parameter (or equivalent construction-time guarantee) and fix
+every call site, restoring the DESIGN-mandated "no smart-constructor path
+omits it" property before slice 02 ships. Not resolved as a Path A DISTILL
+scenario rewrite — this is a DELIVER-internal implementation deviation
+with no acceptance-scenario-visible symptom, caught before it reached a
+committed shape that any scenario depends on.
+
+---
+
+**Gap found during step 02-04 (2026-09-04), OPS-13 — same class of gap as
+OPS-11, tracked not blocking.** DDD-23 Option C's own record (§ Wave:
+DESIGN / Application Architecture, and `brief.md` § Multitenancy
+"Backward compatibility" subsection) verified `Makefile` and `router.go`
+directly and named exactly two consumers of the now-tenant-key-only routes
+(`POST /accounts`/`POST /transfers`/`GET /accounts/{id}`) needing a demo
+credential: `Makefile`'s `demo-01..03`/`chaos-01` targets (OPS-10) and
+`scripts/race/main.go`'s `race-02`/`race-03` (OPS-11, itself already a
+DELIVER-discovered gap DESIGN's own DDD-23 record missed). Step 02-04's
+regression run found a **third** consumer neither DESIGN nor DEVOPS named:
+`tests/acceptance/ledgercore/ledger_world.go` — this project's own
+pre-existing, CI-blocking acceptance suite (`.github/workflows/ci.yml`'s
+`integration` job, line ~204: `go test ./tests/acceptance/ledgercore/...`)
+authenticates every request with `OperatorKey` only (`ledger_world.go:144,
+480`). Since DDD-23 confirmed `OperatorKey` is never accepted on those
+three routes, this suite now fails 80 of 93 scenarios — a real,
+CI-blocking regression, not a false one (confirmed via `git stash` A/B:
+zero of these failures existed before step 02-03's routing change landed).
+
+**Risk while open**: this project's primary correctness regression gate
+(the `integration` CI job) would fail on every push once this branch
+reaches CI, blocking merges entirely — a materially worse consequence than
+OPS-10/OPS-11's demo/chaos/race target breakage, since those are
+non-blocking convenience targets and this is a required job.
+
+**Resolution, user-confirmed 2026-09-04**: fix now, folded into step
+02-05's scope (already seeding a fixed demo tenant credential for the
+identical underlying reason — DDD-23 Option C's "seed a second, fixed
+demo/dev credential bound to `tnt_legacy_seed`" pattern, applied to a
+third consumer). `tests/acceptance/ledgercore`'s own test world seeds/uses
+the same `LEDGEROPS_DEMO_TENANT_KEY`-shaped credential (or an equivalent
+test-local tenant credential bound to the same sentinel tenant) for the
+account/transfer/balance step definitions that currently hardcode
+`OperatorKey`, mirroring OPS-11's `RACE_TENANT_KEY` fix exactly. Recorded
+here as **OPS-13** (this wave's own finding, DELIVER-discovered — same
+provenance class as OPS-11).
+
+---
+
+## Wave: DELIVER / [REF] Demo Evidence
+
+Post-merge integration gate (2026-09-04/05), run against a clean
+`docker compose` stack (`make down && make up`, fresh volume) — the same
+environment CI's `demo` job exercises. All three non-`@infrastructure`
+user stories' Elevator Pitch demo commands executed exactly as written in
+§ Wave: DISCUSS / User stories with elevator pitches, verbatim
+request/response captured below.
+
+**US-1 — Provision a tenant**
+```
+$ curl -s -w '\nHTTP %{http_code}\n' -X POST $APP_URL/tenants \
+    -H 'Authorization: Bearer demo-operator-key' \
+    -H 'Content-Type: application/json' \
+    -d '{"name":"Acme Wallet"}'
+{"name":"Acme Wallet","tenant_id":"tnt_txn_1a2db5c6-6e14-4a11-8fd6-90e9d67f244a","tenant_key":"tk_txn_d4534515-42b3-44b1-9588-5d18c216d3c2"}
+HTTP 201
+```
+Matches the elevator pitch exactly: response names a distinct `tenant_id`
+and `tenant_key`, the latter clearly not the platform-admin credential.
+
+**US-2 — Operate within a tenant, invisible to every other tenant**
+```
+$ curl -s -X POST $APP_URL/tenants -H 'Authorization: Bearer demo-operator-key' \
+    -H 'Content-Type: application/json' -d '{"name":"Beacon Marketplace"}'
+{"name":"Beacon Marketplace","tenant_id":"tnt_txn_5874fe20-a2a1-4163-83f0-8114e2c2a326","tenant_key":"tk_txn_faccb24d-2266-4be8-9125-bc140cd7a21d"}
+
+$ curl -s -w '\nHTTP %{http_code}\n' -X POST $APP_URL/accounts \
+    -H "Authorization: Bearer tk_txn_d4534515-...5d18c216d3c2" \
+    -H 'Content-Type: application/json' -d '{"account_id":"wallet-1","type":"wallet"}'
+{"account_id":"wallet-1","type":"wallet"}
+HTTP 201
+
+$ curl -s -w '\nHTTP %{http_code}\n' -X POST $APP_URL/accounts \
+    -H "Authorization: Bearer tk_txn_faccb24d-...bc140cd7a21d" \
+    -H 'Content-Type: application/json' -d '{"account_id":"wallet-1","type":"wallet"}'
+{"account_id":"wallet-1","type":"wallet"}
+HTTP 201
+```
+Matches the elevator pitch exactly: both calls succeed `201`, same
+`account_id`, different tenants — the single-tenant model's `409
+account_already_exists` collision is structurally impossible here, not
+merely avoided.
+
+**US-3 — Verify one tenant's books without seeing another's**
+```
+$ curl -s -w '\nHTTP %{http_code}\n' \
+    "$APP_URL/health/trial-balance?tenant_id=tnt_txn_1a2db5c6-...90e9d67f244a" \
+    -H 'Authorization: Bearer demo-operator-key'
+{"verdict":"Books balance: YES","imbalance_minor":0,"entry_count":0,"elapsed_ms":5,"drifted":[],"verdict_position":1,"first_figure_position":32}
+HTTP 200
+```
+Scoped verdict answers `200` with a stated verdict for exactly the named
+tenant, mentioning no other tenant.
+
+**Onboarding-flow evidence (`make demo-04`, KPI: tenant onboarding to
+first transfer)**
+```
+$ make down && make demo-04
+== demo-04: provision a tenant, then post its first transfer ==
+{"name":"demo-04-tenant","tenant_id":"tnt_txn_e5439cf4-393c-4472-bc0f-ee8a11043740","tenant_key":"tk_txn_8fafdc9b-dc64-44ac-b638-9664318da4ec"}
+-- provisioned fresh tenant, tenant_key=tk_txn_8fafdc9b-dc64-44ac-b638-9664318da4ec --
+-- posting the fresh tenant's first transfer, expect 201 --
+{"legs":[{"account":"treasury-04","amount":"-10.00"},{"account":"alice-04","amount":"10.00"}],"transaction_id":"txn_6293a550-e397-47d5-8294-f1313af6b745"}
+HTTP_CODE:201
+tenant_onboard_transfer_seconds=0
+```
+Well under the 300s KPI threshold (mirrors KPI-5's `demo_first_green_seconds`
+pattern, § Wave: DISCUSS / Outcome KPIs).
+
+**Regression evidence (full suite, post-merge, `-count=1`)**:
+`go test ./tests/acceptance/multitenancy/... -v -count=1` → 18/18
+scenarios, 102/102 steps passed. `go test ./tests/acceptance/ledgercore/...
+-count=1` → full pass (296.8s) — the CI-blocking `integration` job's
+suite, confirmed restored and holding after all 12 roadmap steps.
+
+**Gate result: PASS.** All three non-infrastructure user stories
+demonstrated end-to-end against a clean environment; onboarding KPI
+measured; full regression suite green.
