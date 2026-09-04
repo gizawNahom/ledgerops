@@ -180,6 +180,14 @@ type TenantRepository interface {
 	// the returned Tenant's Credential() is never meaningful (the plaintext
 	// tenant_key cannot be recovered from its stored hash).
 	ByName(ctx context.Context, name string) (domain.Tenant, error)
+	// ByID reads a tenant by its tenant_id, without locking. An absent id
+	// answers domain.NewTenantNotFound, the expected shape of "no" —
+	// mirroring ByName's own contract, one lookup key over. Its caller is
+	// VerifyBooks' tenant-scoped existence check (step 03-01): the
+	// trial-balance/computed-balance reads alone cannot tell "unprovisioned
+	// tenant_id" apart from "provisioned tenant with no entries yet", so the
+	// refusal has to be decided here, by naming, before either read runs.
+	ByID(ctx context.Context, tenantID string) (domain.Tenant, error)
 	// Create persists a newly provisioned tenant. tenant.Credential() carries
 	// the plaintext tenant_key exactly as domain.ProvisionTenant produced it
 	// — the adapter hashes it (sha256, hex-encoded) before it ever reaches a

@@ -53,6 +53,33 @@ func (r tenantRepository) ByName(ctx context.Context, name string) (domain.Tenan
 	return tenant, nil
 }
 
+// ByID reads a tenant by its tenant_id, without locking — the existence
+// check VerifyBooks (step 03-01) performs before running any trial-balance
+// scan for a tenant-scoped call. Mirrors ByName's shape exactly (same table,
+// same absent-row-is-not-an-infrastructure-error contract), keyed by the
+// primary key instead of the unique name.
+func (r tenantRepository) ByID(ctx context.Context, tenantID string) (domain.Tenant, error) {
+	row := r.tx.QueryRow(ctx,
+		`SELECT tenant_id, name FROM tenants WHERE tenant_id = $1`, tenantID)
+
+	var gotID, gotName string
+	err := row.Scan(&gotID, &gotName)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.Tenant{}, domain.NewTenantNotFound(tenantID)
+	}
+	if err != nil {
+		return domain.Tenant{}, fmt.Errorf("reading tenant %q: %w", tenantID, err)
+	}
+
+	// credential_hash is deliberately never scanned back here either — see
+	// ByName's identical note above.
+	tenant, err := domain.NewTenant(gotID, gotName, "")
+	if err != nil {
+		return domain.Tenant{}, fmt.Errorf("stored row for %q violates domain invariants: %w", tenantID, err)
+	}
+	return tenant, nil
+}
+
 // Create persists a newly provisioned tenant. tenant.Credential() carries
 // the plaintext tenant_key exactly as domain.ProvisionTenant produced it;
 // this is the one place that plaintext's lifetime ends — only its SHA-256

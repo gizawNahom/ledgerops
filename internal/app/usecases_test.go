@@ -383,7 +383,7 @@ func TestProperty_VerifyBooks_AgreeingBalancesAreReportedHealthy(t *testing.T) {
 		store.entries = entries
 		ledger := app.NewLedger(store, fixedClock, sequentialIDs())
 
-		report, err := ledger.VerifyBooks(context.Background())
+		report, err := ledger.VerifyBooks(context.Background(), ports.Unscoped())
 		if err != nil {
 			t.Fatalf("unexpected error verifying the books: %v", err)
 		}
@@ -397,6 +397,86 @@ func TestProperty_VerifyBooks_AgreeingBalancesAreReportedHealthy(t *testing.T) {
 			t.Fatalf("EntryCount = %d, want %d", report.EntryCount, len(entries))
 		}
 	})
+}
+
+// TestProperty_VerifyBooks_TenantScopedCallThreadsTheSameScopeToEveryRead
+// covers step 03-01's wiring contract: for any provisioned tenant id, a
+// ScopedToTenant(id) call must narrow EVERY read VerifyBooks performs —
+// Accounts().All and TrialBalance/ComputedBalances alike — to that same
+// tenant, never widening any of them back to legacyTenantID or Unscoped().
+// This is what stops the use case accidentally re-broadening a scoped query
+// even though the repository layer (step 02-02) already enforces isolation
+// underneath it — see usecases.go's VerifyBooks doc comment.
+func TestProperty_VerifyBooks_TenantScopedCallThreadsTheSameScopeToEveryRead(t *testing.T) {
+	rapid.Check(t, func(rt *rapid.T) {
+		tenantID := "tnt_" + rapid.StringMatching(`[a-z][a-z0-9]{2,10}`).Draw(rt, "tenantID")
+
+		store := newFakeStore()
+		tenant, err := domain.NewTenant(tenantID, "tenant-"+tenantID, "tk_unused")
+		if err != nil {
+			t.Fatalf("NewTenant rejected a well-formed id: %v", err)
+		}
+		store.tenants[tenant.Name()] = tenant
+		ledger := app.NewLedger(store, fixedClock, sequentialIDs())
+
+		_, err = ledger.VerifyBooks(context.Background(), ports.ScopedToTenant(tenantID))
+		if err != nil {
+			rt.Fatalf("unexpected refusal verifying a provisioned tenant's books: %v", err)
+		}
+
+		if store.lastAccountsAllTenantID != tenantID {
+			rt.Fatalf("Accounts().All tenantID = %q, want %q", store.lastAccountsAllTenantID, tenantID)
+		}
+		gotTenantID, scoped := store.lastScope.Resolve()
+		if !scoped || gotTenantID != tenantID {
+			rt.Fatalf("TrialBalance/ComputedBalances scope = (%q, %v), want (%q, true)", gotTenantID, scoped, tenantID)
+		}
+	})
+}
+
+// TestVerifyBooks_UnscopedCallStaysPlatformWide is the regression assertion
+// step 03-01's implementation_notes requires (DoD item 3a): an Unscoped()
+// call still reads legacyTenantID's own accounts and an unscoped
+// TrialBalance/ComputedBalances scope, exactly as it did before this step —
+// adding the tenant-scoped branch must not perturb the pre-existing path.
+func TestVerifyBooks_UnscopedCallStaysPlatformWide(t *testing.T) {
+	store := newFakeStore()
+	ledger := app.NewLedger(store, fixedClock, sequentialIDs())
+
+	if _, err := ledger.VerifyBooks(context.Background(), ports.Unscoped()); err != nil {
+		t.Fatalf("unexpected error on an unscoped call: %v", err)
+	}
+
+	if store.lastAccountsAllTenantID != testTenantID {
+		t.Fatalf("Accounts().All tenantID = %q, want legacyTenantID %q", store.lastAccountsAllTenantID, testTenantID)
+	}
+	if _, scoped := store.lastScope.Resolve(); scoped {
+		t.Fatalf("TrialBalance/ComputedBalances scope was scoped, want Unscoped()")
+	}
+}
+
+// TestVerifyBooks_UnprovisionedTenantIsRefusedBeforeAnyScan covers the
+// tenant_not_found refusal DDD-25 requires: a tenant_id nobody ever
+// provisioned must be refused BEFORE TrialBalance or ComputedBalances ever
+// runs (design context, "check tenant existence first ... proceed to the
+// scan only if it exists"). scanAttempted asserts absence of computation,
+// not merely the error's shape.
+func TestVerifyBooks_UnprovisionedTenantIsRefusedBeforeAnyScan(t *testing.T) {
+	store := newFakeStore()
+	ledger := app.NewLedger(store, fixedClock, sequentialIDs())
+
+	_, err := ledger.VerifyBooks(context.Background(), ports.ScopedToTenant("tnt_never-provisioned"))
+
+	var violation domain.Violation
+	if !errors.As(err, &violation) || violation.Kind() != domain.TenantNotFound {
+		t.Fatalf("expected tenant_not_found, got %v", err)
+	}
+	if violation.Tenant() != "tnt_never-provisioned" {
+		t.Fatalf("Tenant() = %q, want %q", violation.Tenant(), "tnt_never-provisioned")
+	}
+	if store.scanAttempted {
+		t.Fatalf("scanAttempted = true, want false — the scan must never run for an unprovisioned tenant")
+	}
 }
 
 // captureProvisioningUniverse snapshots the three collections

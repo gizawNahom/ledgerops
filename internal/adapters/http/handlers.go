@@ -20,6 +20,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"ledgerops/internal/app"
+	"ledgerops/internal/app/ports"
 	"ledgerops/internal/domain"
 )
 
@@ -412,11 +413,24 @@ func writeRefusal(w http.ResponseWriter, r *http.Request, status int, kind strin
 // same answer") — sharing one function body is what guarantees the two
 // surfaces can never drift apart, rather than two call sites independently
 // reproducing the same verdict-before-figures rendering.
+//
+// As of step 03-01, a `?tenant_id=` query parameter narrows the scan to that
+// one tenant's own books (trialBalanceScopeFromQuery); its absence keeps the
+// call platform-wide, byte-identical to the pre-multitenancy contract. Both
+// routes read the same query parameter — GET /console/verdict never sends
+// one today, so this is dormant there, not a behavior change for the
+// console (step 03-02's job is making the console send it deliberately, if
+// it ever does). writeDomainError (not a hardcoded internal_error) is what
+// lets an unprovisioned tenant_id's domain.TenantNotFound reach the caller
+// as 404 tenant_not_found through the existing exhaustive switch
+// (status.go), instead of being swallowed as a 500.
 func verdictHandler(ledger *app.Ledger, metrics *Metrics) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		report, err := ledger.VerifyBooks(r.Context())
+		scope := trialBalanceScopeFromQuery(r)
+
+		report, err := ledger.VerifyBooks(r.Context(), scope)
 		if err != nil {
-			writeRefusal(w, r, http.StatusInternalServerError, "internal_error", nil)
+			writeDomainError(w, r, err)
 			return
 		}
 		body := verdictBodyFor(report)
@@ -430,6 +444,23 @@ func verdictHandler(ledger *app.Ledger, metrics *Metrics) http.HandlerFunc {
 
 		writeJSON(w, http.StatusOK, body)
 	}
+}
+
+// trialBalanceScopeFromQuery resolves GET /health/trial-balance's (and, by
+// shared handler, GET /console/verdict's) TenantScope from the request's own
+// `?tenant_id=` query parameter — present means ScopedToTenant(that id),
+// absent means Unscoped(), exactly what the pre-multitenancy handler already
+// computed for every call before this parameter existed (step 03-01).
+// Credential is unchanged either way: both routes stay gated by
+// requireOperatorKey (DDD-22) — this parameter is not a second auth
+// mechanism, only a query narrowing what an already-identified operator may
+// see.
+func trialBalanceScopeFromQuery(r *http.Request) ports.TenantScope {
+	tenantID := r.URL.Query().Get("tenant_id")
+	if tenantID == "" {
+		return ports.Unscoped()
+	}
+	return ports.ScopedToTenant(tenantID)
 }
 
 // driftWire is one drifted account as the operator reads it: named account,

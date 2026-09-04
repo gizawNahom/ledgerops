@@ -506,6 +506,18 @@ func (r pactFakeTenantRepository) ByName(ctx context.Context, name string) (doma
 	return tenant, nil
 }
 
+// ByID joined ByName as of step 03-01 — GET /health/trial-balance's
+// tenant-scoped existence check now requires it on every ports.TenantRepository,
+// this fake included, keeping pactFakeUnitOfWork satisfying the interface.
+func (r pactFakeTenantRepository) ByID(ctx context.Context, tenantID string) (domain.Tenant, error) {
+	for _, tenant := range r.store.tenants {
+		if tenant.TenantID() == tenantID {
+			return tenant, nil
+		}
+	}
+	return domain.Tenant{}, domain.NewTenantNotFound(tenantID)
+}
+
 func (r pactFakeTenantRepository) Create(ctx context.Context, tenant domain.Tenant) error {
 	if _, exists := r.store.tenants[tenant.Name()]; exists {
 		return fmt.Errorf("pactFakeTenantRepository: tenant name %q already exists", tenant.Name())

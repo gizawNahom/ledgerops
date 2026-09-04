@@ -32,6 +32,19 @@ type fakeStore struct {
 	claims    map[string]ports.Claim
 	tenants   map[string]domain.Tenant
 	committed bool
+
+	// scanAttempted and lastScope are spies for step 03-01's VerifyBooks
+	// wiring: scanAttempted proves the tenant_not_found refusal path never
+	// reaches TrialBalance/ComputedBalances, and lastScope proves whatever
+	// TenantScope VerifyBooks received is threaded through unchanged, never
+	// widened back to Unscoped().
+	scanAttempted bool
+	lastScope     ports.TenantScope
+
+	// lastAccountsAllTenantID is the tenantID Accounts().All was last called
+	// with — the other half of VerifyBooks' wiring proof: a tenant-scoped
+	// call must enumerate that tenant's own accounts, not legacyTenantID.
+	lastAccountsAllTenantID string
 }
 
 func newFakeStore(accounts ...domain.Account) *fakeStore {
@@ -143,6 +156,7 @@ func (r fakeAccountRepository) Get(ctx context.Context, tenantID string, account
 // docs/feature/multitenancy/feature-delta.md): a fake enforcing scoping here
 // would model the very behaviour that suite exists to check.
 func (r fakeAccountRepository) All(ctx context.Context, tenantID string) ([]domain.Account, error) {
+	r.store.lastAccountsAllTenantID = tenantID
 	ids := make([]string, 0, len(r.store.accounts))
 	for id := range r.store.accounts {
 		ids = append(ids, id)
@@ -200,6 +214,8 @@ func (r fakeTransactionRepository) EntriesFor(ctx context.Context, scope ports.T
 // hide the very defect (a stored balance that disagrees with its entries)
 // VerifyBooks exists to catch.
 func (r fakeTransactionRepository) TrialBalance(ctx context.Context, scope ports.TenantScope) (domain.Money, int, error) {
+	r.store.scanAttempted = true
+	r.store.lastScope = scope
 	currency := "USD"
 	var sumMinor int64
 	for _, entry := range r.store.entries {
@@ -216,6 +232,8 @@ func (r fakeTransactionRepository) TrialBalance(ctx context.Context, scope ports
 // ComputedBalances derives every account's balance from its entries, grouped
 // by account — the other half of VerifyBooks' I3 comparison.
 func (r fakeTransactionRepository) ComputedBalances(ctx context.Context, scope ports.TenantScope) (map[string]domain.Money, error) {
+	r.store.scanAttempted = true
+	r.store.lastScope = scope
 	sums := map[string]int64{}
 	currencies := map[string]string{}
 	for _, entry := range r.store.entries {
@@ -267,6 +285,20 @@ func (r fakeTenantRepository) ByName(ctx context.Context, name string) (domain.T
 		return domain.Tenant{}, domain.NewTenantNotFound(name)
 	}
 	return tenant, nil
+}
+
+// ByID mirrors the real tenantRepository.ByID contract: an absent id answers
+// domain.NewTenantNotFound, not an infrastructure error. The fake's store is
+// keyed by name, so this is a linear scan rather than a second index — the
+// tenant counts these tests ever seed are small enough that this stays a
+// faithful, boring stand-in rather than a shortcut that could hide a bug.
+func (r fakeTenantRepository) ByID(ctx context.Context, tenantID string) (domain.Tenant, error) {
+	for _, tenant := range r.store.tenants {
+		if tenant.TenantID() == tenantID {
+			return tenant, nil
+		}
+	}
+	return domain.Tenant{}, domain.NewTenantNotFound(tenantID)
 }
 
 func (r fakeTenantRepository) Create(ctx context.Context, tenant domain.Tenant) error {
