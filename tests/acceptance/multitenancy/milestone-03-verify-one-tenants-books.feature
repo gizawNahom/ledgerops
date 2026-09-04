@@ -11,7 +11,7 @@ Feature: The operator checks whether one tenant's books balance, scoped to that 
   answer. Decision enabled: whether to trust tenant 1's books right now,
   independent of any other tenant's state.
 
-  @pending @real-io @adapter-integration @contract-shape:pure-function
+  @real-io @adapter-integration @contract-shape:pure-function
   Scenario: A tenant's clean books report YES independent of another tenant's state
     Given tenant "Acme Wallet" has been provisioned
     And tenant "Acme Wallet" opens a wallet account named "alice"
@@ -22,7 +22,7 @@ Feature: The operator checks whether one tenant's books balance, scoped to that 
     Then the verdict states "Books balance: YES"
     And no mention of tenant "Beacon Marketplace" appears in the response
 
-  @pending @real-io @adapter-integration @contract-shape:pure-function
+  @real-io @adapter-integration @contract-shape:pure-function
   Scenario: A tenant's drift is named without exposing other tenants
     Given tenant "Acme Wallet" has been provisioned
     And tenant "Acme Wallet" opens a wallet account named "alice"
@@ -34,20 +34,20 @@ Feature: The operator checks whether one tenant's books balance, scoped to that 
     And the response names "bob" in the drift listing
     And no account belonging to tenant "Acme Wallet" appears in the response
 
-  @pending @real-io @contract-shape:unbounded-preservation
+  @real-io @contract-shape:unbounded-preservation
   Scenario: Checking an unprovisioned tenant is refused
     Given no tenant named "Ghost Co" has been provisioned
     When the operator checks the trial balance for tenant "Ghost Co"
     Then the response is refused as an unknown tenant
 
-  @pending @real-io @adapter-integration @console-compat @contract-shape:pure-function
+  @real-io @adapter-integration @console-compat @contract-shape:pure-function
   Scenario: The existing unscoped trial-balance call keeps succeeding once tenants exist
     Given tenant "Acme Wallet" has been provisioned
     And tenant "Acme Wallet" opens a wallet account named "alice"
     When the operator checks the trial balance unscoped
     Then the response succeeds with a stated verdict, unchanged in shape from today's single-tenant contract
 
-  @pending @real-io @adapter-integration @console-compat @contract-shape:pure-function
+  @real-io @adapter-integration @console-compat @contract-shape:pure-function
   Scenario: The existing unscoped console verdict call keeps succeeding once tenants exist
     Given tenant "Acme Wallet" has been provisioned
     And tenant "Acme Wallet" opens a wallet account named "alice"
