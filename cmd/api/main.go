@@ -17,8 +17,6 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -33,6 +31,7 @@ import (
 	apphttp "ledgerops/internal/adapters/http"
 	"ledgerops/internal/adapters/postgres"
 	"ledgerops/internal/app/ports"
+	"ledgerops/internal/support"
 )
 
 func main() {
@@ -109,13 +108,12 @@ func demoTenantResolver(demoTenantKey string, next ports.TenantKeyResolver) port
 }
 
 // hashCredential computes a presented credential's SHA-256 digest,
-// hex-encoded -- the same digest/encoding shape
+// hex-encoded, via support.SHA256Hex -- the same primitive
 // internal/adapters/postgres/tenants.go's hashCredential and
-// internal/adapters/http/handlers.go's hashIdempotencyKey already use
-// (DDD-26), reused here rather than reinvented a third time.
+// internal/adapters/http/handlers.go's hashIdempotencyKey both delegate to
+// (DDD-26).
 func hashCredential(credential string) string {
-	sum := sha256.Sum256([]byte(credential))
-	return hex.EncodeToString(sum[:])
+	return support.SHA256Hex(credential)
 }
 
 // probeStartup asserts the app-role connection can open a transaction and

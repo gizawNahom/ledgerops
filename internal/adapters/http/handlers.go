@@ -7,8 +7,6 @@ package http
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,6 +20,7 @@ import (
 	"ledgerops/internal/app"
 	"ledgerops/internal/app/ports"
 	"ledgerops/internal/domain"
+	"ledgerops/internal/support"
 )
 
 // createAccountRequest is the wire shape POST /accounts accepts. Both fields
@@ -306,14 +305,13 @@ func recordTransferLogFields(ctx context.Context, body postTransferRequest, amou
 }
 
 // hashIdempotencyKey computes the SHA-256 digest of the raw idempotency key,
-// returning the full 64-character lowercase hex digest with no truncation
-// (OPS-5, design decision 5). Pure function: input in, digest out, no side
-// effects. The raw key itself must never reach fieldsFrom(...).Set(...)
-// under any name, on any path — this is the sole legitimate use of the raw
-// key besides the app-layer idempotency lookup it already feeds.
+// via support.SHA256Hex, returning the full 64-character lowercase hex
+// digest with no truncation (OPS-5, design decision 5). The raw key itself
+// must never reach fieldsFrom(...).Set(...) under any name, on any path —
+// this is the sole legitimate use of the raw key besides the app-layer
+// idempotency lookup it already feeds.
 func hashIdempotencyKey(key string) string {
-	sum := sha256.Sum256([]byte(key))
-	return hex.EncodeToString(sum[:])
+	return support.SHA256Hex(key)
 }
 
 // fingerprintTransfer computes the idempotency fingerprint over the PARSED

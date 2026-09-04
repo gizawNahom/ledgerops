@@ -2,8 +2,6 @@ package postgres
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 
@@ -11,6 +9,7 @@ import (
 
 	"ledgerops/internal/app/ports"
 	"ledgerops/internal/domain"
+	"ledgerops/internal/support"
 )
 
 // tenantRepository is the real ports.TenantRepository, scoped to one unit of
@@ -95,15 +94,12 @@ func (r tenantRepository) Create(ctx context.Context, tenant domain.Tenant) erro
 	return nil
 }
 
-// hashCredential computes the tenant_key's SHA-256 digest, hex-encoded — the
-// same digest/encoding shape internal/adapters/http/handlers.go already uses
-// for the idempotency key (hashIdempotencyKey), the same approach reused here
-// rather than reinvented (DDD-26). Pure function: input in, digest out, no
-// side effects. The plaintext must never reach a WHERE clause or a log line
-// — only this hash does.
+// hashCredential computes the tenant_key's SHA-256 digest, hex-encoded, via
+// support.SHA256Hex — the same primitive internal/adapters/http/handlers.go
+// uses for the idempotency key (DDD-26). The plaintext must never reach a
+// WHERE clause or a log line — only this hash does.
 func hashCredential(credential string) string {
-	sum := sha256.Sum256([]byte(credential))
-	return hex.EncodeToString(sum[:])
+	return support.SHA256Hex(credential)
 }
 
 // NewTenantKeyResolver returns a ports.TenantKeyResolver that resolves a
