@@ -149,10 +149,11 @@ func (w *World) serve(ctx context.Context) error {
 		return fmt.Errorf("opening the store as the application role: %w", err)
 	}
 	handler := apphttp.NewRouter(apphttp.Deps{
-		Store:       store,
-		OperatorKey: w.adminKey,
-		Clock:       time.Now,
-		IDGenerator: func() string { return uuidLike() },
+		Store:             store,
+		OperatorKey:       w.adminKey,
+		Clock:             time.Now,
+		IDGenerator:       func() string { return uuidLike() },
+		TenantKeyResolver: postgres.NewTenantKeyResolver(w.appDSN),
 	})
 	w.server = httptest.NewServer(handler)
 	w.client = w.server.Client()

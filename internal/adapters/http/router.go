@@ -135,7 +135,6 @@ func NewRouter(deps Deps) http.Handler {
 		// handler below is ever reached — no new gating logic needed here.
 		protected.Post("/tenants", provisionTenantHandler(ledger))
 
-		protected.Get("/accounts/{id}/entries", getEntriesHandler(ledger))
 		protected.Get("/health/trial-balance", verdictHandler(ledger, metrics))
 		protected.Get("/console/verdict", verdictHandler(ledger, metrics))
 	})
@@ -143,16 +142,29 @@ func NewRouter(deps Deps) http.Handler {
 	// DDD-23 Option C: POST /accounts, POST /transfers, and GET
 	// /accounts/{id} move under a requireTenantKey-ONLY group -- the
 	// OperatorKey is never accepted here, unlike GET /accounts/{id}/entries
-	// above (which stays dual-mode via requireTenantKeyOrOperatorKey, wired
-	// at step 02-04). The handlers below still call usecases.go with the
-	// legacyTenantID placeholder (step 02-02) -- reading the tenant_id this
-	// middleware now injects into context is also step 02-04's job.
+	// below (which stays dual-mode via requireTenantKeyOrOperatorKey). The
+	// handlers read the tenant_id/scope requireTenantKey injects into
+	// context (step 02-04) instead of the legacyTenantID placeholder step
+	// 02-02 left in usecases.go.
 	router.Group(func(tenantScoped chi.Router) {
 		tenantScoped.Use(requireTenantKey(resolveTenantKey))
 
 		tenantScoped.Post("/accounts", createAccountHandler(ledger))
 		tenantScoped.Get("/accounts/{id}", getBalanceHandler(ledger))
 		tenantScoped.Post("/transfers", postTransferHandler(ledger, metrics))
+	})
+
+	// GET /accounts/{id}/entries stays dual-mode (step 02-04): a tenant_key
+	// caller sees only their own tenant's entries, and the existing
+	// unscoped OperatorKey call -- the console's own credential -- keeps
+	// working byte-identical to today (console-compatibility hard
+	// constraint). requireTenantKeyOrOperatorKey tries the OperatorKey
+	// comparison first, injecting Unscoped() on a match, and falls back to
+	// the tenant resolver otherwise.
+	router.Group(func(entries chi.Router) {
+		entries.Use(requireTenantKeyOrOperatorKey(deps.OperatorKey, resolveTenantKey))
+
+		entries.Get("/accounts/{id}/entries", getEntriesHandler(ledger))
 	})
 
 	mountConsole(router, consoleDistDir)

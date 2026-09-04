@@ -52,11 +52,12 @@ func main() {
 	defer store.Close()
 
 	handler := apphttp.NewRouter(apphttp.Deps{
-		Store:       store,
-		OperatorKey: os.Getenv("LEDGEROPS_OPERATOR_KEY"),
-		Clock:       time.Now,
-		IDGenerator: func() string { return "txn_" + uuid.NewString() },
-		Metrics:     apphttp.NewMetrics(),
+		Store:             store,
+		OperatorKey:       os.Getenv("LEDGEROPS_OPERATOR_KEY"),
+		Clock:             time.Now,
+		IDGenerator:       func() string { return "txn_" + uuid.NewString() },
+		Metrics:           apphttp.NewMetrics(),
+		TenantKeyResolver: postgres.NewTenantKeyResolver(appDSN),
 	})
 
 	addr := os.Getenv("LEDGEROPS_ADDR")

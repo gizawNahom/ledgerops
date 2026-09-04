@@ -11,7 +11,7 @@ Feature: A tenant's credential can never read or write another tenant's ledger
   or touch them. Decision enabled: trust that onboarding a second customer
   cannot corrupt or expose the first customer's ledger.
 
-  @pending @real-io @contract-shape:bounded-change
+  @real-io @contract-shape:bounded-change
   Scenario: Two tenants independently reuse the same account name
     Given tenant "Acme Wallet" has been provisioned
     And tenant "Beacon Marketplace" has been provisioned
@@ -21,7 +21,7 @@ Feature: A tenant's credential can never read or write another tenant's ledger
     And tenant "Acme Wallet"'s account "wallet-1" balance reads 0.00
     And tenant "Beacon Marketplace"'s account "wallet-1" balance reads 0.00
 
-  @pending @real-io @adapter-integration @contract-shape:unbounded-preservation
+  @real-io @adapter-integration @contract-shape:unbounded-preservation
   Scenario: A tenant's account is invisible to every other tenant
     Given tenant "Acme Wallet" has been provisioned
     And tenant "Acme Wallet" opens a system account named "acme-treasury"
@@ -31,7 +31,7 @@ Feature: A tenant's credential can never read or write another tenant's ledger
     When tenant "Beacon Marketplace" requests tenant "Acme Wallet"'s account "alice"
     Then the response is refused as an unknown account
 
-  @pending @real-io @contract-shape:unbounded-preservation
+  @real-io @contract-shape:unbounded-preservation
   Scenario: A tenant cannot post a transfer touching another tenant's account
     Given tenant "Acme Wallet" has been provisioned
     And tenant "Acme Wallet" opens a wallet account named "alice"
@@ -41,7 +41,7 @@ Feature: A tenant's credential can never read or write another tenant's ledger
     Then the transfer is refused
     And tenant "Acme Wallet"'s account "alice" balance reads 0.00
 
-  @pending @real-io @contract-shape:bounded-change
+  @real-io @contract-shape:bounded-change
   Scenario: Existing single-tenant invariants still hold within one tenant
     Given tenant "Acme Wallet" has been provisioned
     And tenant "Acme Wallet" opens a wallet account named "alice"
@@ -49,13 +49,13 @@ Feature: A tenant's credential can never read or write another tenant's ledger
     Then the transfer is refused
     And tenant "Acme Wallet"'s account "alice" balance reads 0.00
 
-  @pending @real-io @contract-shape:unbounded-preservation
+  @real-io @contract-shape:unbounded-preservation
   Scenario: A malformed or missing tenant credential is refused before any tenant logic runs
     Given no caller credential is presented
     When that caller attempts to open an account
     Then the response is refused as unidentified
 
-  @pending @real-io @adapter-integration @contract-shape:pure-function
+  @real-io @adapter-integration @contract-shape:pure-function
   Scenario: A tenant's entries are scoped to that tenant alone
     Given tenant "Acme Wallet" has been provisioned
     And tenant "Acme Wallet" opens a system account named "acme-treasury"
@@ -65,7 +65,7 @@ Feature: A tenant's credential can never read or write another tenant's ledger
     When tenant "Beacon Marketplace" requests tenant "Acme Wallet"'s entries for "alice"
     Then the response is refused as an unknown account
 
-  @pending @real-io @adapter-integration @console-compat @contract-shape:pure-function
+  @real-io @adapter-integration @console-compat @contract-shape:pure-function
   Scenario: The existing unscoped entries call keeps working for the console's own credential
     Given tenant "Acme Wallet" has been provisioned
     And tenant "Acme Wallet" opens a wallet account named "alice"

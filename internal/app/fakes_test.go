@@ -155,6 +155,14 @@ func (r fakeAccountRepository) All(ctx context.Context, tenantID string) ([]doma
 	return accounts, nil
 }
 
+// ExistsAnyTenant mirrors the real adapter's tenant-agnostic existence read
+// (step 02-04): this fake's map is already single-tenant-shaped (see All's
+// comment above), so a plain map lookup is a faithful stand-in.
+func (r fakeAccountRepository) ExistsAnyTenant(ctx context.Context, accountID string) (bool, error) {
+	_, ok := r.store.accounts[accountID]
+	return ok, nil
+}
+
 type fakeTransactionRepository struct{ store *fakeStore }
 
 var _ ports.TransactionRepository = fakeTransactionRepository{}

@@ -113,6 +113,23 @@ func (r accountRepository) Get(ctx context.Context, tenantID string, accountID s
 	return account, nil
 }
 
+// ExistsAnyTenant reports whether an account with this id exists under any
+// tenant — the one deliberately tenant-agnostic existence read this port
+// offers, for GetEntries' dual-mode courtesy check when a caller is
+// Unscoped() (step 02-04). No tenant_id filter, no row content returned.
+func (r accountRepository) ExistsAnyTenant(ctx context.Context, accountID string) (bool, error) {
+	row := r.tx.QueryRow(ctx, `SELECT 1 FROM accounts WHERE id = $1 LIMIT 1`, accountID)
+	var found int
+	err := row.Scan(&found)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("checking whether account %q exists: %w", accountID, err)
+	}
+	return true, nil
+}
+
 // All enumerates every account belonging to the given tenant, ordered by id,
 // without locking any of them — VerifyBooks' full scan is a read-only
 // comparison against ComputedBalances, not a write path, so it takes no row

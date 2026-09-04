@@ -109,6 +109,7 @@ func TestProperty_PostTransfer_MovesValueAndClaimsTheKeyAtomically(t *testing.T)
 			Amount:         amount,
 			IdempotencyKey: "idem-key",
 			Fingerprint:    "fingerprint",
+			TenantID:       testTenantID,
 		})
 		if err != nil {
 			rt.Fatalf("unexpected refusal moving %d of %d available: %v", amountMinor, fromStartMinor, err)
@@ -173,6 +174,7 @@ func TestProperty_PostTransfer_RefusalLeavesEveryUniverseSlotUnchanged(t *testin
 			Amount:         amount,
 			IdempotencyKey: "idem-key",
 			Fingerprint:    "fingerprint",
+			TenantID:       testTenantID,
 		})
 		after := captureUniverse(store, "from", "to")
 
@@ -233,6 +235,7 @@ func TestProperty_PostTransfer_RepeatedApplicationEqualsOneApplication(t *testin
 			Amount:         amount,
 			IdempotencyKey: "idem-key",
 			Fingerprint:    "fingerprint",
+			TenantID:       testTenantID,
 		}
 
 		first, err := ledger.PostTransfer(context.Background(), request)
@@ -276,7 +279,7 @@ func TestProperty_CreateAccount_OpensAtZeroBalance(t *testing.T) {
 		store := newFakeStore()
 		ledger := app.NewLedger(store, fixedClock, sequentialIDs())
 
-		if err := ledger.CreateAccount(context.Background(), accountID, kind); err != nil {
+		if err := ledger.CreateAccount(context.Background(), testTenantID, accountID, kind); err != nil {
 			t.Fatalf("unexpected error opening account %q: %v", accountID, err)
 		}
 
@@ -315,7 +318,7 @@ func TestGetBalance_ReadsStoredBalance(t *testing.T) {
 	store := newFakeStore(account)
 	ledger := app.NewLedger(store, fixedClock, sequentialIDs())
 
-	got, err := ledger.GetBalance(context.Background(), "wallet-1")
+	got, err := ledger.GetBalance(context.Background(), testTenantID, "wallet-1")
 	if err != nil {
 		t.Fatalf("unexpected error reading balance: %v", err)
 	}
@@ -331,7 +334,7 @@ func TestGetBalance_UnknownAccountIsRefused(t *testing.T) {
 	store := newFakeStore()
 	ledger := app.NewLedger(store, fixedClock, sequentialIDs())
 
-	_, err := ledger.GetBalance(context.Background(), "ghost")
+	_, err := ledger.GetBalance(context.Background(), testTenantID, "ghost")
 
 	var violation domain.Violation
 	if !errors.As(err, &violation) || violation.Kind() != domain.UnknownAccount {

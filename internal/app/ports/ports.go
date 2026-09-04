@@ -108,6 +108,18 @@ type AccountRepository interface {
 	// verdict needs every stored balance to compare against ComputedBalances,
 	// not just the ones a caller happens to ask about.
 	All(ctx context.Context, tenantID string) ([]domain.Account, error)
+
+	// ExistsAnyTenant reports whether an account with this id exists under
+	// ANY tenant. This is deliberately the one account-identity read in this
+	// port that is NOT scoped to a caller-named tenant -- it exists solely
+	// for GetEntries' dual-mode courtesy check (step 02-04): an Unscoped()
+	// OperatorKey caller has no tenant of its own to filter existence by,
+	// yet the account_not_found/404 contract for a truly nonexistent account
+	// (ADR-008, DDD-17) must still hold, exactly as it did before
+	// multitenancy. It answers only "does a row exist", never which tenant
+	// owns it or what it contains -- narrower than a read, not an unscoped
+	// version of Get.
+	ExistsAnyTenant(ctx context.Context, accountID string) (bool, error)
 }
 
 // TransactionRepository writes the transaction and its entries. It offers no

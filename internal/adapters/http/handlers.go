@@ -50,7 +50,10 @@ func createAccountHandler(ledger *app.Ledger) http.HandlerFunc {
 			return
 		}
 
-		if err := ledger.CreateAccount(r.Context(), body.AccountID, kind); err != nil {
+		scope, _ := TenantScopeFromContext(r.Context())
+		tenantID, _ := scope.Resolve()
+
+		if err := ledger.CreateAccount(r.Context(), tenantID, body.AccountID, kind); err != nil {
 			writeDomainError(w, r, err)
 			return
 		}
@@ -111,7 +114,10 @@ func getBalanceHandler(ledger *app.Ledger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		accountID := chi.URLParam(r, "id")
 
-		account, err := ledger.GetBalance(r.Context(), accountID)
+		scope, _ := TenantScopeFromContext(r.Context())
+		tenantID, _ := scope.Resolve()
+
+		account, err := ledger.GetBalance(r.Context(), tenantID, accountID)
 		if err != nil {
 			writeDomainError(w, r, err)
 			return
@@ -134,7 +140,13 @@ func getEntriesHandler(ledger *app.Ledger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		accountID := chi.URLParam(r, "id")
 
-		traced, err := ledger.GetEntries(r.Context(), accountID)
+		// Dual mode (step 02-04): scope is exactly what requireTenantKeyOrOperatorKey
+		// injected -- ScopedToTenant for a tenant_key caller, Unscoped() for the
+		// platform OperatorKey -- and is passed straight through to GetEntries,
+		// which forwards it unchanged to TransactionRepository.EntriesFor.
+		scope, _ := TenantScopeFromContext(r.Context())
+
+		traced, err := ledger.GetEntries(r.Context(), scope, accountID)
 		if err != nil {
 			writeDomainError(w, r, err)
 			return
@@ -218,12 +230,16 @@ func postTransferHandler(ledger *app.Ledger, metrics *Metrics) http.HandlerFunc 
 			return
 		}
 
+		scope, _ := TenantScopeFromContext(r.Context())
+		tenantID, _ := scope.Resolve()
+
 		result, err := ledger.PostTransfer(r.Context(), app.TransferRequest{
 			From:           body.From,
 			To:             body.To,
 			Amount:         amount,
 			IdempotencyKey: key,
 			Fingerprint:    fingerprintTransfer(body.From, body.To, amount),
+			TenantID:       tenantID,
 		})
 		if err != nil {
 			if errors.Is(err, app.ErrIdempotencyKeyConflict) {

@@ -31,16 +31,13 @@ import (
 // currently unreachable through any driving port, by design).
 const ledgerCurrency = "USD"
 
-// legacyTenantID is the interim, single-tenant caller identity every
-// write-path use case scopes its repository calls to until a later step
-// (02-04) wires real per-request tenant extraction through the HTTP layer.
-// It matches the sentinel every pre-existing row was backfilled to
-// (migration 0003_tenants.up.sql, tnt_legacy_seed) — not a new identity, the
-// same one already on disk. Widening AccountRepository/TransactionRepository
-// to a required tenant_id (step 02-02) forces every write-path call site to
-// name a tenant explicitly; naming the existing sentinel here is what keeps
-// today's single-tenant driving ports (PostTransfer, CreateAccount,
-// GetBalance) behaving exactly as before, with no HTTP-layer change.
+// legacyTenantID is the sentinel every pre-existing row was backfilled to
+// (migration 0003_tenants.up.sql, tnt_legacy_seed). As of step 02-04 the
+// write-path use cases (PostTransfer, CreateAccount, GetBalance) no longer
+// hardcode it — each now takes the caller's real tenant_id, threaded from
+// the HTTP layer's requireTenantKey-resolved scope (router.go/handlers.go).
+// VerifyBooks (step 06-01/03-01, out of this step's scope) still names the
+// sentinel directly for its accounts-enumeration leg.
 const legacyTenantID = "tnt_legacy_seed"
 
 // ErrIdempotencyKeyConflict marks a same-key request whose fingerprint does
@@ -126,6 +123,7 @@ func inUnitOfWork(ctx context.Context, store ports.Store, describe string, fn fu
 // The key and the transaction commit together, so there is no window in which
 // one exists without the other (ADR-005).
 func (l *Ledger) PostTransfer(ctx context.Context, cmd TransferRequest) (Result, error) {
+	tenantID := cmd.TenantID
 	uow, err := l.store.Begin(ctx)
 	if err != nil {
 		return Result{}, fmt.Errorf("posting transfer: %w", err)
@@ -155,7 +153,7 @@ func (l *Ledger) PostTransfer(ctx context.Context, cmd TransferRequest) (Result,
 		if claim.Fingerprint != cmd.Fingerprint {
 			return Result{}, ErrIdempotencyKeyConflict
 		}
-		posting, err := uow.Transactions().Get(ctx, legacyTenantID, claim.TransactionID)
+		posting, err := uow.Transactions().Get(ctx, tenantID, claim.TransactionID)
 		if err != nil {
 			return Result{}, fmt.Errorf("re-rendering replay for transaction %q: %w", claim.TransactionID, err)
 		}
@@ -168,7 +166,7 @@ func (l *Ledger) PostTransfer(ctx context.Context, cmd TransferRequest) (Result,
 
 	// Read (impure): lock the touched accounts in ascending id order
 	// (DDD-6) — the ordering is the repository's job, not this call site's.
-	snapshots, err := uow.Accounts().LockForUpdate(ctx, legacyTenantID, []string{cmd.From, cmd.To})
+	snapshots, err := uow.Accounts().LockForUpdate(ctx, tenantID, []string{cmd.From, cmd.To})
 	if err != nil {
 		return Result{}, fmt.Errorf("locking accounts for transfer: %w", err)
 	}
@@ -181,7 +179,7 @@ func (l *Ledger) PostTransfer(ctx context.Context, cmd TransferRequest) (Result,
 		From:     cmd.From,
 		To:       cmd.To,
 		Amount:   cmd.Amount,
-		TenantID: legacyTenantID,
+		TenantID: tenantID,
 	}, snapshots, now, transactionID)
 	if err != nil {
 		return Result{}, err
@@ -190,10 +188,10 @@ func (l *Ledger) PostTransfer(ctx context.Context, cmd TransferRequest) (Result,
 	// Write (impure): the transaction, its entries, the balance deltas, and
 	// the idempotency claim all land in the same transaction, so there is no
 	// window in which one exists without the others (ADR-005).
-	if err := uow.Transactions().Append(ctx, legacyTenantID, posting); err != nil {
+	if err := uow.Transactions().Append(ctx, tenantID, posting); err != nil {
 		return Result{}, fmt.Errorf("recording transaction %q: %w", transactionID, err)
 	}
-	if err := uow.Accounts().ApplyDeltas(ctx, legacyTenantID, posting.Deltas); err != nil {
+	if err := uow.Accounts().ApplyDeltas(ctx, tenantID, posting.Deltas); err != nil {
 		return Result{}, fmt.Errorf("applying balance deltas for transaction %q: %w", transactionID, err)
 	}
 	if _, err := uow.Idempotency().Claim(ctx, cmd.IdempotencyKey, cmd.Fingerprint, transactionID); err != nil {
@@ -224,7 +222,7 @@ func (l *Ledger) PostTransfer(ctx context.Context, cmd TransferRequest) (Result,
 // the ledger afterwards as a movement from a system account, never as an
 // assignment — otherwise value appears unaccounted for and I1 is violated at
 // the source.
-func (l *Ledger) CreateAccount(ctx context.Context, accountID string, kind domain.AccountKind) error {
+func (l *Ledger) CreateAccount(ctx context.Context, tenantID string, accountID string, kind domain.AccountKind) error {
 	openingBalance, err := domain.NewMoney(0, ledgerCurrency)
 	if err != nil {
 		return err
@@ -236,17 +234,17 @@ func (l *Ledger) CreateAccount(ctx context.Context, accountID string, kind domai
 		// the final backstop under concurrency; this is the pure decision
 		// that turns a known collision into a named refusal rather than a
 		// raw constraint error.
-		alreadyOpen, err := l.accountAlreadyOpen(ctx, uow, accountID)
+		alreadyOpen, err := l.accountAlreadyOpen(ctx, uow, tenantID, accountID)
 		if err != nil {
 			return err
 		}
 
-		account, err := domain.OpenAccount(legacyTenantID, accountID, kind, openingBalance, alreadyOpen)
+		account, err := domain.OpenAccount(tenantID, accountID, kind, openingBalance, alreadyOpen)
 		if err != nil {
 			return err
 		}
 
-		if err := uow.Accounts().Create(ctx, legacyTenantID, account); err != nil {
+		if err := uow.Accounts().Create(ctx, tenantID, account); err != nil {
 			return fmt.Errorf("opening account %q: %w", accountID, err)
 		}
 		return nil
@@ -257,8 +255,8 @@ func (l *Ledger) CreateAccount(ctx context.Context, accountID string, kind domai
 // check: whether an account is already bound to this id. UnknownAccount is
 // the expected shape of "no", not an error to propagate; anything else (a
 // genuine infrastructure failure) is.
-func (l *Ledger) accountAlreadyOpen(ctx context.Context, uow ports.UnitOfWork, accountID string) (bool, error) {
-	_, err := uow.Accounts().Get(ctx, legacyTenantID, accountID)
+func (l *Ledger) accountAlreadyOpen(ctx context.Context, uow ports.UnitOfWork, tenantID, accountID string) (bool, error) {
+	_, err := uow.Accounts().Get(ctx, tenantID, accountID)
 	if err == nil {
 		return true, nil
 	}
@@ -340,11 +338,14 @@ type ProvisionedTenant struct {
 	TenantKey string
 }
 
-// GetBalance reads one account's stored balance.
-func (l *Ledger) GetBalance(ctx context.Context, accountID string) (domain.Account, error) {
+// GetBalance reads one account's stored balance, scoped to the caller's own
+// tenant (step 02-04: tenantID arrives from the requireTenantKey-resolved
+// scope, never a platform-wide read — GET /accounts/{id} has no unscoped
+// mode).
+func (l *Ledger) GetBalance(ctx context.Context, tenantID string, accountID string) (domain.Account, error) {
 	return withUnitOfWork(ctx, l.store, fmt.Sprintf("reading balance for %q", accountID),
 		func(uow ports.UnitOfWork) (domain.Account, error) {
-			return uow.Accounts().Get(ctx, legacyTenantID, accountID)
+			return uow.Accounts().Get(ctx, tenantID, accountID)
 		})
 }
 
@@ -368,13 +369,37 @@ type TracedEntry struct {
 // domain.UnknownAccount naming the account, never a partial (or empty)
 // result — the same account_not_found/404 decision site already sealed for
 // POST /transfers and GET /accounts/{id} (ADR-008, DDD-17).
-func (l *Ledger) GetEntries(ctx context.Context, accountID string) ([]TracedEntry, error) {
+//
+// scope arrives from GET /accounts/{id}/entries' dual-mode gate
+// (requireTenantKeyOrOperatorKey, step 02-04): a tenant-key caller gets
+// ScopedToTenant(their own tenant), an OperatorKey caller gets Unscoped().
+// scope is passed straight through to EntriesFor — no translation — which is
+// what keeps the unscoped path byte-identical to the pre-multitenancy query
+// (step 02-02's own EntriesFor implementation already carries the unscoped
+// SQL shape). The account-existence courtesy check runs either way: scoped
+// via AccountRepository.Get (single-tenant read, as ports.go requires),
+// unscoped via AccountRepository.ExistsAnyTenant — the one deliberately
+// tenant-agnostic existence read (step 02-04), needed because an Unscoped()
+// caller has no tenant of its own to filter by, yet "nobody" (an account no
+// tenant ever opened) must still answer account_not_found/404, exactly as it
+// did before multitenancy (ADR-008, DDD-17).
+func (l *Ledger) GetEntries(ctx context.Context, scope ports.TenantScope, accountID string) ([]TracedEntry, error) {
 	entries, err := withUnitOfWork(ctx, l.store, fmt.Sprintf("reading entries for %q", accountID),
 		func(uow ports.UnitOfWork) ([]domain.Entry, error) {
-			if _, err := uow.Accounts().Get(ctx, legacyTenantID, accountID); err != nil {
-				return nil, err
+			if tenantID, scoped := scope.Resolve(); scoped {
+				if _, err := uow.Accounts().Get(ctx, tenantID, accountID); err != nil {
+					return nil, err
+				}
+			} else {
+				exists, err := uow.Accounts().ExistsAnyTenant(ctx, accountID)
+				if err != nil {
+					return nil, err
+				}
+				if !exists {
+					return nil, domain.NewUnknownAccount(accountID)
+				}
 			}
-			return uow.Transactions().EntriesFor(ctx, ports.ScopedToTenant(legacyTenantID), accountID)
+			return uow.Transactions().EntriesFor(ctx, scope, accountID)
 		})
 	if err != nil {
 		return nil, err
@@ -508,6 +533,11 @@ type TransferRequest struct {
 	Amount         domain.Money
 	IdempotencyKey string
 	Fingerprint    string
+
+	// TenantID is the caller's own tenant, resolved by requireTenantKey
+	// (step 02-04) — POST /transfers has no unscoped mode, unlike GET
+	// /accounts/{id}/entries.
+	TenantID string
 }
 
 // Result is what a posting answers with. Replayed distinguishes a retry from a

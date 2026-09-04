@@ -390,6 +390,11 @@ func (r pactFakeAccountRepository) Get(ctx context.Context, tenantID string, acc
 	return account, nil
 }
 
+func (r pactFakeAccountRepository) ExistsAnyTenant(ctx context.Context, accountID string) (bool, error) {
+	_, ok := r.store.accounts[accountID]
+	return ok, nil
+}
+
 func (r pactFakeAccountRepository) All(ctx context.Context, tenantID string) ([]domain.Account, error) {
 	ids := make([]string, 0, len(r.store.accounts))
 	for id := range r.store.accounts {
