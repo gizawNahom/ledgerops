@@ -53,6 +53,12 @@ services:
     environment:
       LEDGEROPS_APP_DSN: postgres://ledgerops_app:app-secret@postgres:5432/ledgerops?sslmode=disable
       LEDGEROPS_OPERATOR_KEY: demo-operator-key
+      # OPS-10/OPS-11 (step 02-05): the credential demo-01..03/chaos-01/
+      # race-02/race-03 present on the three tenant-key-only routes
+      # (POST /accounts, POST /transfers, GET /accounts/{id}) -- resolves to
+      # tnt_legacy_seed, the sentinel tenant migration 0003 backfills every
+      # pre-multitenancy row to (cmd/api/main.go's demoTenantResolver).
+      LEDGEROPS_DEMO_TENANT_KEY: demo-tenant-key
       LEDGEROPS_ADDR: ":8080"
     ports:
       - "8080:8080"

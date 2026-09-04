@@ -15,7 +15,17 @@ down:
 	docker compose down -v
 
 APP_URL := http://localhost:8080
-AUTH := Authorization: Bearer demo-operator-key
+# OPS-10/OPS-11 (step 02-05): DDD-23 Option C moved POST /accounts,
+# POST /transfers, and GET /accounts/{id} -- every route demo-01..03 and
+# chaos-01 exercise -- to a requireTenantKey-ONLY group; OperatorKey is never
+# accepted there anymore. AUTH is repointed to the seeded demo tenant
+# credential (docker-compose.yml's LEDGEROPS_DEMO_TENANT_KEY, resolved to
+# tnt_legacy_seed) so every recipe body below stays byte-for-byte unchanged --
+# only this variable's value changed. OPERATOR_AUTH keeps an explicit path to
+# the unscoped platform credential for provisioning (POST /tenants,
+# admin-only) and any console-compatibility scenario that still needs it.
+AUTH := Authorization: Bearer demo-tenant-key
+OPERATOR_AUTH := Authorization: Bearer demo-operator-key
 
 # Polls the real driving port (not a container healthcheck) until the app
 # answers, so the wait proves the same thing a caller's first request proves.

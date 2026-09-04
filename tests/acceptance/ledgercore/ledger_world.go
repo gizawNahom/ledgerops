@@ -3,6 +3,8 @@ package ledgercore
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,6 +16,7 @@ import (
 
 	apphttp "ledgerops/internal/adapters/http"
 	"ledgerops/internal/adapters/postgres"
+	"ledgerops/internal/app/ports"
 	"ledgerops/tests/common/statedelta"
 )
 
@@ -66,7 +69,16 @@ type Ledger struct {
 	privilegedDSN string
 
 	operatorKey string
-	actingAs    Credentials
+	// tenantKey is the suite's own provisioned tenant credential (OPS-13,
+	// step 02-05) -- ensureTenantKey mints it once per store lifetime via
+	// the real POST /tenants driving port, the same way every other
+	// precondition in this suite reaches the system (ledger_seeding.go).
+	// DDD-23 Option C moved POST /accounts, POST /transfers, and
+	// GET /accounts/{id} to a requireTenantKey-ONLY group -- OperatorKey is
+	// never accepted there -- so this credential, not l.operatorKey, is what
+	// those three routes' step definitions present.
+	tenantKey string
+	actingAs  Credentials
 
 	clock       func() time.Time
 	nextID      func() string
@@ -142,6 +154,12 @@ func (l *Ledger) serve(ctx context.Context) error {
 	handler := apphttp.NewRouter(apphttp.Deps{
 		Store:       store,
 		OperatorKey: l.operatorKey,
+		// OPS-13 (step 02-05): the real DB-backed resolver, mirroring
+		// cmd/api/main.go's own wiring -- without it every tenant-scoped
+		// route refuses unconditionally (resolveTenantKeyResolver's
+		// zero-value fallback never matches), regardless of which
+		// credential a step presents.
+		TenantKeyResolver: legacySeedTenantResolver(l.tenantKey, postgres.NewTenantKeyResolver(l.appDSN)),
 		// Wrapped in forwarding closures, not passed directly: l.clock/l.nextID
 		// are func() values, so passing them by value here would snapshot
 		// whatever they ARE at serve() time — before Background's
@@ -162,6 +180,43 @@ func (l *Ledger) serve(ctx context.Context) error {
 	l.client = l.server.Client()
 	l.CaptureMetricsBaseline(ctx)
 	return nil
+}
+
+// legacyLedgerTenantID is the sentinel tenant migration 0003 creates and
+// backfills every pre-multitenancy row to (DDD-24) -- the same tenant
+// internal/app/usecases.go's TrialBalance verdict walk scans
+// (legacyTenantID). Every account this suite's own driving-port helpers
+// open must therefore land under THIS tenant, or the drift/tamper/interrupt
+// scenarios (which corrupt data via l.privilegedDSN, then read back through
+// the operator-gated /health/trial-balance verdict) would corrupt an
+// account the verdict handler never looks at.
+const legacyLedgerTenantID = "tnt_legacy_seed"
+
+// legacySeedTenantResolver mirrors cmd/api/main.go's demoTenantResolver: a
+// presented bearer token matching tenantKey resolves to
+// legacyLedgerTenantID without a database round-trip, so the suite's own
+// tenant credential needs no INSERT/UPDATE against the tenants table at
+// all — ledgerops_app (l.appDSN, migration 0003) holds only SELECT/INSERT
+// there, same privilege wall main.go's own comment documents. next is
+// consulted for every other presented credential (e.g. multitenancy's own
+// suite provisions real, non-legacy tenants elsewhere and is unaffected by
+// this).
+func legacySeedTenantResolver(tenantKey string, next ports.TenantKeyResolver) ports.TenantKeyResolver {
+	tenantCredentialHash := hashTenantKey(tenantKey)
+	return func(ctx context.Context, credentialHash string) (string, bool, error) {
+		if credentialHash == tenantCredentialHash {
+			return legacyLedgerTenantID, true, nil
+		}
+		return next(ctx, credentialHash)
+	}
+}
+
+// hashTenantKey computes the same SHA-256 hex digest
+// internal/adapters/postgres/tenants.go's hashCredential and
+// internal/adapters/http/router.go's hashBearerToken already use (DDD-26).
+func hashTenantKey(tenantKey string) string {
+	sum := sha256.Sum256([]byte(tenantKey))
+	return hex.EncodeToString(sum[:])
 }
 
 // Restart stops the process and serves again against the same store, which is
@@ -234,7 +289,7 @@ func (l *Ledger) CaptureUniverse(ctx context.Context, accounts ...AccountName) (
 func (l *Ledger) OpenAccount(ctx context.Context, name AccountName, kind AccountKind) error {
 	l.accountKind[name] = kind
 	body := map[string]any{"account_id": string(name), "type": string(kind)}
-	answer, err := l.call(ctx, http.MethodPost, "/accounts", body, NoIdempotencyKey)
+	answer, err := l.callTenant(ctx, http.MethodPost, "/accounts", body, NoIdempotencyKey)
 	l.lastAnswer = answer
 	return err
 }
@@ -248,7 +303,7 @@ func (l *Ledger) SubmitTransfer(ctx context.Context, transfer Transfer) error {
 		"to":     string(transfer.To),
 		"amount": transfer.Amount.String(),
 	}
-	answer, err := l.call(ctx, http.MethodPost, "/transfers", body, transfer.Key)
+	answer, err := l.callTenant(ctx, http.MethodPost, "/transfers", body, transfer.Key)
 	l.lastAnswer = answer
 	return err
 }
@@ -269,7 +324,7 @@ func (l *Ledger) SubmitTransferWithAmountLiteral(
 		"to":     string(to),
 		"amount": string(literal),
 	}
-	answer, err := l.call(ctx, http.MethodPost, "/transfers", body, key)
+	answer, err := l.callTenant(ctx, http.MethodPost, "/transfers", body, key)
 	l.lastAnswer = answer
 	return err
 }
@@ -280,7 +335,7 @@ func (l *Ledger) SubmitTransferWithAmountLiteral(
 // these scenarios ask.
 func (l *Ledger) SubmitMalformedTransfer(ctx context.Context, shape MalformedPayload) error {
 	l.priorAnswer = l.lastAnswer
-	answer, err := l.callRaw(ctx, http.MethodPost, "/transfers", malformedBody(shape), "malformed-1")
+	answer, err := l.callRawTenant(ctx, http.MethodPost, "/transfers", malformedBody(shape), "malformed-1")
 	l.lastAnswer = answer
 	return err
 }
@@ -326,7 +381,7 @@ func (l *Ledger) RepeatLastRequestRewritten(ctx context.Context, key Idempotency
 	l.priorAnswer = l.lastAnswer
 	raw := fmt.Sprintf("{\n  \"amount\" :  %q ,\n\t\"to\":%q,\n \"from\" : %q\n}",
 		l.lastRequest.Amount.String(), string(l.lastRequest.To), string(l.lastRequest.From))
-	answer, err := l.callRaw(ctx, http.MethodPost, "/transfers", []byte(raw), key)
+	answer, err := l.callRawTenant(ctx, http.MethodPost, "/transfers", []byte(raw), key)
 	l.lastAnswer = answer
 	return err
 }
@@ -438,12 +493,65 @@ func (l *Ledger) callRaw(ctx context.Context, method, path string, body []byte, 
 }
 
 func (l *Ledger) callRawAs(ctx context.Context, as Credentials, method, path string, body []byte, key IdempotencyKey) (Answer, error) {
+	return l.doCall(ctx, method, path, body, key, func(request *http.Request) {
+		l.authenticateAs(request, as)
+	})
+}
+
+// --- tenant-scoped transport (OPS-13, step 02-05) ---------------------------
+//
+// POST /accounts, POST /transfers, and GET /accounts/{id} moved under
+// DDD-23 Option C's requireTenantKey-ONLY group — l.operatorKey is refused
+// there. The three call/callAs/callRaw entry points above stay unchanged for
+// every other route (health/console verdicts, entries traces, tenant
+// provisioning, metrics scrapes); these tenant-flavored twins are used ONLY
+// by the step definitions that call those three routes
+// (OpenAccount/SubmitTransfer/SubmitTransferWithAmountLiteral/
+// SubmitMalformedTransfer/RepeatLastRequestRewritten/RaceSpenders/
+// readBalance).
+
+func (l *Ledger) callTenant(ctx context.Context, method, path string, body any, key IdempotencyKey) (Answer, error) {
+	return l.callAsTenant(ctx, l.actingAs, method, path, body, key)
+}
+
+// callAsTenant mirrors callAs, substituting l.tenantKey for l.operatorKey on
+// the legitimate-caller path. NoKey/UnissuedKey behave identically to
+// callAs — those refusal scenarios are about the ABSENCE of a valid
+// credential, not about which valid credential is presented, so they must
+// keep refusing exactly as before.
+func (l *Ledger) callAsTenant(ctx context.Context, as Credentials, method, path string, body any, key IdempotencyKey) (Answer, error) {
+	encoded, err := json.Marshal(body)
+	if err != nil {
+		return Answer{}, err
+	}
+	return l.callRawTenantAs(ctx, as, method, path, encoded, key)
+}
+
+func (l *Ledger) callRawTenant(ctx context.Context, method, path string, body []byte, key IdempotencyKey) (Answer, error) {
+	return l.callRawTenantAs(ctx, l.actingAs, method, path, body, key)
+}
+
+func (l *Ledger) callRawTenantAs(ctx context.Context, as Credentials, method, path string, body []byte, key IdempotencyKey) (Answer, error) {
+	return l.doCall(ctx, method, path, body, key, func(request *http.Request) {
+		l.authenticateTenantAs(request, as)
+	})
+}
+
+// doCall is callRawAs/callRawTenantAs's shared transport: build the request,
+// let the caller decide which credential to present, send it, and capture
+// the log delta (OPS-5). Extracted so the tenant-flavored twins above need
+// not re-derive this every time — only which authenticate function runs
+// differs between them.
+func (l *Ledger) doCall(
+	ctx context.Context, method, path string, body []byte, key IdempotencyKey,
+	authenticate func(*http.Request),
+) (Answer, error) {
 	request, err := http.NewRequestWithContext(ctx, method, l.server.URL+path, bytes.NewReader(body))
 	if err != nil {
 		return Answer{}, err
 	}
 	request.Header.Set("Content-Type", "application/json")
-	l.authenticateAs(request, as)
+	authenticate(request)
 	if key != NoIdempotencyKey && key != "" {
 		request.Header.Set("Idempotency-Key", string(key))
 	}
@@ -478,5 +586,19 @@ func (l *Ledger) authenticateAs(request *http.Request, as Credentials) {
 		request.Header.Set("Authorization", "Bearer never-issued-key")
 	default:
 		request.Header.Set("Authorization", "Bearer "+l.operatorKey)
+	}
+}
+
+// authenticateTenantAs is authenticateAs's tenant-flavored twin: same
+// NoKey/UnissuedKey refusal behavior, but the legitimate-caller default
+// presents l.tenantKey instead of l.operatorKey.
+func (l *Ledger) authenticateTenantAs(request *http.Request, as Credentials) {
+	switch as {
+	case NoKey:
+		return
+	case UnissuedKey:
+		request.Header.Set("Authorization", "Bearer never-issued-key")
+	default:
+		request.Header.Set("Authorization", "Bearer "+l.tenantKey)
 	}
 }

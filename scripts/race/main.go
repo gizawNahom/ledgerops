@@ -29,8 +29,19 @@ func main() {
 	flag.Parse()
 
 	baseURL := envOr("RACE_APP_URL", "http://localhost:8080")
+	// RACE_OPERATOR_KEY is retained only for symmetry with RACE_TENANT_KEY --
+	// no scenario in this file currently needs an unscoped OperatorKey call.
 	operatorKey := envOr("RACE_OPERATOR_KEY", "demo-operator-key")
-	client := &httpClient{base: baseURL, key: operatorKey, http: &http.Client{Timeout: 10 * time.Second}}
+	// OPS-10/OPS-11 (step 02-05): DDD-23 Option C moved POST /accounts,
+	// POST /transfers, and GET /accounts/{id} to a requireTenantKey-ONLY
+	// group -- kpi2/kpi3's account creation, transfers, and balance polling
+	// all land on those three routes, so they authenticate with the tenant
+	// credential instead. Defaults to LEDGEROPS_DEMO_TENANT_KEY's own value
+	// (docker-compose.yml), the same seeded credential the Makefile's AUTH
+	// now uses, so `go run ./scripts/race` needs no extra wiring against the
+	// compose stack.
+	tenantKey := envOr("RACE_TENANT_KEY", envOr("LEDGEROPS_DEMO_TENANT_KEY", "demo-tenant-key"))
+	client := &httpClient{base: baseURL, key: tenantKey, operatorKey: operatorKey, http: &http.Client{Timeout: 10 * time.Second}}
 
 	switch *scenario {
 	case "kpi2":
@@ -54,8 +65,13 @@ func envOr(name, fallback string) string {
 
 type httpClient struct {
 	base string
-	key  string
-	http *http.Client
+	// key authenticates the tenant-scoped calls (account creation, transfer,
+	// balance polling) this script drives. operatorKey is carried for
+	// symmetry with RACE_TENANT_KEY only -- no scenario in this file
+	// currently issues an unscoped OperatorKey call.
+	key         string
+	operatorKey string
+	http        *http.Client
 }
 
 func (c *httpClient) postJSON(path string, body map[string]any, headers map[string]string) (int, map[string]any) {

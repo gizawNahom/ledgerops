@@ -17,6 +17,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -30,6 +32,7 @@ import (
 
 	apphttp "ledgerops/internal/adapters/http"
 	"ledgerops/internal/adapters/postgres"
+	"ledgerops/internal/app/ports"
 )
 
 func main() {
@@ -52,12 +55,15 @@ func main() {
 	defer store.Close()
 
 	handler := apphttp.NewRouter(apphttp.Deps{
-		Store:             store,
-		OperatorKey:       os.Getenv("LEDGEROPS_OPERATOR_KEY"),
-		Clock:             time.Now,
-		IDGenerator:       func() string { return "txn_" + uuid.NewString() },
-		Metrics:           apphttp.NewMetrics(),
-		TenantKeyResolver: postgres.NewTenantKeyResolver(appDSN),
+		Store:       store,
+		OperatorKey: os.Getenv("LEDGEROPS_OPERATOR_KEY"),
+		Clock:       time.Now,
+		IDGenerator: func() string { return "txn_" + uuid.NewString() },
+		Metrics:     apphttp.NewMetrics(),
+		TenantKeyResolver: demoTenantResolver(
+			os.Getenv("LEDGEROPS_DEMO_TENANT_KEY"),
+			postgres.NewTenantKeyResolver(appDSN),
+		),
 	})
 
 	addr := os.Getenv("LEDGEROPS_ADDR")
@@ -69,6 +75,47 @@ func main() {
 		logger.Error("server stopped", "err", err)
 		os.Exit(1)
 	}
+}
+
+// legacySeedTenantID is the sentinel tenant migration 0003 creates and
+// backfills every pre-multitenancy row to (DDD-24).
+const legacySeedTenantID = "tnt_legacy_seed"
+
+// demoTenantResolver wraps a ports.TenantKeyResolver so a presented bearer
+// token matching LEDGEROPS_DEMO_TENANT_KEY resolves to legacySeedTenantID,
+// mirroring LEDGEROPS_OPERATOR_KEY's existing os.Getenv wiring above
+// (OPS-10/OPS-11, step 02-05).
+//
+// This does NOT reach the database to reconcile tnt_legacy_seed's
+// credential_hash: migration 0003 grants ledgerops_app only SELECT/INSERT on
+// tenants (OPS-10's least-privilege posture), so the application role this
+// process connects as structurally cannot UPDATE the row the migration
+// seeded with its placeholder hash -- and this process, unlike the migrate
+// job, must never hold a DSN with more than that. Comparing the env var's
+// own digest here instead needs no privilege beyond what the role already
+// has, and is trivially idempotent to run on every startup: it writes
+// nothing, so there is no state to reconcile.
+func demoTenantResolver(demoTenantKey string, next ports.TenantKeyResolver) ports.TenantKeyResolver {
+	if demoTenantKey == "" {
+		return next
+	}
+	demoCredentialHash := hashCredential(demoTenantKey)
+	return func(ctx context.Context, credentialHash string) (string, bool, error) {
+		if credentialHash == demoCredentialHash {
+			return legacySeedTenantID, true, nil
+		}
+		return next(ctx, credentialHash)
+	}
+}
+
+// hashCredential computes a presented credential's SHA-256 digest,
+// hex-encoded -- the same digest/encoding shape
+// internal/adapters/postgres/tenants.go's hashCredential and
+// internal/adapters/http/handlers.go's hashIdempotencyKey already use
+// (DDD-26), reused here rather than reinvented a third time.
+func hashCredential(credential string) string {
+	sum := sha256.Sum256([]byte(credential))
+	return hex.EncodeToString(sum[:])
 }
 
 // probeStartup asserts the app-role connection can open a transaction and

@@ -30,7 +30,12 @@ func NewLedger() *Ledger {
 	issued := 0
 	return &Ledger{
 		operatorKey: "test-operator-key",
-		actingAs:    ApplicationRole,
+		// OPS-13 (step 02-05): resolves to tnt_legacy_seed via
+		// legacySeedTenantResolver in ledger_world.go's serve() -- no
+		// provisioning call needed, mirroring how operatorKey above is
+		// just a fixed literal too.
+		tenantKey: "test-tenant-key",
+		actingAs:  ApplicationRole,
 		accountKind: map[AccountName]AccountKind{},
 		fixedIDs:    fixed,
 		clock:       func() time.Time { return time.Date(2026, 8, 18, 9, 0, 0, 0, time.UTC) },
@@ -123,7 +128,7 @@ func startPostgres(ctx context.Context) (appDSN string, privilegedDSN string, er
 // the scenario under test (see milestone-04/milestone-05 "unidentified
 // caller" scenarios).
 func (l *Ledger) readBalance(ctx context.Context, account AccountName) (Money, error) {
-	answer, err := l.callAs(ctx, ApplicationRole, http.MethodGet, "/accounts/"+url.PathEscape(string(account)), nil, NoIdempotencyKey)
+	answer, err := l.callAsTenant(ctx, ApplicationRole, http.MethodGet, "/accounts/"+url.PathEscape(string(account)), nil, NoIdempotencyKey)
 	if err != nil {
 		return 0, err
 	}
@@ -284,7 +289,7 @@ func (l *Ledger) RaceSpenders(ctx context.Context, n int, transfer Transfer, dis
 				key = IdempotencyKey(fmt.Sprintf("%s-%d", transfer.Key, i))
 			}
 			<-release
-			answer, err := l.call(ctx, http.MethodPost, "/transfers", map[string]any{
+			answer, err := l.callTenant(ctx, http.MethodPost, "/transfers", map[string]any{
 				"from":   string(transfer.From),
 				"to":     string(transfer.To),
 				"amount": transfer.Amount.String(),
