@@ -19,11 +19,12 @@ const (
 // It is a required NewAccount constructor parameter — brief.md § Domain
 // Model / Multitenancy: "tenant_id becomes a required field on the Account
 // value type... there is no smart-constructor path that produces an Account
-// without one." There is no wither and no default: every Account in memory
-// carries the tenant it was constructed with, which is what lets
-// domain.Post's I8 cross-check compare a TransferCommand's own tenant_id
-// against a snapshot's tenant_id unconditionally, not only for callers that
-// remembered to opt in.
+// without one." NewAccount enforces this: an empty tenantID is refused, not
+// merely omittable in the positional-parameter sense. There is no wither and
+// no default: every Account in memory carries the tenant it was constructed
+// with, which is what lets domain.Post's I8 cross-check compare a
+// TransferCommand's own tenant_id against a snapshot's tenant_id
+// unconditionally, not only for callers that remembered to opt in.
 type Account struct {
 	id       string
 	kind     AccountKind
@@ -34,8 +35,12 @@ type Account struct {
 // NewAccount is the smart constructor. It refuses a wallet opened with a
 // negative balance, so I4 holds from the first moment the value exists.
 // tenantID is required and positional, ahead of id — there is no path that
-// constructs an Account without naming the tenant it belongs to (I8).
+// constructs an Account without naming the tenant it belongs to (I8), and an
+// empty tenantID is refused rather than silently accepted.
 func NewAccount(tenantID, id string, kind AccountKind, balance Money) (Account, error) {
+	if tenantID == "" {
+		return Account{}, NewTenantNotFound(tenantID)
+	}
 	if kind == Wallet && balance.MinorUnits() < 0 {
 		zero, _ := NewMoney(0, balance.Currency())
 		return Account{}, NewInsufficientFunds(id, zero, balance.Negate())

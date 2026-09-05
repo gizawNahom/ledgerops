@@ -557,6 +557,25 @@ func TestNewAccount_SystemAllowsNegativeBalanceAtConstruction(t *testing.T) {
 	}
 }
 
+// TestNewAccount_RefusesEmptyTenantID covers I8's defense-in-depth: NewAccount
+// must refuse an empty tenantID at the smart-constructor boundary, not merely
+// accept whatever positional value it is given. This is not currently
+// exploitable through any driving port (no call site anywhere passes an empty
+// tenantID), but the constructor should not rely on callers remembering to
+// supply one.
+func TestNewAccount_RefusesEmptyTenantID(t *testing.T) {
+	balance, err := domain.NewMoney(100, "USD")
+	if err != nil {
+		t.Fatalf("NewMoney rejected a known currency: %v", err)
+	}
+	_, err = domain.NewAccount("", "wallet-1", domain.Wallet, balance)
+
+	var violation domain.Violation
+	if !errors.As(err, &violation) || violation.Kind() != domain.TenantNotFound {
+		t.Fatalf("expected tenant_not_found, got %v", err)
+	}
+}
+
 // TestPost_ToAccountCurrencyMismatchIsRefused kills the CONDITIONALS_NEGATION
 // mutant at post.go:50 (the err-check guarding toAccount.Apply): when the
 // "from" side's currency matches the amount (so the first Apply succeeds)
