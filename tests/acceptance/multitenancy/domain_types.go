@@ -182,4 +182,3 @@ type BooksReport struct {
 	Refusal      RefusalKind
 	Raw          string
 }
-

@@ -34,8 +34,8 @@ func NewLedger() *Ledger {
 		// legacySeedTenantResolver in ledger_world.go's serve() -- no
 		// provisioning call needed, mirroring how operatorKey above is
 		// just a fixed literal too.
-		tenantKey: "test-tenant-key",
-		actingAs:  ApplicationRole,
+		tenantKey:   "test-tenant-key",
+		actingAs:    ApplicationRole,
 		accountKind: map[AccountName]AccountKind{},
 		fixedIDs:    fixed,
 		clock:       func() time.Time { return time.Date(2026, 8, 18, 9, 0, 0, 0, time.UTC) },
