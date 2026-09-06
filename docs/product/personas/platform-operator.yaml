@@ -31,4 +31,4 @@ vocabulary:
   - drift: stored balance disagrees with the sum of its entries
   - trial balance: the summed check across all accounts
 
-jobs: [J4, J5, J7]
+jobs: [J4, J5, J7, J9]

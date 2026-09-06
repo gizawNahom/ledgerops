@@ -1,0 +1,248 @@
+id: transfer-between-tenants
+name: Transfer value between tenants with a standing trust relationship
+persona: P1
+secondary_persona: P2
+jobs: [J8, J9, J10]
+depth: comprehensive
+
+mental_model: >
+  The sending integrator (P1) thinks in exactly the same terms as
+  post-a-transfer.yaml: one API call, "move 50 from my wallet to theirs,"
+  succeeds or fails as a unit. They never think in tenant ids — they think in
+  a counterparty name their business already has a relationship with. The
+  three-leg platform-as-hub mechanics (own ledger -> platform ledger ->
+  counterparty's own ledger) are an implementation truth exactly like the
+  two-leg model in post-a-transfer.yaml: discoverable via the trace, never
+  required knowledge to send or receive. The operator (P2) thinks in terms of
+  "which pairs of tenants may move money to each other" — a standing
+  permission they grant once, not a per-transfer approval they are on the
+  hook for.
+
+steps:
+  - id: S1
+    name: Authorize a tenant pair
+    persona: P2
+    action: >
+      POST /tenant-links {tenant_a, tenant_b} using the platform-admin
+      credential (illustrative — DESIGN settles the exact port)
+    output: "{link_id, tenant_a, tenant_b, status: active}"
+    emotion: routine confidence
+    confidence: 5
+    note: >
+      Setup step, mirrors onboard-and-isolate-a-tenant S1 ("should be boring
+      and forgettable"). Standing until revoked -- not expiry- or
+      usage-bound. One decision, not one per transfer (locked scope: "enforce
+      only that a tenant pair is pre-authorized -- not personally authorize
+      every transfer").
+
+  - id: S2
+    name: Register a counterparty alias
+    persona: P1
+    action: >
+      POST /counterparties {alias, tenant_link_id, to_account} using the
+      sender tenant's own tenant_key (illustrative)
+    output: "{alias, resolves_to: {tenant_id: <hidden from response>, account_id}}"
+    emotion: mild relief
+    confidence: 5
+    note: >
+      Resolves open question 3. The integrating developer never learns or
+      handles the counterparty's raw tenant_id -- they name a counterparty by
+      an alias meaningful to their own business ("beacon-marketplace-payout"),
+      scoped to their own tenant, and the alias resolves to (tenant_id,
+      account_id) only inside the platform. Requires S1's link to already be
+      active, or is refused.
+
+  - id: S3
+    name: Send a transfer to a named counterparty
+    persona: P1
+    action: "POST /transfers {counterparty_alias, amount, Idempotency-Key}"
+    output: "{transfer_id, status: pending, leg1: {transaction_id, status: posted}}"
+    emotion: mild anxiety
+    confidence: 4
+    note: >
+      Leg 1 (sender's own ledger, intra-tenant) posts synchronously and is
+      confirmed immediately -- the sender's own money has moved to their own
+      settlement account. Overall transfer status is "pending" because legs 2
+      and 3 (platform ledger, then counterparty's own ledger) have not yet
+      settled. This is the anxious middle of the arc: the sender's wallet has
+      already moved, but the money has not yet landed with the counterparty.
+
+  - id: S4
+    name: Watch the transfer settle
+    persona: P1
+    action: "GET /transfers/{transfer_id}"
+    output: "{transfer_id, status: settled, legs: [leg1, leg2, leg3] all posted}"
+    emotion: confirmation
+    confidence: 7
+    note: >
+      Ordinary case: the orchestrator completes leg 2 and leg 3 within the
+      same request-response cycle a human would wait for, and a poll (or the
+      original response, once DESIGN settles synchronous-vs-async) shows all
+      three legs posted. Salvaged idea (ex-stash): a single GET by
+      transfer_id is the operator's and integrator's shared audit trail --
+      exactly one place either persona looks to answer "did this happen?"
+
+  - id: S5
+    name: See a stalled leg retried automatically
+    persona: P1
+    action: "GET /transfers/{transfer_id} while leg 2 or leg 3 has failed once"
+    output: "{transfer_id, status: retrying, legs: [leg1: posted, leg2: retrying, leg3: pending]}"
+    emotion: watchful, not alarmed
+    confidence: 6
+    note: >
+      Funds are parked in the platform account (Leg 2's own ledger), not
+      lost and not visible to the counterparty yet. Retry-until-settled is
+      the primary path -- the sender sees "retrying," never an error, while
+      the orchestrator keeps trying the next leg.
+
+  - id: S6
+    name: See a transfer reverse after the retry budget is exhausted
+    persona: P1
+    action: "GET /transfers/{transfer_id} after the fixed retry count is exhausted"
+    output: "{transfer_id, status: reversed, legs: [leg1: reversed, leg2: reversed], reason: retry_budget_exhausted}"
+    emotion: relief
+    confidence: 9
+    note: >
+      The trust-forming step, mirroring post-a-transfer's S5 and
+      onboard-and-isolate-a-tenant's S3: confidence peaks not on the happy
+      path but on proof that money is never stranded. Compensating legs run
+      in reverse order (leg 2 then leg 1); the sender's own wallet is made
+      whole again and the transfer's terminal state says exactly why.
+
+  - id: S7
+    name: Prove one tenant pair's transfer cannot touch a third tenant
+    persona: P1 (adversarial) and P2
+    action: >
+      A tenant with no active tenant-link to the sender attempts to appear as
+      the counterparty (forged counterparty_alias resolving to a
+      non-authorized tenant, or a direct attempt to read
+      /transfers/{transfer_id} for a transfer neither of its tenants is party
+      to)
+      output: "refused -- counterparty not found / transfer not found, from the third tenant's point of view"
+    emotion: trust confirmed
+    confidence: 9
+    note: >
+      Salvaged idea (ex-stash), adapted to this feature's own account model:
+      the adversarial-isolation proof that made onboard-and-isolate-a-tenant's
+      S3 the peak of that journey. Here it proves two things at once: (a)
+      I8-style construction-time isolation holds across all three legs, not
+      just leg 1 and leg 3's own intra-tenant halves, and (b) a
+      tenant-link/alias that does not name the caller's own tenant on either
+      side is indistinguishable from one that does not exist -- no
+      tenant-existence oracle leaks through 403-vs-404, same posture ADR-011
+      already committed to for I8.
+
+emotional_arc:
+  shape: rising, with a dip at S3
+  trough: S3
+  peak: S6
+  rationale: >
+    Same shape discipline as post-a-transfer.yaml and
+    onboard-and-isolate-a-tenant.yaml: confidence must not peak on the happy
+    path (S4). It peaks when the system proves it cannot strand or leak
+    money -- S6 (bounded compensation makes the sender whole) and S7 (a third
+    tenant cannot forge its way into someone else's transfer) are the two
+    moments this feature exists to make true. S3 is a deliberate dip: the
+    sender's own leg has posted, but the money is now sitting between three
+    ledgers they do not directly see, and that is exactly the anxious moment
+    "trusting money to unproven code" names for every job in jobs.yaml.
+
+shared_artifacts:
+  - name: tenant_link_id
+    source: S1 response
+    consumed_by: [S2]
+  - name: counterparty_alias
+    source: S2 response
+    consumed_by: [S3]
+    note: >
+      Scoped to the sending tenant. The same alias string means nothing (or
+      something entirely different) inside another tenant's namespace -- it
+      is not a global directory.
+  - name: transfer_id
+    source: S3 response
+    consumed_by: [S4, S5, S6, S7]
+    note: >
+      First-class field correlating legs 1/2/3 as one economic event across
+      three separate ledgers (locked account model). Not inferred from
+      timing or from any single leg's own transaction_id.
+  - name: idempotency_key
+    source: caller-generated before S3
+    consumed_by: [S3]
+    note: Caller owns this, exactly as in post-a-transfer.yaml. The API never generates it.
+
+error_paths:
+  - step: S2
+    failure: Alias registered against a tenant pair with no active link (S1 not done, or link revoked)
+    response: "404 {error: tenant_link_not_found} (illustrative -- mirrors tenant_not_found precedent)"
+    recovery: Operator (or the counterparty tenant) must authorize the pair first; no state changed.
+  - step: S3
+    failure: Unknown or revoked counterparty_alias
+    response: "404 {error: counterparty_not_found}"
+    recovery: Caller re-checks the alias, or re-registers it if the underlying link was revoked.
+  - step: S3
+    failure: Insufficient funds in sender's own wallet
+    response: "422 {error: insufficient_funds, available, requested}"
+    recovery: Same as post-a-transfer.yaml S3 -- no leg posts, nothing parked.
+  - step: S5
+    failure: Leg 2 or leg 3 fails repeatedly, exceeding the fixed retry count
+    response: transitions to S6 (reversed), not a silent hang
+    recovery: See S6.
+  - step: S6
+    failure: n/a -- terminal state, not a failure requiring further recovery
+    response: see S6 output
+    recovery: >
+      Sender may re-attempt the transfer (new Idempotency-Key); nothing about
+      the reversed transfer is retried automatically.
+  - step: S7
+    failure: n/a -- this IS the intended behavior, not a failure
+    response: see S7 output
+    recovery: n/a
+
+resolved_open_questions:
+  - question: >
+      How is a tenant pair's trust/authorization established and revoked --
+      standing until revoked, or expiry/usage-bound?
+    resolution: >
+      Standing until revoked. Operator-driven only (mirrors multitenancy's D7
+      -- no self-service provisioning of any kind in this domain), a single
+      explicit decision per pair rather than per-transfer authorization,
+      matching the locked scope statement that the platform enforces only
+      that a pair is pre-authorized. No story asks for expiry or a usage
+      ceiling; adding one now would be speculative machinery with no driving
+      job, the same reasoning ADR-012 used to reject building a three-tier
+      role system before any story needed one.
+  - question: What does the end user (wallet holder) see at each state?
+    resolution: >
+      pending (S3) -- leg 1 posted, legs 2/3 in flight. settled (S4) -- all
+      three legs posted. retrying (S5) -- a leg failed once, orchestrator
+      retrying, funds parked in the platform account, never surfaced as an
+      error. reversed (S6) -- the fixed retry count is exhausted,
+      compensating legs ran, sender's own wallet made whole, terminal state
+      names the reason. All four states are readable from one place, GET
+      /transfers/{transfer_id} (S4), not reconstructed by the caller from
+      separate leg lookups.
+  - question: >
+      How does the sender name a recipient without raw tenant IDs, and how
+      does that resolve to a (tenant_id, account_id) pair?
+    resolution: >
+      A counterparty_alias (S2), scoped to the sending tenant's own
+      namespace, registered against an already-active tenant-link (S1) and
+      resolving internally to (tenant_id, account_id). The alias is chosen by
+      the sending tenant for their own bookkeeping convenience -- never a
+      raw tenant_id, and never a value the receiving tenant needs to
+      coordinate or agree on (it lives only in the sender's namespace, same
+      pattern as an address book entry, not a shared directory).
+
+changelog:
+  - date: "2026-09-06"
+    feature: inter-tenant-transfer
+    change: >
+      New journey. Depends on multitenancy (tenant isolation, tenant_key
+      credential) having shipped. Extends post-a-transfer.yaml's mental model
+      (one API call, discoverable multi-leg truth) to the routine
+      pre-established-trust cross-tenant case only -- explicitly not the
+      rare/no-relationship case a prior, rejected DISCUSS pass for this
+      feature-id explored (git-stashed, not part of this journey's lineage
+      except for two narrow ideas: the audit-lookup-by-id shape in S4, and
+      the adversarial cross-tenant-isolation proof pattern in S7, both
+      adapted to this feature's own 3-leg platform-as-hub account model).

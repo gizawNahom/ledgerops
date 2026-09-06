@@ -176,25 +176,79 @@ jobs:
     opportunity: 13
     slice: "01-03"
 
-deferred:
   - id: J8
-    title: Inter-tenant settlement (platform-mediated)
-    reason: >
-      Raised during multitenancy's DISCUSS wave (2026-09-03) — the user needs
-      rare inter-company settlement between two tenants. Resolved shape: two
-      linked transactions through a platform clearing account, run as a saga
-      (initiated -> A debited -> settled, reversed if the B-leg fails); each
-      tenant's own ledger stays independently zero-sum. Authorization is
-      platform-mediated settlement authority — a tenant's own credential only
-      ever touches its own accounts, so isolation (J6) is never violated by
-      this mechanism. Likely extends the existing two-role service-credential
-      precedent (ledger-core OPS-10: ledgerops_app vs ledgerops_migrate) with
-      a third, platform-settlement-scoped credential — noted for this
-      feature's own future DESIGN pass, not decided here. Kept out of
-      `multitenancy` deliberately: depends on tenant isolation shipping
-      first, and folding it into slice 02 would bloat that slice and muddy
-      the isolation-proof (race) demo. Revisit as its own follow-on feature
-      once multitenancy's isolation slices are done.
-    depends_on: multitenancy
+    persona: P1
+    story: >
+      When my tenant has a standing trust relationship with another tenant, I
+      want to move value directly to their wallet by name, so I can settle
+      between us at whatever volume our business needs without either of us
+      learning the other's raw tenant id.
+    dimensions:
+      functional: Move value from one tenant's own wallet to another's, correlated as one economic event across three separate ledgers.
+      emotional: Trust that a routine cross-company payment behaves exactly like a same-tenant transfer, not like a special, riskier operation.
+      social: Be the integration a trading partner's finance team is comfortable settling into, repeatedly.
+    forces:
+      push: A tenant's own credential can only touch its own accounts (I8), so there is no direct path to move value into another tenant's wallet at all today.
+      pull: One transfer call, addressed by a name my own business chose, that lands in the counterparty's wallet with the same certainty as an intra-tenant transfer.
+      anxiety: Trusting money to a mechanism that crosses a boundary (tenant isolation) this platform was specifically built to make impossible to cross carelessly.
+      habit: Settling out-of-band (a separate payment rail or manual reconciliation) because the ledger itself has no notion of "the other company."
     invariant: null
-    persona: [P1, P2]
+    importance: 8
+    satisfaction: 1
+    opportunity: 15
+    slice: "02"
+    reactivated: >
+      Originally raised during multitenancy's DISCUSS wave (2026-09-03) as
+      deferred item J8 ("Inter-tenant settlement, platform-mediated"),
+      deliberately kept out of that feature because it depends on tenant
+      isolation shipping first. Promoted from `deferred:` into a validated
+      job here, 2026-09-06, once multitenancy's isolation slices were done —
+      the deferral's own stated dependency is satisfied. A prior DISCUSS pass
+      for this feature-id explored the rare/no-relationship framing of this
+      job and was rejected as the wrong scope; this entry reflects the
+      corrected, routine-trust-relationship framing only.
+
+  - id: J9
+    persona: P2
+    story: >
+      When two tenants have agreed to do business with each other, I want to
+      authorize that pair once and have it stand until I revoke it, so
+      neither tenant's integrator has to come back to me for approval on
+      every transfer they send each other.
+    dimensions:
+      functional: Grant and revoke a standing, pair-scoped authorization that gates every transfer between two tenants.
+      emotional: Stop being a bottleneck sitting between two businesses that already trust each other.
+      social: Be the operator who enables routine trade between tenants, not the one who has to personally bless every transfer.
+    forces:
+      push: With no pair-level authorization, either every cross-tenant transfer needs the operator in the loop, or there is no gate at all and any tenant could address any other.
+      pull: One standing decision per pair, enforced automatically after that, exactly like provisioning a tenant is one decision that then governs every future call.
+      anxiety: Granting a standing permission that turns out to be broader, or harder to revoke, than intended.
+      habit: Approving cross-company payments individually, out of band, because there has never been a platform-level notion of "these two are allowed to trade."
+    invariant: null
+    importance: 8
+    satisfaction: 1
+    opportunity: 15
+    slice: "01"
+
+  - id: J10
+    persona: P1
+    story: >
+      When a transfer to another tenant is in flight or fails partway, I want
+      to see its exact state without guessing, so I know whether to tell my
+      customer it worked, is still settling, or was reversed.
+    dimensions:
+      functional: Observe the state of a multi-leg, multi-ledger transfer from a single lookup, at any point in its lifecycle.
+      emotional: Replace uncertainty about a payment crossing a boundary I do not control with a definite, checkable answer.
+      social: Give my own customer a straight answer about money moving between companies, not a shrug.
+    forces:
+      push: A transfer spanning three separate ledgers has no single place today that says what state it is actually in.
+      pull: One id, one lookup, one of exactly four readable states — pending, settled, retrying, or reversed.
+      anxiety: A transfer silently stuck in an undefined state that neither settles nor reverses.
+      habit: Reconstructing status by querying each of the three ledgers separately and inferring what must have happened.
+    invariant: null
+    importance: 7
+    satisfaction: 1
+    opportunity: 13
+    slice: "05"
+
+deferred: []

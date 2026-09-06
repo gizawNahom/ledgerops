@@ -37,4 +37,4 @@ vocabulary:
   - leg / entry: one side of a transfer; usually invisible to this persona
   - idempotency key: the token that makes a retry safe
 
-jobs: [J1, J2, J3, J6]
+jobs: [J1, J2, J3, J6, J8, J10]
