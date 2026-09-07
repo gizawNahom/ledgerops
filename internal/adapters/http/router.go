@@ -103,6 +103,7 @@ func NewRouter(deps Deps) http.Handler {
 	router := chi.NewRouter()
 
 	ledger := app.NewLedger(deps.Store, deps.Clock, deps.IDGenerator)
+	transferCoordinator := app.NewTransferCoordinator(ledger)
 
 	metrics := resolveMetrics(deps.Metrics)
 	logger := resolveLogger(deps.Logger)
@@ -170,7 +171,7 @@ func NewRouter(deps Deps) http.Handler {
 		// existing route's already-shipped contract untouched while the new
 		// variant is scaffolded, per brief.md § Driving ports ("no existing
 		// port's byte-identical behavior changes").
-		tenantScoped.Post("/transfers", postTransferOrCrossTenantHandler(ledger, metrics))
+		tenantScoped.Post("/transfers", postTransferOrCrossTenantHandler(ledger, transferCoordinator, metrics))
 
 		// POST /counterparties (slice 02, real as of step 02-04) —
 		// tenant-key-only, same group as /transfers / /accounts above.
@@ -190,7 +191,7 @@ func NewRouter(deps Deps) http.Handler {
 	// 05's isolation scenarios can go GREEN.
 	router.Group(func(transfers chi.Router) {
 		transfers.Use(requireTenantKeyOrOperatorKey(deps.OperatorKey, resolveTenantKey))
-		transfers.Get("/transfers/{transfer_id}", scaffold("get_transfer"))
+		transfers.Get("/transfers/{transfer_id}", getTransferHandler(transferCoordinator))
 	})
 
 	// GET /accounts/{id}/entries stays dual-mode (step 02-04): a tenant_key

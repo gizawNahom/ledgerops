@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"ledgerops/internal/app/ports"
+	"ledgerops/internal/domain"
 )
 
 // transferStateRepository is the real ports.TransferStateRepository, scoped
@@ -31,12 +32,15 @@ func (r transferStateRepository) Create(ctx context.Context, state ports.Transfe
 	_, err := r.tx.Exec(ctx,
 		`INSERT INTO transfer_state
 		   (transfer_id, tenant_id, idempotency_key, status, leg1_status, leg2_status, leg3_status,
-		    leg1_attempts, leg2_attempts, leg3_attempts, next_attempt_at, reason)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+		    leg1_attempts, leg2_attempts, leg3_attempts, next_attempt_at, reason,
+		    counterparty_tenant_id, target_account_id, amount_minor, currency)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`,
 		state.TransferID, state.TenantID, state.IdempotencyKey, state.Status,
 		state.Leg1Status, state.Leg2Status, state.Leg3Status,
 		state.Leg1Attempts, state.Leg2Attempts, state.Leg3Attempts,
-		state.NextAttemptAt, toNullableReason(state.Reason))
+		state.NextAttemptAt, toNullableReason(state.Reason),
+		toNullableString(state.CounterpartyTenantID), toNullableString(state.TargetAccountID),
+		state.Amount.MinorUnits(), toNullableString(state.Amount.Currency()))
 	if err != nil {
 		return fmt.Errorf("creating transfer state %q: %w", state.TransferID, err)
 	}
@@ -53,7 +57,8 @@ func (r transferStateRepository) Create(ctx context.Context, state ports.Transfe
 func (r transferStateRepository) Get(ctx context.Context, transferID string) (ports.TransferState, bool, error) {
 	row := r.tx.QueryRow(ctx,
 		`SELECT transfer_id, tenant_id, idempotency_key, status, leg1_status, leg2_status, leg3_status,
-		        leg1_attempts, leg2_attempts, leg3_attempts, next_attempt_at, reason
+		        leg1_attempts, leg2_attempts, leg3_attempts, next_attempt_at, reason,
+		        counterparty_tenant_id, target_account_id, amount_minor, currency
 		 FROM transfer_state WHERE transfer_id = $1`, transferID)
 
 	state, err := scanTransferState(row)
@@ -84,6 +89,23 @@ func (r transferStateRepository) UpdateStatus(ctx context.Context, transferID st
 	return nil
 }
 
+// AdvanceAfterLegOutcome is attemptLeg's own "second write" (brief.md §
+// Retry and reversal mechanics), overwriting whatever ClaimOne's lease left
+// next_attempt_at holding — status and next_attempt_at move together, in
+// one UPDATE, since they describe the same attempt outcome.
+func (r transferStateRepository) AdvanceAfterLegOutcome(ctx context.Context, transferID string, status string, nextAttemptAt time.Time, reason string) error {
+	tag, err := r.tx.Exec(ctx,
+		`UPDATE transfer_state SET status = $1, next_attempt_at = $2, reason = $3 WHERE transfer_id = $4`,
+		status, nextAttemptAt, toNullableReason(reason), transferID)
+	if err != nil {
+		return fmt.Errorf("advancing transfer %q after a leg outcome: %w", transferID, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("advancing transfer %q after a leg outcome: no matching row", transferID)
+	}
+	return nil
+}
+
 // ClaimOne is the ONLY claim-granting call (ADR-015 Amendment 2). It locks
 // the named row with SELECT ... FOR UPDATE — the same row-locking idiom
 // AccountRepository.lockOne already uses (accounts.go) — inside this unit
@@ -102,7 +124,8 @@ func (r transferStateRepository) UpdateStatus(ctx context.Context, transferID st
 func (r transferStateRepository) ClaimOne(ctx context.Context, transferID string, leaseDuration time.Duration) (ports.TransferState, bool, error) {
 	row := r.tx.QueryRow(ctx,
 		`SELECT transfer_id, tenant_id, idempotency_key, status, leg1_status, leg2_status, leg3_status,
-		        leg1_attempts, leg2_attempts, leg3_attempts, next_attempt_at, reason
+		        leg1_attempts, leg2_attempts, leg3_attempts, next_attempt_at, reason,
+		        counterparty_tenant_id, target_account_id, amount_minor, currency
 		 FROM transfer_state WHERE transfer_id = $1 FOR UPDATE`, transferID)
 
 	state, err := scanTransferState(row)
@@ -179,26 +202,55 @@ func (r transferStateRepository) ClaimDue(ctx context.Context, now time.Time, ba
 // nullable (migration 02-01): absent while a transfer is still in flight.
 func scanTransferState(row pgx.Row) (ports.TransferState, error) {
 	var (
-		state  ports.TransferState
-		reason sql.NullString
+		state                ports.TransferState
+		reason               sql.NullString
+		counterpartyTenantID sql.NullString
+		targetAccountID      sql.NullString
+		amountMinor          sql.NullInt64
+		currency             sql.NullString
 	)
 	err := row.Scan(
 		&state.TransferID, &state.TenantID, &state.IdempotencyKey, &state.Status,
 		&state.Leg1Status, &state.Leg2Status, &state.Leg3Status,
 		&state.Leg1Attempts, &state.Leg2Attempts, &state.Leg3Attempts,
-		&state.NextAttemptAt, &reason)
+		&state.NextAttemptAt, &reason,
+		&counterpartyTenantID, &targetAccountID, &amountMinor, &currency)
 	if err != nil {
 		return ports.TransferState{}, err
 	}
 	state.Reason = reason.String
+	state.CounterpartyTenantID = counterpartyTenantID.String
+	state.TargetAccountID = targetAccountID.String
+	if currency.Valid {
+		amount, err := domain.NewMoney(amountMinor.Int64, currency.String)
+		if err != nil {
+			return ports.TransferState{}, fmt.Errorf("stored transfer amount carries an unrecognised currency %q: %w", currency.String, err)
+		}
+		state.Amount = amount
+	}
 	return state, nil
 }
 
 // toNullableReason maps the port's plain string ("" while in flight) onto
 // the nullable text column migration 02-01 declares.
 func toNullableReason(reason string) any {
-	if reason == "" {
+	return toNullableString(reason)
+}
+
+// toNullableString maps any port-level "" (not-yet-known) string field onto
+// SQL NULL rather than an empty-string literal. This matters beyond mere
+// column hygiene for counterparty_tenant_id specifically: migration 0006
+// gives it a REFERENCES tenants (tenant_id) foreign key, and an empty
+// string is a non-NULL value the FK constraint would check against (and
+// reject, since no tenant is ever named "") — only NULL is exempt from FK
+// validation. Every TransferState this coordinator itself ever creates
+// populates these fields, but callers/fixtures built before migration 0006
+// added them (e.g. transfer_state_test.go's pre-existing fixture) leave
+// them at Go's zero value, which must still round-trip as "unknown", not
+// fail the write outright.
+func toNullableString(value string) any {
+	if value == "" {
 		return nil
 	}
-	return reason
+	return value
 }

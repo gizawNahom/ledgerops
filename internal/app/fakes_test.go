@@ -441,6 +441,22 @@ func (r fakeTransferStateRepository) UpdateStatus(ctx context.Context, transferI
 	return nil
 }
 
+// AdvanceAfterLegOutcome mirrors the real adapter's own combined
+// status/next_attempt_at write (step 02-05) — added alongside the real
+// port's identical addition, mechanical parity only, no new assertion
+// behavior.
+func (r fakeTransferStateRepository) AdvanceAfterLegOutcome(ctx context.Context, transferID string, status string, nextAttemptAt time.Time, reason string) error {
+	state, ok := r.store.transferStates[transferID]
+	if !ok {
+		return fmt.Errorf("fakeTransferStateRepository: unknown transfer %q", transferID)
+	}
+	state.Status = status
+	state.NextAttemptAt = nextAttemptAt
+	state.Reason = reason
+	r.store.transferStates[transferID] = state
+	return nil
+}
+
 func (r fakeTransferStateRepository) ClaimOne(ctx context.Context, transferID string, leaseDuration time.Duration) (ports.TransferState, bool, error) {
 	state, ok := r.store.transferStates[transferID]
 	if !ok {

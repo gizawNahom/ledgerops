@@ -343,8 +343,9 @@ type postTransferRequest struct {
 // Anything else -- including a malformed body, which must still reach
 // postTransferHandler's own malformed_request refusal unchanged -- is
 // forwarded byte-identically to the existing, unmodified handler.
-func postTransferOrCrossTenantHandler(ledger *app.Ledger, metrics *Metrics) http.HandlerFunc {
+func postTransferOrCrossTenantHandler(ledger *app.Ledger, coordinator *app.TransferCoordinator, metrics *Metrics) http.HandlerFunc {
 	fallback := postTransferHandler(ledger, metrics)
+	crossTenant := sendCrossTenantTransferHandler(coordinator)
 	return func(w http.ResponseWriter, r *http.Request) {
 		rawBody, err := io.ReadAll(r.Body)
 		if err != nil {
@@ -361,11 +362,118 @@ func postTransferOrCrossTenantHandler(ledger *app.Ledger, metrics *Metrics) http
 		_ = json.Unmarshal(rawBody, &discriminator)
 		r.Body = io.NopCloser(bytes.NewReader(rawBody))
 		if discriminator.CounterpartyAlias != "" {
-			scaffold("send_cross_tenant_transfer")(w, r)
+			crossTenant(w, r)
 			return
 		}
 		fallback(w, r)
 	}
+}
+
+// sendCrossTenantTransferRequest is the wire shape the cross-tenant variant
+// of POST /transfers accepts -- no "from" field, unlike the existing
+// single-tenant variant (postTransferRequest): the sender's own wallet is
+// discovered by convention (TransferCoordinator.walletAccountID), never
+// named on the wire (brief.md's own illustrative request shape carries
+// none).
+type sendCrossTenantTransferRequest struct {
+	CounterpartyAlias string `json:"counterparty_alias"`
+	Amount            string `json:"amount"`
+}
+
+// sendCrossTenantTransferHandler wires the new discriminated branch of
+// POST /transfers to TransferCoordinator.SendTransfer. The Idempotency-Key
+// header is required, exactly like the existing single-tenant variant
+// (postTransferHandler) -- both are the same header, the same requirement,
+// reused rather than reinvented for the new branch.
+func sendCrossTenantTransferHandler(coordinator *app.TransferCoordinator) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		key := r.Header.Get("Idempotency-Key")
+		if key == "" {
+			writeRefusal(w, r, http.StatusBadRequest, "missing_idempotency_key", nil)
+			return
+		}
+
+		decoder := json.NewDecoder(r.Body)
+		decoder.DisallowUnknownFields()
+		var body sendCrossTenantTransferRequest
+		if err := decoder.Decode(&body); err != nil {
+			writeRefusal(w, r, http.StatusBadRequest, "malformed_request", nil)
+			return
+		}
+		if body.CounterpartyAlias == "" || body.Amount == "" {
+			writeRefusal(w, r, http.StatusBadRequest, "malformed_request", nil)
+			return
+		}
+
+		amount, err := parseAmount(body.Amount)
+		if err != nil {
+			if errors.Is(err, errAmountNotLexicallyANumber) {
+				writeRefusal(w, r, http.StatusBadRequest, "malformed_request", nil)
+				return
+			}
+			writeDomainError(w, r, err)
+			return
+		}
+
+		scope, _ := TenantScopeFromContext(r.Context())
+		tenantID, _ := scope.Resolve()
+
+		fingerprint := fingerprintCrossTenantTransfer(body.CounterpartyAlias, amount)
+		view, err := coordinator.SendTransfer(r.Context(), tenantID, body.CounterpartyAlias, amount, key, fingerprint)
+		if err != nil {
+			writeDomainError(w, r, err)
+			return
+		}
+
+		writeJSON(w, http.StatusAccepted, transferViewAnswer(view, false))
+	}
+}
+
+// getTransferHandler reads the coordinator's own progress row through
+// TransferCoordinator.GetTransfer -- functional today (slice 02), the
+// dual-party authorization hardening (US-5, requireTransferParty) is a
+// later step's job (§ router.go's own comment on this route group).
+func getTransferHandler(coordinator *app.TransferCoordinator) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		transferID := chi.URLParam(r, "transfer_id")
+
+		view, err := coordinator.GetTransfer(r.Context(), transferID)
+		if err != nil {
+			if errors.Is(err, app.ErrTransferNotFound) {
+				writeRefusal(w, r, http.StatusNotFound, "transfer_not_found", nil)
+				return
+			}
+			writeDomainError(w, r, err)
+			return
+		}
+
+		writeJSON(w, http.StatusOK, transferViewAnswer(view, true))
+	}
+}
+
+// transferViewAnswer renders an app.TransferView onto the wire. allLegs
+// distinguishes the two callers' contracts: SendTransfer's own response
+// reports only leg1 (the sync/async contract -- never settled, never
+// leg2/leg3, on the POST response itself), while GetTransfer's reports all
+// three.
+func transferViewAnswer(view app.TransferView, allLegs bool) map[string]any {
+	body := map[string]any{
+		"transfer_id": view.TransferID,
+		"status":      view.Status,
+		"leg1":        legViewWire(view.Leg1),
+	}
+	if view.Reason != "" {
+		body["reason"] = view.Reason
+	}
+	if allLegs {
+		body["leg2"] = legViewWire(view.Leg2)
+		body["leg3"] = legViewWire(view.Leg3)
+	}
+	return body
+}
+
+func legViewWire(leg app.LegView) map[string]any {
+	return map[string]any{"status": leg.Status}
 }
 
 func postTransferHandler(ledger *app.Ledger, metrics *Metrics) http.HandlerFunc {
@@ -501,6 +609,14 @@ func hashIdempotencyKey(key string) string {
 // spelled.
 func fingerprintTransfer(from, to string, amount domain.Money) string {
 	return fmt.Sprintf("%s|%s|%d|%s", from, to, amount.MinorUnits(), amount.Currency())
+}
+
+// fingerprintCrossTenantTransfer mirrors fingerprintTransfer's own shape
+// (parsed command, not raw request bytes -- DDD-8) for the cross-tenant
+// variant's own request identity: alias plus parsed amount, since this
+// variant's wire body never names a from/to account pair.
+func fingerprintCrossTenantTransfer(alias string, amount domain.Money) string {
+	return fmt.Sprintf("%s|%d|%s", alias, amount.MinorUnits(), amount.Currency())
 }
 
 func transferAnswer(result app.Result) map[string]any {

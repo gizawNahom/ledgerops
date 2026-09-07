@@ -310,6 +310,17 @@ type TransferState struct {
 	Leg3Attempts   int
 	NextAttemptAt  time.Time
 	Reason         string
+
+	// CounterpartyTenantID, TargetAccountID, and Amount are what attemptLeg
+	// needs to rediscover Leg 2/3's own From/To accounts and movement amount
+	// from nothing but a transfer_id (step 02-05, migration 0006) — the
+	// receiving side of the transfer that Create's caller (SendTransfer)
+	// already resolved once, via domain.ResolveCounterparty, and persists
+	// here so a later, context-free caller (the retry ticker, step 03-02)
+	// never re-resolves it.
+	CounterpartyTenantID string
+	TargetAccountID      string
+	Amount               domain.Money
 }
 
 // TransferStateRepository reads and writes the coordinator's own progress
@@ -348,6 +359,16 @@ type TransferStateRepository interface {
 	// caller today updates a transfer this repository did not itself
 	// Create first.
 	UpdateStatus(ctx context.Context, transferID string, status string, reason string) error
+
+	// AdvanceAfterLegOutcome is attemptLeg's own "second write" (brief.md §
+	// Retry and reversal mechanics: "a second write... that sets
+	// next_attempt_at down from the lease to the real backoff target"),
+	// always overwriting ClaimOne's own transient lease-extension in every
+	// non-crash path — status and next_attempt_at move together, in one
+	// write, because they describe the SAME outcome (this attempt's result)
+	// rather than two independent facts. Naming a transfer_id absent from
+	// the table is an infrastructure error, mirroring UpdateStatus.
+	AdvanceAfterLegOutcome(ctx context.Context, transferID string, status string, nextAttemptAt time.Time, reason string) error
 
 	// ClaimOne is the only claim-granting call (ADR-015 Amendment 2's own
 	// doc-comment guidance): a transaction-scoped, atomic single-row claim
