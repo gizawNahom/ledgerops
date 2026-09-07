@@ -7,8 +7,10 @@ import (
 	"net/http"
 	"net/url"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/testcontainers/testcontainers-go"
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
@@ -70,21 +72,199 @@ func (l *Ledger) FixNextIdentifier(id string) {
 }
 
 // --- containers ------------------------------------------------------------
+//
+// One PostgreSQL 16 instance per test binary, not per scenario. Booting the
+// container and migrating from zero costs ~2.5s and now happens once; each
+// scenario then gets its own database cloned off the migrated template,
+// which is a file copy inside the already-running instance and costs a small
+// fraction of that.
+//
+// Isolation is unchanged, which is what makes this safe: a freshly cloned
+// database inherits nothing from a prior scenario, so `contended` and
+// `corrupted` still hold structurally and corrupt-04 cannot pass on leftover
+// drift. A shared *database* would have broken that; a per-scenario database
+// does not. No pooler sits in front of a clone either.
+//
+// The template is the "ledgerops" database the container is created with,
+// and nothing may connect to it after migration: CREATE DATABASE ... TEMPLATE
+// is refused while any session is attached. That name is also load-bearing
+// in the other direction — migration 0001's GRANT CONNECT names the database
+// literally, so "ledgerops" is the only name the migration set may be run
+// against, which is why StartWithoutSchema keeps a dedicated container
+// rather than cloning.
+
+const templateDatabase = "ledgerops"
+
+var (
+	sharedOnce      sync.Once
+	sharedContainer testcontainers.Container
+	// sharedAdminDSN is privileged and points at the "postgres" maintenance
+	// database, since CREATE/DROP DATABASE must be issued from outside the
+	// database being created or dropped.
+	sharedAdminDSN string
+	sharedErr      error
+
+	cloneSeq atomic.Uint64
+)
+
+// sharedPostgres boots the instance and migrates the template exactly once
+// per test binary, and hands back the maintenance DSN every later clone is
+// created through.
+func sharedPostgres(ctx context.Context) (string, error) {
+	sharedOnce.Do(func() {
+		// The application DSN is discarded here: nothing connects to the
+		// template as the app role, and every clone derives its own.
+		container, _, privilegedDSN, err := startPostgres(ctx)
+		if err != nil {
+			sharedErr = fmt.Errorf("bringing up PostgreSQL 16: %w", err)
+			return
+		}
+		sharedContainer = container
+
+		if err := postgres.Migrate(ctx, privilegedDSN); err != nil {
+			sharedErr = fmt.Errorf("migrating the template from zero: %w", err)
+			return
+		}
+		adminDSN, err := withDatabase(privilegedDSN, "postgres")
+		if err != nil {
+			sharedErr = err
+			return
+		}
+		// golang-migrate closes its pool on the way out, but CREATE DATABASE
+		// ... TEMPLATE fails outright if even one session is still attached,
+		// so evict whatever may be lingering rather than racing it.
+		if err := evictSessions(ctx, adminDSN, templateDatabase); err != nil {
+			sharedErr = err
+			return
+		}
+		sharedAdminDSN = adminDSN
+	})
+	return sharedAdminDSN, sharedErr
+}
+
+// cloneMigratedDatabase gives one scenario its own database, copied from the
+// already-migrated template, and returns the application and privileged DSNs
+// against it (OPS-10).
+func cloneMigratedDatabase(ctx context.Context) (database string, appDSN string, privilegedDSN string, err error) {
+	adminDSN, err := sharedPostgres(ctx)
+	if err != nil {
+		return "", "", "", err
+	}
+
+	database = fmt.Sprintf("ledgerops_s%d", cloneSeq.Add(1))
+	conn, err := pgx.Connect(ctx, adminDSN)
+	if err != nil {
+		return "", "", "", fmt.Errorf("connecting to the maintenance database: %w", err)
+	}
+	defer conn.Close(context.Background())
+
+	if _, err := conn.Exec(ctx, `CREATE DATABASE "`+database+`" TEMPLATE "`+templateDatabase+`"`); err != nil {
+		return "", "", "", fmt.Errorf("cloning the migrated template into %q: %w", database, err)
+	}
+	// Schema and table grants travel inside the copied catalog, but
+	// database-level ACLs live in pg_database and are NOT copied by CREATE
+	// DATABASE — migration 0001's GRANT CONNECT named the template, so the
+	// clone needs its own. Granting it explicitly rather than leaning on
+	// PUBLIC's default CONNECT keeps the privilege wall (OPS-10) real here
+	// instead of incidental.
+	if _, err := conn.Exec(ctx, `GRANT CONNECT ON DATABASE "`+database+`" TO ledgerops_app`); err != nil {
+		return "", "", "", fmt.Errorf("granting CONNECT on %q to ledgerops_app: %w", database, err)
+	}
+
+	privilegedDSN, err = withDatabase(adminDSN, database)
+	if err != nil {
+		return "", "", "", err
+	}
+	appDSN, err = asApplicationRole(privilegedDSN)
+	if err != nil {
+		return "", "", "", err
+	}
+	return database, appDSN, privilegedDSN, nil
+}
+
+// dropDatabase releases one scenario's database. Best-effort: a clone that
+// outlives its scenario costs disk inside a container that is about to be
+// terminated anyway, so a failure here must never fail the scenario.
+func dropDatabase(database string) {
+	if database == "" || sharedAdminDSN == "" {
+		return
+	}
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, sharedAdminDSN)
+	if err != nil {
+		return
+	}
+	defer conn.Close(ctx)
+	// WITH (FORCE) (PostgreSQL 13+) evicts any session still attached rather
+	// than failing the drop on it.
+	_, _ = conn.Exec(ctx, `DROP DATABASE IF EXISTS "`+database+`" WITH (FORCE)`)
+}
+
+// ShutdownPostgres terminates the shared instance. Called from the suite's
+// AfterSuite hook — the container outlives every individual scenario. The
+// dedicated containers StartWithoutSchema brings up are not its business;
+// each scenario's own Close terminates those.
+func ShutdownPostgres() {
+	if sharedContainer != nil {
+		_ = sharedContainer.Terminate(context.Background())
+		sharedContainer = nil
+	}
+}
+
+// evictSessions disconnects everything attached to a database, so it can be
+// used as a CREATE DATABASE template or dropped.
+func evictSessions(ctx context.Context, adminDSN, database string) error {
+	conn, err := pgx.Connect(ctx, adminDSN)
+	if err != nil {
+		return fmt.Errorf("connecting to the maintenance database: %w", err)
+	}
+	defer conn.Close(context.Background())
+
+	if _, err := conn.Exec(ctx,
+		`SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+		  WHERE datname = $1 AND pid <> pg_backend_pid()`, database); err != nil {
+		return fmt.Errorf("evicting sessions from %q: %w", database, err)
+	}
+	return nil
+}
+
+// withDatabase repoints a DSN at another database on the same instance.
+func withDatabase(dsn, database string) (string, error) {
+	parsed, err := url.Parse(dsn)
+	if err != nil {
+		return "", fmt.Errorf("parsing the DSN: %w", err)
+	}
+	parsed.Path = "/" + database
+	return parsed.String(), nil
+}
+
+// asApplicationRole swaps a privileged DSN's credentials for the
+// application role's, which is the only role the service ever connects as
+// (OPS-10).
+func asApplicationRole(privilegedDSN string) (string, error) {
+	parsed, err := url.Parse(privilegedDSN)
+	if err != nil {
+		return "", fmt.Errorf("parsing the privileged DSN: %w", err)
+	}
+	parsed.User = url.UserPassword("ledgerops_app", "app-secret")
+	return parsed.String(), nil
+}
 
 var containerMu sync.Mutex
 
-// startPostgres brings up PostgreSQL 16 per test package via Testcontainers
-// (OPS-11) and returns the application and privileged DSNs (OPS-10). A fresh
-// instance per package satisfies the `contended` and `corrupted` preconditions
-// structurally: nothing is inherited from a prior test and no pooler can sit in
-// front of it.
+// startPostgres brings up a DEDICATED, unmigrated PostgreSQL 16 via
+// Testcontainers (OPS-11) and returns the application and privileged DSNs
+// (OPS-10). Two callers: sharedPostgres above, which migrates the result
+// once and turns it into the template every scenario clones; and
+// StartWithoutSchema, the one scenario that must run the migration set for
+// real against a database named "ledgerops" (see its doc comment).
 func startPostgres(ctx context.Context) (container testcontainers.Container, appDSN string, privilegedDSN string, err error) {
 	containerMu.Lock()
 	defer containerMu.Unlock()
 
 	started, err := tcpostgres.Run(ctx,
 		"postgres:16",
-		tcpostgres.WithDatabase("ledgerops"),
+		tcpostgres.WithDatabase(templateDatabase),
 		tcpostgres.WithUsername("ledgerops_migrate"),
 		tcpostgres.WithPassword("migrate-secret"),
 		testcontainers.WithWaitStrategy(

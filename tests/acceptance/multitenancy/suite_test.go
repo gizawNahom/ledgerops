@@ -50,9 +50,14 @@ func TestMain(m *testing.M) {
 
 func InitializeTestSuite(ctx *godog.TestSuiteContext) {
 	ctx.BeforeSuite(func() {
-		// Nothing global: containers are per-scenario (OPS-11 precedent) so
-		// the two-tenant environment inherits no state from a prior test.
-		// Each scenario's own After hook terminates the ones it started.
+		// The PostgreSQL instance is shared per test binary and booted
+		// lazily by the first scenario that needs it; isolation comes from
+		// each scenario cloning its own database off the migrated template,
+		// so the two-tenant environment still inherits no state from a prior
+		// test (OPS-11). See world.go § containers.
+	})
+	ctx.AfterSuite(func() {
+		ShutdownPostgres()
 	})
 }
 

@@ -59,10 +59,15 @@ func TestMain(m *testing.M) {
 
 func InitializeTestSuite(ctx *godog.TestSuiteContext) {
 	ctx.BeforeSuite(func() {
-		// Nothing global: containers are per-scenario so that `contended` and
-		// `corrupted` inherit no state from a prior test (OPS-11). A shared
-		// container would make corrupt-04 pass on leftover drift. Each
-		// scenario's own After hook terminates the ones it started.
+		// The PostgreSQL instance is shared per test binary and booted
+		// lazily by the first scenario that needs it. Isolation still comes
+		// from each scenario getting its own DATABASE, cloned off the
+		// migrated template, so `contended` and `corrupted` inherit no state
+		// from a prior test (OPS-11) and corrupt-04 cannot pass on leftover
+		// drift. See ledger_observations.go § containers.
+	})
+	ctx.AfterSuite(func() {
+		ShutdownPostgres()
 	})
 }
 

@@ -65,11 +65,18 @@ type Ledger struct {
 	server *httptest.Server
 	client *http.Client
 
-	// Every container this Ledger started, so Close can terminate them. A
-	// slice rather than one handle because a scenario whose Given steps
-	// start the store more than once (StartAgainstEmptyStore and
-	// StartWithoutSchema are both unguarded) would otherwise orphan the
-	// earlier container with no handle left to release it.
+	// database is this scenario's own clone of the migrated template, and
+	// store is the pool opened against it. Close drops the one and closes
+	// the other; the shared PostgreSQL instance outlives every scenario
+	// (see ledger_observations.go § containers).
+	database string
+	store    ports.Store
+
+	// containers holds only the DEDICATED instances StartWithoutSchema
+	// brings up — the one scenario that migrates from zero cannot use a
+	// clone, because migration 0001's GRANT CONNECT names the "ledgerops"
+	// database literally. A slice because StartWithoutSchema is unguarded,
+	// so a scenario calling it twice would otherwise orphan the first.
 	containers []testcontainers.Container
 
 	// Two DSNs, never one (OPS-10). The suite acts as the application role;
@@ -129,21 +136,26 @@ type Ledger struct {
 // schema from zero as the privileged role, and serves the production router
 // over a real socket as the application role.
 func (l *Ledger) StartAgainstEmptyStore(ctx context.Context) error {
-	container, appDSN, privilegedDSN, err := startPostgres(ctx)
+	database, appDSN, privilegedDSN, err := cloneMigratedDatabase(ctx)
 	if err != nil {
 		return fmt.Errorf("bringing up PostgreSQL 16: %w", err)
 	}
-	l.containers = append(l.containers, container)
+	l.database = database
 	l.appDSN, l.privilegedDSN = appDSN, privilegedDSN
-
-	if err := postgres.Migrate(ctx, privilegedDSN); err != nil {
-		return fmt.Errorf("migrating from zero: %w", err)
-	}
 	return l.serve(ctx)
 }
 
 // StartWithoutSchema brings up the container and deliberately does not migrate,
 // so a scenario can assert that the schema builds from nothing.
+//
+// This is the one path that still pays for a DEDICATED container rather than
+// cloning the shared instance's template, and it has to: the scenario's whole
+// point is running the migration set for real, and migration 0001's
+// GRANT CONNECT names the "ledgerops" database literally. Migrating into a
+// clone called "ledgerops_s42" would grant CONNECT on the template instead
+// and only appear to work, because PUBLIC holds CONNECT on a new database by
+// default — an accidental pass rather than a proof. One scenario reaches
+// here, so it costs one container boot.
 func (l *Ledger) StartWithoutSchema(ctx context.Context) error {
 	container, appDSN, privilegedDSN, err := startPostgres(ctx)
 	if err != nil {
@@ -155,10 +167,18 @@ func (l *Ledger) StartWithoutSchema(ctx context.Context) error {
 }
 
 func (l *Ledger) serve(ctx context.Context) error {
+	// Closing any pool a previous serve() opened. Restart below is Stop()
+	// followed by serve(), so without this every restart would stack a
+	// second pool on the same store rather than replace the first.
+	if l.store != nil {
+		_ = l.store.Close()
+		l.store = nil
+	}
 	store, err := postgres.Open(ctx, l.appDSN)
 	if err != nil {
 		return fmt.Errorf("opening the store as the application role: %w", err)
 	}
+	l.store = store
 	if l.logs == nil {
 		l.logs = newLogCapture()
 	}
@@ -248,18 +268,23 @@ func (l *Ledger) Stop() {
 	}
 }
 
-// Close is the scenario-teardown entry point: it releases the server AND
-// terminates every container this Ledger started. Without it the containers
-// survive until the test binary exits and Ryuk reaps them, so a package's
-// worth of scenarios holds every PostgreSQL instance it ever started
-// resident at once — ~30 MiB each, which is what made a full local run
-// exhaust memory rather than merely take a while.
+// Close is the scenario-teardown entry point: it releases the server, closes
+// the pool, drops this scenario's cloned database, and terminates any
+// dedicated container StartWithoutSchema brought up. The SHARED PostgreSQL
+// instance is not touched here — it outlives every scenario and is released
+// by ShutdownPostgres from the suite's AfterSuite hook.
 //
-// Termination runs on context.Background(), not the scenario's context: a
+// Teardown runs on context.Background(), not the scenario's context: a
 // failing or timed-out scenario arrives here with a cancelled context, and
-// that is precisely when the container most needs releasing.
+// that is precisely when its resources most need releasing.
 func (l *Ledger) Close() {
 	l.Stop()
+	if l.store != nil {
+		_ = l.store.Close()
+		l.store = nil
+	}
+	dropDatabase(l.database)
+	l.database = ""
 	for _, container := range l.containers {
 		_ = container.Terminate(context.Background())
 	}
