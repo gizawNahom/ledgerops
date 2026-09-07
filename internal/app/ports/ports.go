@@ -39,12 +39,20 @@ type IDGenerator func() string
 // of step 01-03 (inter-tenant-transfer): AuthorizeTenantPair's I11 courtesy
 // check (read the active link for a pair, decide via the pure domain
 // constructor, write) needs that same atomicity, one aggregate over again.
+// CounterpartyAliases() and TransferStates() join the other five as of step
+// 02-03 (inter-tenant-transfer): RegisterCounterpartyAlias's own read-then-
+// decide-then-write shape needs the same atomicity one aggregate over
+// again, and the coordinator's own progress row (transfer_state) is written
+// inside the same unit of work as the leg it is tracking, never a separate
+// connection.
 type UnitOfWork interface {
 	Accounts() AccountRepository
 	Transactions() TransactionRepository
 	Idempotency() IdempotencyStore
 	Tenants() TenantRepository
 	TenantLinks() TenantLinkRepository
+	CounterpartyAliases() CounterpartyAliasRepository
+	TransferStates() TransferStateRepository
 	Commit(ctx context.Context) error
 	Rollback(ctx context.Context) error
 }
@@ -248,3 +256,120 @@ type TenantLinkRepository interface {
 // case; this step declares the type and implements its PostgreSQL-backed
 // resolver, nothing more.
 type TenantKeyResolver func(ctx context.Context, credentialHash string) (tenantID string, ok bool, err error)
+
+// CounterpartyAliasRepository reads and writes tenant-scoped counterparty
+// alias registrations inside the same unit of work as
+// RegisterCounterpartyAlias's read-then-decide-then-write shape — the same
+// atomic shape TenantLinkRepository already gives AuthorizeTenantPair one
+// aggregate over (DDD-26 reuse), mirrored deliberately rather than given a
+// new persistence idiom.
+type CounterpartyAliasRepository interface {
+	// Create persists a newly registered alias. tenant_id/alias/
+	// tenant_link_id/target_tenant_id/target_account_id all arrive already
+	// decided by the pure domain.RegisterCounterpartyAlias constructor
+	// before this is ever called — the adapter stores them exactly as
+	// handed, transforming nothing (mirrors tenant_links.go's own division
+	// of labor). The composite (tenant_id, alias) primary key (migration
+	// 02-01) is the final backstop under concurrency for the
+	// application-level read-then-refuse courtesy check this port's caller
+	// performs first.
+	Create(ctx context.Context, alias domain.CounterpartyAlias) error
+
+	// ByTenantAndAlias reads a registered alias within its owning tenant's
+	// own namespace, without locking. An absent (tenant_id, alias) pair
+	// answers (zero value, false, nil) — mirrors
+	// TenantLinkRepository.ActiveByPair's own (value, found, error) shape:
+	// the expected shape of "no", not an error. Used both by
+	// RegisterCounterpartyAlias's own uniqueness courtesy check and by
+	// ResolveCounterparty's lookup.
+	ByTenantAndAlias(ctx context.Context, tenantID, alias string) (domain.CounterpartyAlias, bool, error)
+}
+
+// TransferState is the coordinator's own read-model/progress-tracker row
+// (ADR-015 / ADR-015 Amendment 2) — one row per transfer_id, persisted
+// exclusively through TransferStateRepository. It is deliberately NOT a
+// domain.Transfer: Transfer is not a domain aggregate (ADR-014), so this
+// type lives here, in the port's own vocabulary, exactly as Claim already
+// does for IdempotencyStore one port above.
+//
+// next_attempt_at is never the zero time once a row exists — ADR-015
+// Amendment requires it set explicitly at creation, which is what makes a
+// row due-for-claim from the instant it is created rather than only once it
+// reaches a "retrying" label (migration 02-01's own comment on the same
+// column).
+type TransferState struct {
+	TransferID     string
+	TenantID       string
+	IdempotencyKey string
+	Status         string
+	Leg1Status     string
+	Leg2Status     string
+	Leg3Status     string
+	Leg1Attempts   int
+	Leg2Attempts   int
+	Leg3Attempts   int
+	NextAttemptAt  time.Time
+	Reason         string
+}
+
+// TransferStateRepository reads and writes the coordinator's own progress
+// row inside the same unit of work as the leg attempt it is tracking.
+//
+// Read and write are deliberately split per Core Principle 12: Get is the
+// read-only surface GetTransfer (a later step) drives — it exposes no write
+// method of its own, so a driving adapter reachable only through Get cannot
+// mutate coordinator state by construction. ClaimOne is the only
+// claim-granting operation (ADR-015 Amendment 2): both the inline
+// (goroutine) and ticker-driven retry paths converge on it, so the
+// concurrency-safety property ("exactly one caller ever wins a given
+// row's claim") lives in exactly one place rather than being re-proven
+// per caller.
+type TransferStateRepository interface {
+	// Create inserts the initial row. next_attempt_at must already be set
+	// by the caller (ADR-015 Amendment) — this port performs no defaulting
+	// of its own, mirroring how AccountRepository.Create stores a caller-
+	// supplied domain.Account exactly as handed.
+	Create(ctx context.Context, state TransferState) error
+
+	// Get is the read-only driving surface for GetTransfer (a later step).
+	// An absent transfer_id answers (zero value, false, nil) — the expected
+	// shape of "no", not an error, mirroring
+	// TenantLinkRepository.ActiveByPair's own contract. This method
+	// performs no locking and offers no companion write — Core Principle
+	// 12's split lives at the port-signature level, not merely in caller
+	// discipline.
+	Get(ctx context.Context, transferID string) (TransferState, bool, error)
+
+	// UpdateStatus transitions the named transfer's top-level status (and
+	// records or clears its terminal-state reason) in place — the
+	// coordinator's own lifecycle write, distinct from ClaimOne's lease
+	// extension. Naming a transfer_id absent from the table is an
+	// infrastructure error (no matching row), not a domain refusal — no
+	// caller today updates a transfer this repository did not itself
+	// Create first.
+	UpdateStatus(ctx context.Context, transferID string, status string, reason string) error
+
+	// ClaimOne is the only claim-granting call (ADR-015 Amendment 2's own
+	// doc-comment guidance): a transaction-scoped, atomic single-row claim
+	// on the named transfer_id. If the row exists, its status is one of
+	// "pending"/"retrying", and its next_attempt_at has already passed,
+	// this extends next_attempt_at by leaseDuration and returns the
+	// updated row with ok=true. Otherwise — row absent, wrong status, not
+	// yet due, or a concurrent caller's own ClaimOne on the identical row
+	// is holding the lock and has already won — this returns
+	// (zero value, false, nil). A losing claim race is a normal, expected
+	// outcome, never an error: ok=false means the caller (attemptLeg)
+	// returns immediately without attempting anything, exactly as if it
+	// had never been scheduled this tick.
+	ClaimOne(ctx context.Context, transferID string, leaseDuration time.Duration) (TransferState, bool, error)
+
+	// ClaimDue is read-only discovery, never a claim and never a write —
+	// that split is what makes the whole scheme race-free (ADR-015
+	// Amendment 2, "ClaimDue split and batch-capped"): both the inline
+	// goroutine and the ticker's dispatch loop discover candidates here,
+	// then converge on ClaimOne's own atomicity regardless of how a row
+	// was found. Returns due transfer_ids — status IN ('pending',
+	// 'retrying') AND next_attempt_at <= now — ordered oldest-due-first,
+	// capped at batchLimit rows.
+	ClaimDue(ctx context.Context, now time.Time, batchLimit int) ([]string, error)
+}

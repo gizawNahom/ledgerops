@@ -207,6 +207,20 @@ func (u *unitOfWork) TenantLinks() ports.TenantLinkRepository {
 	return tenantLinkRepository{tx: u.tx}
 }
 
+// CounterpartyAliases and TransferStates are real as of step 02-03
+// (inter-tenant-transfer): both share this unit of work's *pgx.Tx exactly
+// like the other five repositories, which is what makes
+// RegisterCounterpartyAlias's own read-then-create atomic and what lets
+// ClaimOne extend a lease inside the same transaction it locked the row
+// under.
+func (u *unitOfWork) CounterpartyAliases() ports.CounterpartyAliasRepository {
+	return counterpartyAliasRepository{tx: u.tx}
+}
+
+func (u *unitOfWork) TransferStates() ports.TransferStateRepository {
+	return transferStateRepository{tx: u.tx}
+}
+
 // Commit and Rollback are idiomatic pgx.Tx passthroughs. A commit or
 // rollback attempted twice (e.g. Commit succeeding, then a deferred Rollback
 // firing anyway) is left to pgx's own error, which callers treat as

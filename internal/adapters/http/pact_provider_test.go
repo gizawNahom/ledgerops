@@ -275,21 +275,25 @@ func sequentialTransactionIDs() func() string {
 // is not importable from here.
 
 type pactFakeStore struct {
-	accounts    map[string]domain.Account
-	postings    map[string]domain.Posting
-	entries     []domain.Entry
-	claims      map[string]ports.Claim
-	tenants     map[string]domain.Tenant
-	tenantLinks map[string]domain.TenantLink
+	accounts          map[string]domain.Account
+	postings          map[string]domain.Posting
+	entries           []domain.Entry
+	claims            map[string]ports.Claim
+	tenants           map[string]domain.Tenant
+	tenantLinks       map[string]domain.TenantLink
+	counterpartyAlias map[string]domain.CounterpartyAlias
+	transferStates    map[string]ports.TransferState
 }
 
 func newPactFakeStore() *pactFakeStore {
 	return &pactFakeStore{
-		accounts:    map[string]domain.Account{},
-		postings:    map[string]domain.Posting{},
-		claims:      map[string]ports.Claim{},
-		tenants:     map[string]domain.Tenant{},
-		tenantLinks: map[string]domain.TenantLink{},
+		accounts:          map[string]domain.Account{},
+		postings:          map[string]domain.Posting{},
+		claims:            map[string]ports.Claim{},
+		tenants:           map[string]domain.Tenant{},
+		tenantLinks:       map[string]domain.TenantLink{},
+		counterpartyAlias: map[string]domain.CounterpartyAlias{},
+		transferStates:    map[string]ports.TransferState{},
 	}
 }
 
@@ -333,6 +337,18 @@ func (u *pactFakeUnitOfWork) Tenants() ports.TenantRepository {
 }
 func (u *pactFakeUnitOfWork) TenantLinks() ports.TenantLinkRepository {
 	return pactFakeTenantLinkRepository{u.store}
+}
+
+// CounterpartyAliases and TransferStates joined the other pact fakes as of
+// step 02-03 (inter-tenant-transfer) — same reason
+// pactFakeTenantLinkRepository joined at step 01-03: no pact interaction in
+// this suite exercises either port today, but ports.UnitOfWork now
+// requires both of every implementer.
+func (u *pactFakeUnitOfWork) CounterpartyAliases() ports.CounterpartyAliasRepository {
+	return pactFakeCounterpartyAliasRepository{u.store}
+}
+func (u *pactFakeUnitOfWork) TransferStates() ports.TransferStateRepository {
+	return pactFakeTransferStateRepository{u.store}
 }
 func (u *pactFakeUnitOfWork) Commit(ctx context.Context) error   { return nil }
 func (u *pactFakeUnitOfWork) Rollback(ctx context.Context) error { return nil }
@@ -576,4 +592,76 @@ func (r pactFakeTenantLinkRepository) Revoke(ctx context.Context, linkID string)
 	}
 	r.store.tenantLinks[linkID] = revoked
 	return nil
+}
+
+// pactFakeCounterpartyAliasRepository and pactFakeTransferStateRepository
+// joined the other pact fakes as of step 02-03 (inter-tenant-transfer) —
+// same reason pactFakeTenantLinkRepository joined at step 01-03: no pact
+// interaction in this suite exercises either port today, but
+// ports.UnitOfWork now requires both of every implementer.
+type pactFakeCounterpartyAliasRepository struct{ store *pactFakeStore }
+
+var _ ports.CounterpartyAliasRepository = pactFakeCounterpartyAliasRepository{}
+
+func (r pactFakeCounterpartyAliasRepository) Create(ctx context.Context, alias domain.CounterpartyAlias) error {
+	r.store.counterpartyAlias[alias.TenantID()+"\x00"+alias.Alias()] = alias
+	return nil
+}
+
+func (r pactFakeCounterpartyAliasRepository) ByTenantAndAlias(ctx context.Context, tenantID, alias string) (domain.CounterpartyAlias, bool, error) {
+	got, ok := r.store.counterpartyAlias[tenantID+"\x00"+alias]
+	return got, ok, nil
+}
+
+type pactFakeTransferStateRepository struct{ store *pactFakeStore }
+
+var _ ports.TransferStateRepository = pactFakeTransferStateRepository{}
+
+func (r pactFakeTransferStateRepository) Create(ctx context.Context, state ports.TransferState) error {
+	r.store.transferStates[state.TransferID] = state
+	return nil
+}
+
+func (r pactFakeTransferStateRepository) Get(ctx context.Context, transferID string) (ports.TransferState, bool, error) {
+	state, ok := r.store.transferStates[transferID]
+	return state, ok, nil
+}
+
+func (r pactFakeTransferStateRepository) UpdateStatus(ctx context.Context, transferID string, status string, reason string) error {
+	state, ok := r.store.transferStates[transferID]
+	if !ok {
+		return fmt.Errorf("pactFakeTransferStateRepository: unknown transfer %q", transferID)
+	}
+	state.Status = status
+	state.Reason = reason
+	r.store.transferStates[transferID] = state
+	return nil
+}
+
+func (r pactFakeTransferStateRepository) ClaimOne(ctx context.Context, transferID string, leaseDuration time.Duration) (ports.TransferState, bool, error) {
+	state, ok := r.store.transferStates[transferID]
+	if !ok {
+		return ports.TransferState{}, false, nil
+	}
+	dueStatus := state.Status == "pending" || state.Status == "retrying"
+	if !dueStatus || state.NextAttemptAt.After(time.Now().UTC()) {
+		return ports.TransferState{}, false, nil
+	}
+	state.NextAttemptAt = time.Now().UTC().Add(leaseDuration)
+	r.store.transferStates[transferID] = state
+	return state, true, nil
+}
+
+func (r pactFakeTransferStateRepository) ClaimDue(ctx context.Context, now time.Time, batchLimit int) ([]string, error) {
+	var due []string
+	for id, state := range r.store.transferStates {
+		dueStatus := state.Status == "pending" || state.Status == "retrying"
+		if dueStatus && !state.NextAttemptAt.After(now) {
+			due = append(due, id)
+		}
+		if len(due) == batchLimit {
+			break
+		}
+	}
+	return due, nil
 }

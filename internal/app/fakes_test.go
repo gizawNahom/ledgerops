@@ -16,6 +16,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"time"
 
 	"ledgerops/internal/app/ports"
 	"ledgerops/internal/domain"
@@ -26,13 +27,15 @@ import (
 // iterations — so before/after snapshots are never contaminated by a prior
 // draw.
 type fakeStore struct {
-	accounts  map[string]domain.Account
-	postings  map[string]domain.Posting
-	entries   []domain.Entry
-	claims      map[string]ports.Claim
-	tenants     map[string]domain.Tenant
-	tenantLinks map[string]domain.TenantLink
-	committed   bool
+	accounts          map[string]domain.Account
+	postings          map[string]domain.Posting
+	entries           []domain.Entry
+	claims            map[string]ports.Claim
+	tenants           map[string]domain.Tenant
+	tenantLinks       map[string]domain.TenantLink
+	counterpartyAlias map[string]domain.CounterpartyAlias
+	transferStates    map[string]ports.TransferState
+	committed         bool
 
 	// scanAttempted and lastScope are spies for step 03-01's VerifyBooks
 	// wiring: scanAttempted proves the tenant_not_found refusal path never
@@ -54,11 +57,13 @@ func newFakeStore(accounts ...domain.Account) *fakeStore {
 		byID[account.ID()] = account
 	}
 	return &fakeStore{
-		accounts:    byID,
-		postings:    map[string]domain.Posting{},
-		claims:      map[string]ports.Claim{},
-		tenants:     map[string]domain.Tenant{},
-		tenantLinks: map[string]domain.TenantLink{},
+		accounts:          byID,
+		postings:          map[string]domain.Posting{},
+		claims:            map[string]ports.Claim{},
+		tenants:           map[string]domain.Tenant{},
+		tenantLinks:       map[string]domain.TenantLink{},
+		counterpartyAlias: map[string]domain.CounterpartyAlias{},
+		transferStates:    map[string]ports.TransferState{},
 	}
 }
 
@@ -81,6 +86,18 @@ func (u *fakeUnitOfWork) Idempotency() ports.IdempotencyStore { return fakeIdemp
 func (u *fakeUnitOfWork) Tenants() ports.TenantRepository     { return fakeTenantRepository{u.store} }
 func (u *fakeUnitOfWork) TenantLinks() ports.TenantLinkRepository {
 	return fakeTenantLinkRepository{u.store}
+}
+
+// CounterpartyAliases and TransferStates joined the other fakes as of step
+// 02-03 (inter-tenant-transfer): ports.UnitOfWork now requires both of
+// every implementer, this fake included — same reason
+// fakeTenantLinkRepository joined at step 01-03.
+func (u *fakeUnitOfWork) CounterpartyAliases() ports.CounterpartyAliasRepository {
+	return fakeCounterpartyAliasRepository{u.store}
+}
+
+func (u *fakeUnitOfWork) TransferStates() ports.TransferStateRepository {
+	return fakeTransferStateRepository{u.store}
 }
 
 func (u *fakeUnitOfWork) Commit(ctx context.Context) error {
@@ -362,4 +379,101 @@ func (r fakeTenantLinkRepository) Revoke(ctx context.Context, linkID string) err
 	}
 	r.store.tenantLinks[linkID] = revoked
 	return nil
+}
+
+// fakeCounterpartyAliasRepository joined the other fakes as of step 02-03
+// (inter-tenant-transfer). Keyed on the composite (tenant_id, alias)
+// identity, mirroring the real table's own primary key (migration 02-01).
+type fakeCounterpartyAliasRepository struct{ store *fakeStore }
+
+var _ ports.CounterpartyAliasRepository = fakeCounterpartyAliasRepository{}
+
+func counterpartyAliasKey(tenantID, alias string) string {
+	return tenantID + "\x00" + alias
+}
+
+func (r fakeCounterpartyAliasRepository) Create(ctx context.Context, alias domain.CounterpartyAlias) error {
+	key := counterpartyAliasKey(alias.TenantID(), alias.Alias())
+	if _, exists := r.store.counterpartyAlias[key]; exists {
+		return fmt.Errorf("fakeCounterpartyAliasRepository: alias %q already registered for tenant %q", alias.Alias(), alias.TenantID())
+	}
+	r.store.counterpartyAlias[key] = alias
+	return nil
+}
+
+func (r fakeCounterpartyAliasRepository) ByTenantAndAlias(ctx context.Context, tenantID, alias string) (domain.CounterpartyAlias, bool, error) {
+	got, ok := r.store.counterpartyAlias[counterpartyAliasKey(tenantID, alias)]
+	return got, ok, nil
+}
+
+// fakeTransferStateRepository joined the other fakes as of step 02-03
+// (inter-tenant-transfer). ClaimOne mirrors the real adapter's eligibility
+// predicate (status pending/retrying, next_attempt_at already due); the
+// concurrent-claim race itself is proven for real against PostgreSQL in
+// internal/adapters/postgres (this fake runs single-threaded within one
+// test, so there is no race to model here — mirrors this suite's own
+// TEST PARADIGM note for the other transactional ports).
+type fakeTransferStateRepository struct{ store *fakeStore }
+
+var _ ports.TransferStateRepository = fakeTransferStateRepository{}
+
+func (r fakeTransferStateRepository) Create(ctx context.Context, state ports.TransferState) error {
+	if _, exists := r.store.transferStates[state.TransferID]; exists {
+		return fmt.Errorf("fakeTransferStateRepository: transfer %q already exists", state.TransferID)
+	}
+	r.store.transferStates[state.TransferID] = state
+	return nil
+}
+
+func (r fakeTransferStateRepository) Get(ctx context.Context, transferID string) (ports.TransferState, bool, error) {
+	state, ok := r.store.transferStates[transferID]
+	return state, ok, nil
+}
+
+func (r fakeTransferStateRepository) UpdateStatus(ctx context.Context, transferID string, status string, reason string) error {
+	state, ok := r.store.transferStates[transferID]
+	if !ok {
+		return fmt.Errorf("fakeTransferStateRepository: unknown transfer %q", transferID)
+	}
+	state.Status = status
+	state.Reason = reason
+	r.store.transferStates[transferID] = state
+	return nil
+}
+
+func (r fakeTransferStateRepository) ClaimOne(ctx context.Context, transferID string, leaseDuration time.Duration) (ports.TransferState, bool, error) {
+	state, ok := r.store.transferStates[transferID]
+	if !ok {
+		return ports.TransferState{}, false, nil
+	}
+	dueStatus := state.Status == "pending" || state.Status == "retrying"
+	if !dueStatus || state.NextAttemptAt.After(time.Now().UTC()) {
+		return ports.TransferState{}, false, nil
+	}
+	state.NextAttemptAt = time.Now().UTC().Add(leaseDuration)
+	r.store.transferStates[transferID] = state
+	return state, true, nil
+}
+
+func (r fakeTransferStateRepository) ClaimDue(ctx context.Context, now time.Time, batchLimit int) ([]string, error) {
+	ids := make([]string, 0, len(r.store.transferStates))
+	for id := range r.store.transferStates {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool {
+		return r.store.transferStates[ids[i]].NextAttemptAt.Before(r.store.transferStates[ids[j]].NextAttemptAt)
+	})
+
+	var due []string
+	for _, id := range ids {
+		state := r.store.transferStates[id]
+		dueStatus := state.Status == "pending" || state.Status == "retrying"
+		if dueStatus && !state.NextAttemptAt.After(now) {
+			due = append(due, id)
+		}
+		if len(due) == batchLimit {
+			break
+		}
+	}
+	return due, nil
 }
