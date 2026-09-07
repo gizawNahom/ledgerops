@@ -29,9 +29,10 @@ type fakeStore struct {
 	accounts  map[string]domain.Account
 	postings  map[string]domain.Posting
 	entries   []domain.Entry
-	claims    map[string]ports.Claim
-	tenants   map[string]domain.Tenant
-	committed bool
+	claims      map[string]ports.Claim
+	tenants     map[string]domain.Tenant
+	tenantLinks map[string]domain.TenantLink
+	committed   bool
 
 	// scanAttempted and lastScope are spies for step 03-01's VerifyBooks
 	// wiring: scanAttempted proves the tenant_not_found refusal path never
@@ -53,10 +54,11 @@ func newFakeStore(accounts ...domain.Account) *fakeStore {
 		byID[account.ID()] = account
 	}
 	return &fakeStore{
-		accounts: byID,
-		postings: map[string]domain.Posting{},
-		claims:   map[string]ports.Claim{},
-		tenants:  map[string]domain.Tenant{},
+		accounts:    byID,
+		postings:    map[string]domain.Posting{},
+		claims:      map[string]ports.Claim{},
+		tenants:     map[string]domain.Tenant{},
+		tenantLinks: map[string]domain.TenantLink{},
 	}
 }
 
@@ -77,6 +79,9 @@ func (u *fakeUnitOfWork) Transactions() ports.TransactionRepository {
 }
 func (u *fakeUnitOfWork) Idempotency() ports.IdempotencyStore { return fakeIdempotencyStore{u.store} }
 func (u *fakeUnitOfWork) Tenants() ports.TenantRepository     { return fakeTenantRepository{u.store} }
+func (u *fakeUnitOfWork) TenantLinks() ports.TenantLinkRepository {
+	return fakeTenantLinkRepository{u.store}
+}
 
 func (u *fakeUnitOfWork) Commit(ctx context.Context) error {
 	u.store.committed = true
@@ -306,5 +311,55 @@ func (r fakeTenantRepository) Create(ctx context.Context, tenant domain.Tenant) 
 		return fmt.Errorf("fakeTenantRepository: tenant name %q already exists", tenant.Name())
 	}
 	r.store.tenants[tenant.Name()] = tenant
+	return nil
+}
+
+// fakeTenantLinkRepository joined the other fakes as of step 01-03
+// (inter-tenant-transfer): AuthorizeTenantPair/RevokeTenantLink need it, and
+// ports.UnitOfWork now requires TenantLinks() of every implementer, this
+// fake included. ActiveByPair mirrors the real adapter's pair-direction
+// tolerance: a caller may name the pair in either order and still find the
+// same stored (already-canonicalized) row.
+type fakeTenantLinkRepository struct{ store *fakeStore }
+
+var _ ports.TenantLinkRepository = fakeTenantLinkRepository{}
+
+func (r fakeTenantLinkRepository) Create(ctx context.Context, link domain.TenantLink) error {
+	r.store.tenantLinks[link.LinkID()] = link
+	return nil
+}
+
+func (r fakeTenantLinkRepository) ActiveByPair(ctx context.Context, tenantA, tenantB string) (domain.TenantLink, bool, error) {
+	for _, link := range r.store.tenantLinks {
+		if link.Status() != domain.TenantLinkActive {
+			continue
+		}
+		matchesForward := link.TenantA() == tenantA && link.TenantB() == tenantB
+		matchesReversed := link.TenantA() == tenantB && link.TenantB() == tenantA
+		if matchesForward || matchesReversed {
+			return link, true, nil
+		}
+	}
+	return domain.TenantLink{}, false, nil
+}
+
+func (r fakeTenantLinkRepository) ByID(ctx context.Context, linkID string) (domain.TenantLink, error) {
+	link, ok := r.store.tenantLinks[linkID]
+	if !ok {
+		return domain.TenantLink{}, domain.NewTenantLinkNotFound()
+	}
+	return link, nil
+}
+
+func (r fakeTenantLinkRepository) Revoke(ctx context.Context, linkID string) error {
+	link, ok := r.store.tenantLinks[linkID]
+	if !ok {
+		return domain.NewTenantLinkNotFound()
+	}
+	revoked, err := domain.RevokeTenantLink(linkID, []domain.TenantLink{link})
+	if err != nil {
+		return err
+	}
+	r.store.tenantLinks[linkID] = revoked
 	return nil
 }

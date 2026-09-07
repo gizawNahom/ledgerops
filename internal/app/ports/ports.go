@@ -35,12 +35,16 @@ type IDGenerator func() string
 // to different transactions. Tenants() joined the other three as of step
 // 01-03 (multitenancy): ProvisionTenant's I10 courtesy check (read existing
 // names, decide, write) needs the same atomicity CreateAccount's I9 check
-// already has, one aggregate level up (DDD-26).
+// already has, one aggregate level up (DDD-26). TenantLinks() joins them as
+// of step 01-03 (inter-tenant-transfer): AuthorizeTenantPair's I11 courtesy
+// check (read the active link for a pair, decide via the pure domain
+// constructor, write) needs that same atomicity, one aggregate over again.
 type UnitOfWork interface {
 	Accounts() AccountRepository
 	Transactions() TransactionRepository
 	Idempotency() IdempotencyStore
 	Tenants() TenantRepository
+	TenantLinks() TenantLinkRepository
 	Commit(ctx context.Context) error
 	Rollback(ctx context.Context) error
 }
@@ -193,6 +197,46 @@ type TenantRepository interface {
 	// — the adapter hashes it (sha256, hex-encoded) before it ever reaches a
 	// column or a WHERE clause; the domain and this port never see the hash.
 	Create(ctx context.Context, tenant domain.Tenant) error
+}
+
+// TenantLinkRepository reads and writes standing tenant-pair authorizations
+// inside the same unit of work as AuthorizeTenantPair's I11 courtesy check
+// (read the active link for a pair, decide via the pure
+// domain.AuthorizeTenantPair constructor, write) — the same atomic
+// read-then-decide-then-write shape TenantRepository already gives
+// ProvisionTenant one aggregate over (DDD-26 reuse), mirrored deliberately
+// rather than given a new persistence idiom.
+type TenantLinkRepository interface {
+	// Create persists a newly authorized (or freshly re-authorized) link.
+	// tenant_a/tenant_b are already canonicalized by the pure
+	// domain.AuthorizeTenantPair constructor before this is ever called —
+	// the adapter stores them exactly as handed, transforming nothing
+	// (mirrors tenants.go's own division of labor).
+	Create(ctx context.Context, link domain.TenantLink) error
+
+	// ActiveByPair reads the active link, if any, for an unordered tenant
+	// pair — callers may name the pair in either order; canonicalization on
+	// write means the adapter checks both directions rather than requiring
+	// a pre-canonicalized caller. Mirrors IdempotencyStore.Lookup's
+	// (value, found, error) shape: an absent active link is the expected
+	// shape of "no", not an error. Used both by AuthorizeTenantPair's
+	// existence check and, later (step 02-04), by
+	// RegisterCounterpartyAlias.
+	ActiveByPair(ctx context.Context, tenantA, tenantB string) (domain.TenantLink, bool, error)
+
+	// ByID reads a link by its link_id, without locking. An absent id
+	// answers domain.NewTenantLinkNotFound, mirroring TenantRepository.ByID's
+	// own absent-row contract — the expected shape of "no", not an
+	// infrastructure error. RevokeTenantLink's use case is the only caller
+	// today.
+	ByID(ctx context.Context, linkID string) (domain.TenantLink, error)
+
+	// Revoke transitions the named link's status to revoked in place — the
+	// one deliberate in-place mutation this schema grants (migration 0004),
+	// unlike the append-only ledger tables. Naming an id absent from the
+	// table answers domain.NewTenantLinkNotFound, the same expected shape of
+	// "no" ByID and RevokeTenantLink's own pure decision already use.
+	Revoke(ctx context.Context, linkID string) error
 }
 
 // TenantKeyResolver resolves a presented bearer token's SHA-256 hash to the

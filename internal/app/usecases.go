@@ -341,6 +341,138 @@ type ProvisionedTenant struct {
 	TenantKey string
 }
 
+// AuthorizeTenantPair grants a standing authorization between two tenants —
+// the Read → Decide → Write sandwich, one aggregate over from ProvisionTenant,
+// structurally identical on purpose (DDD-26):
+//
+//	Read   (impure): open the unit of work, resolve which of the two named
+//	                 tenants are actually provisioned, and read the active
+//	                 link (if any) already authorized for this pair (I11
+//	                 courtesy check)
+//	Decide (PURE):   domain.AuthorizeTenantPair — refuses tenant_not_found
+//	                 if either side is absent, then tenant_link_already_exists
+//	                 if an active link already covers the canonicalized pair
+//	Write  (impure): persist the new link row
+//
+// link_id is minted via the existing IDGenerator port, lnk_-prefixed at this
+// call site, exactly like tenant_id/tenant_key are tnt_/tk_-prefixed in
+// ProvisionTenant — no new randomness source (DDD-26).
+func (l *Ledger) AuthorizeTenantPair(ctx context.Context, tenantA, tenantB string) (domain.TenantLink, error) {
+	return withUnitOfWork(ctx, l.store, fmt.Sprintf("authorizing tenant pair %q/%q", tenantA, tenantB),
+		func(uow ports.UnitOfWork) (domain.TenantLink, error) {
+			knownTenants, err := l.provisionedTenants(ctx, uow, tenantA, tenantB)
+			if err != nil {
+				return domain.TenantLink{}, err
+			}
+
+			existingLinks, err := l.activeLinkSnapshot(ctx, uow, tenantA, tenantB)
+			if err != nil {
+				return domain.TenantLink{}, err
+			}
+
+			linkID := "lnk_" + l.nextID()
+			link, err := domain.AuthorizeTenantPair(linkID, tenantA, tenantB, existingLinks, knownTenants)
+			if err != nil {
+				return domain.TenantLink{}, err
+			}
+
+			if err := uow.TenantLinks().Create(ctx, link); err != nil {
+				return domain.TenantLink{}, fmt.Errorf("authorizing tenant pair %q/%q: %w", tenantA, tenantB, err)
+			}
+			return link, nil
+		})
+}
+
+// provisionedTenants performs the impure existence reads behind
+// AuthorizeTenantPair's tenant_not_found refusal: each named tenant is
+// looked up via TenantRepository.ByID (reused unchanged, DDD-26), and the
+// result is a set naming only the ids that actually exist. An absent tenant
+// is simply omitted, not propagated as an error here — the pure
+// domain.AuthorizeTenantPair decision is what turns "absent from this set"
+// into the named tenant_not_found refusal; anything else (a genuine
+// infrastructure failure) is propagated.
+func (l *Ledger) provisionedTenants(ctx context.Context, uow ports.UnitOfWork, tenantIDs ...string) (map[string]bool, error) {
+	known := make(map[string]bool, len(tenantIDs))
+	for _, tenantID := range tenantIDs {
+		_, err := uow.Tenants().ByID(ctx, tenantID)
+		if err == nil {
+			known[tenantID] = true
+			continue
+		}
+		var violation domain.Violation
+		if errors.As(err, &violation) && violation.Kind() == domain.TenantNotFound {
+			continue
+		}
+		return nil, fmt.Errorf("checking whether tenant %q is provisioned: %w", tenantID, err)
+	}
+	return known, nil
+}
+
+// activeLinkSnapshot performs the impure read behind AuthorizeTenantPair's
+// I11 courtesy check: whether an active link already covers this pair. An
+// absent active link is the expected shape of "no" (ActiveByPair's own
+// (value, found, error) contract), not an error — it becomes an empty
+// snapshot, which the pure domain.AuthorizeTenantPair decision reads as
+// "nothing to collide with".
+func (l *Ledger) activeLinkSnapshot(ctx context.Context, uow ports.UnitOfWork, tenantA, tenantB string) ([]domain.TenantLink, error) {
+	link, found, err := uow.TenantLinks().ActiveByPair(ctx, tenantA, tenantB)
+	if err != nil {
+		return nil, fmt.Errorf("checking for an existing active link between %q and %q: %w", tenantA, tenantB, err)
+	}
+	if !found {
+		return nil, nil
+	}
+	return []domain.TenantLink{link}, nil
+}
+
+// RevokeTenantLink ends a standing authorization — the Read → Decide → Write
+// sandwich, one aggregate over from CreateAccount, structurally identical on
+// purpose (DDD-26):
+//
+//	Read   (impure): open the unit of work, read the named link by id
+//	Decide (PURE):   domain.RevokeTenantLink — refuses tenant_link_not_found
+//	                 if no link named linkID exists; otherwise transitions
+//	                 active -> revoked
+//	Write  (impure): persist the revoked status
+func (l *Ledger) RevokeTenantLink(ctx context.Context, linkID string) error {
+	return inUnitOfWork(ctx, l.store, fmt.Sprintf("revoking tenant link %q", linkID),
+		func(uow ports.UnitOfWork) error {
+			existingLinks, err := l.tenantLinkSnapshot(ctx, uow, linkID)
+			if err != nil {
+				return err
+			}
+
+			revoked, err := domain.RevokeTenantLink(linkID, existingLinks)
+			if err != nil {
+				return err
+			}
+
+			if err := uow.TenantLinks().Revoke(ctx, revoked.LinkID()); err != nil {
+				return fmt.Errorf("revoking tenant link %q: %w", linkID, err)
+			}
+			return nil
+		})
+}
+
+// tenantLinkSnapshot performs the impure read behind RevokeTenantLink's
+// existence check: whether a link named linkID exists at all.
+// TenantLinkNotFound is the expected shape of "no" (ByID's own contract,
+// mirroring tenantNameAlreadyTaken/accountAlreadyOpen one aggregate over),
+// not an error to propagate; anything else (a genuine infrastructure
+// failure) is. A found link becomes a single-element snapshot for the pure
+// domain.RevokeTenantLink decision to search.
+func (l *Ledger) tenantLinkSnapshot(ctx context.Context, uow ports.UnitOfWork, linkID string) ([]domain.TenantLink, error) {
+	link, err := uow.TenantLinks().ByID(ctx, linkID)
+	if err == nil {
+		return []domain.TenantLink{link}, nil
+	}
+	var violation domain.Violation
+	if errors.As(err, &violation) && violation.Kind() == domain.TenantLinkNotFound {
+		return nil, nil
+	}
+	return nil, fmt.Errorf("reading tenant link %q: %w", linkID, err)
+}
+
 // GetBalance reads one account's stored balance, scoped to the caller's own
 // tenant (step 02-04: tenantID arrives from the requireTenantKey-resolved
 // scope, never a platform-wide read — GET /accounts/{id} has no unscoped

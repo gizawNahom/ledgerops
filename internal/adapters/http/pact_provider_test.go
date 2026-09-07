@@ -275,19 +275,21 @@ func sequentialTransactionIDs() func() string {
 // is not importable from here.
 
 type pactFakeStore struct {
-	accounts map[string]domain.Account
-	postings map[string]domain.Posting
-	entries  []domain.Entry
-	claims   map[string]ports.Claim
-	tenants  map[string]domain.Tenant
+	accounts    map[string]domain.Account
+	postings    map[string]domain.Posting
+	entries     []domain.Entry
+	claims      map[string]ports.Claim
+	tenants     map[string]domain.Tenant
+	tenantLinks map[string]domain.TenantLink
 }
 
 func newPactFakeStore() *pactFakeStore {
 	return &pactFakeStore{
-		accounts: map[string]domain.Account{},
-		postings: map[string]domain.Posting{},
-		claims:   map[string]ports.Claim{},
-		tenants:  map[string]domain.Tenant{},
+		accounts:    map[string]domain.Account{},
+		postings:    map[string]domain.Posting{},
+		claims:      map[string]ports.Claim{},
+		tenants:     map[string]domain.Tenant{},
+		tenantLinks: map[string]domain.TenantLink{},
 	}
 }
 
@@ -328,6 +330,9 @@ func (u *pactFakeUnitOfWork) Idempotency() ports.IdempotencyStore {
 }
 func (u *pactFakeUnitOfWork) Tenants() ports.TenantRepository {
 	return pactFakeTenantRepository{u.store}
+}
+func (u *pactFakeUnitOfWork) TenantLinks() ports.TenantLinkRepository {
+	return pactFakeTenantLinkRepository{u.store}
 }
 func (u *pactFakeUnitOfWork) Commit(ctx context.Context) error   { return nil }
 func (u *pactFakeUnitOfWork) Rollback(ctx context.Context) error { return nil }
@@ -523,5 +528,52 @@ func (r pactFakeTenantRepository) Create(ctx context.Context, tenant domain.Tena
 		return fmt.Errorf("pactFakeTenantRepository: tenant name %q already exists", tenant.Name())
 	}
 	r.store.tenants[tenant.Name()] = tenant
+	return nil
+}
+
+// pactFakeTenantLinkRepository joined the other pact fakes as of step 01-03
+// (inter-tenant-transfer) — no pact interaction in this suite exercises
+// AuthorizeTenantPair/RevokeTenantLink today, but ports.UnitOfWork now
+// requires TenantLinks(), so this keeps pactFakeUnitOfWork satisfying the
+// interface with the same input-validation discipline as its siblings.
+type pactFakeTenantLinkRepository struct{ store *pactFakeStore }
+
+var _ ports.TenantLinkRepository = pactFakeTenantLinkRepository{}
+
+func (r pactFakeTenantLinkRepository) Create(ctx context.Context, link domain.TenantLink) error {
+	r.store.tenantLinks[link.LinkID()] = link
+	return nil
+}
+
+func (r pactFakeTenantLinkRepository) ActiveByPair(ctx context.Context, tenantA, tenantB string) (domain.TenantLink, bool, error) {
+	for _, link := range r.store.tenantLinks {
+		if link.Status() != domain.TenantLinkActive {
+			continue
+		}
+		if (link.TenantA() == tenantA && link.TenantB() == tenantB) || (link.TenantA() == tenantB && link.TenantB() == tenantA) {
+			return link, true, nil
+		}
+	}
+	return domain.TenantLink{}, false, nil
+}
+
+func (r pactFakeTenantLinkRepository) ByID(ctx context.Context, linkID string) (domain.TenantLink, error) {
+	link, ok := r.store.tenantLinks[linkID]
+	if !ok {
+		return domain.TenantLink{}, domain.NewTenantLinkNotFound()
+	}
+	return link, nil
+}
+
+func (r pactFakeTenantLinkRepository) Revoke(ctx context.Context, linkID string) error {
+	link, ok := r.store.tenantLinks[linkID]
+	if !ok {
+		return domain.NewTenantLinkNotFound()
+	}
+	revoked, err := domain.RevokeTenantLink(linkID, []domain.TenantLink{link})
+	if err != nil {
+		return err
+	}
+	r.store.tenantLinks[linkID] = revoked
 	return nil
 }

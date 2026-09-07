@@ -199,6 +199,14 @@ func (u *unitOfWork) Tenants() ports.TenantRepository {
 	return tenantRepository{tx: u.tx}
 }
 
+// TenantLinks is real as of step 01-03 (inter-tenant-transfer):
+// tenantLinkRepository shares this unit of work's *pgx.Tx exactly like the
+// other four repositories, which is what makes AuthorizeTenantPair's
+// read-then-create atomic.
+func (u *unitOfWork) TenantLinks() ports.TenantLinkRepository {
+	return tenantLinkRepository{tx: u.tx}
+}
+
 // Commit and Rollback are idiomatic pgx.Tx passthroughs. A commit or
 // rollback attempted twice (e.g. Commit succeeding, then a deferred Rollback
 // firing anyway) is left to pgx's own error, which callers treat as
