@@ -425,6 +425,40 @@ func (l *Ledger) activeLinkSnapshot(ctx context.Context, uow ports.UnitOfWork, t
 	return []domain.TenantLink{link}, nil
 }
 
+// RegisterCounterpartyAlias registers a tenant-scoped name for a
+// counterparty the caller already has a standing link with — the Read →
+// Decide → Write sandwich, one aggregate over from AuthorizeTenantPair,
+// structurally identical on purpose (DDD-26):
+//
+//	Read   (impure): open the unit of work, read the active link (if any)
+//	                 authorizing tenantID and targetTenantID (I11, first
+//	                 enforcement point)
+//	Decide (PURE):   domain.RegisterCounterpartyAlias — refuses
+//	                 tenant_link_not_found when no active link covers the
+//	                 pair (a revoked link's ActiveByPair lookup already
+//	                 answers "not found", so both "never linked" and
+//	                 "revoked" collapse into this one refusal)
+//	Write  (impure): persist the new alias row
+func (l *Ledger) RegisterCounterpartyAlias(ctx context.Context, tenantID, alias, targetTenantID, targetAccountID string) (domain.CounterpartyAlias, error) {
+	return withUnitOfWork(ctx, l.store, fmt.Sprintf("registering counterparty alias %q for tenant %q", alias, tenantID),
+		func(uow ports.UnitOfWork) (domain.CounterpartyAlias, error) {
+			linkSnapshot, linkFound, err := uow.TenantLinks().ActiveByPair(ctx, tenantID, targetTenantID)
+			if err != nil {
+				return domain.CounterpartyAlias{}, fmt.Errorf("checking for an active link between %q and %q: %w", tenantID, targetTenantID, err)
+			}
+
+			registered, err := domain.RegisterCounterpartyAlias(tenantID, alias, linkSnapshot, linkFound, targetTenantID, targetAccountID)
+			if err != nil {
+				return domain.CounterpartyAlias{}, err
+			}
+
+			if err := uow.CounterpartyAliases().Create(ctx, registered); err != nil {
+				return domain.CounterpartyAlias{}, fmt.Errorf("registering counterparty alias %q: %w", alias, err)
+			}
+			return registered, nil
+		})
+}
+
 // RevokeTenantLink ends a standing authorization — the Read → Decide → Write
 // sandwich, one aggregate over from CreateAccount, structurally identical on
 // purpose (DDD-26):

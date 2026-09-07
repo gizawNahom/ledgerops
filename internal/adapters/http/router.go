@@ -172,9 +172,9 @@ func NewRouter(deps Deps) http.Handler {
 		// port's byte-identical behavior changes").
 		tenantScoped.Post("/transfers", postTransferOrCrossTenantHandler(ledger, metrics))
 
-		// POST /counterparties (slice 02). RED scaffold — tenant-key-only,
-		// same group as /transfers/  /accounts above.
-		tenantScoped.Post("/counterparties", scaffold("register_counterparty_alias"))
+		// POST /counterparties (slice 02, real as of step 02-04) —
+		// tenant-key-only, same group as /transfers / /accounts above.
+		tenantScoped.Post("/counterparties", registerCounterpartyAliasHandler(ledger))
 	})
 
 	// GET /transfers/{transfer_id} (slice 02 functional, slice 05 hardened).

@@ -212,6 +212,48 @@ func tenantLinkWire(link domain.TenantLink) map[string]any {
 	}
 }
 
+// registerCounterpartyAliasRequest is the wire shape POST /counterparties
+// accepts. The caller's own tenant_id is never part of this body — it comes
+// from the requireTenantKey-resolved scope, mirroring every other
+// tenant-scoped route (createAccountHandler, postTransferHandler).
+type registerCounterpartyAliasRequest struct {
+	Alias           string `json:"alias"`
+	TargetTenantID  string `json:"target_tenant_id"`
+	TargetAccountID string `json:"target_account_id"`
+}
+
+// registerCounterpartyAliasHandler registers a name, scoped to the caller's
+// own namespace, for a counterparty it already has a standing link with
+// (internal/app/usecases.go's RegisterCounterpartyAlias, step 02-04).
+func registerCounterpartyAliasHandler(ledger *app.Ledger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var body registerCounterpartyAliasRequest
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeRefusal(w, r, http.StatusBadRequest, "malformed_request", nil)
+			return
+		}
+		if body.Alias == "" || body.TargetTenantID == "" || body.TargetAccountID == "" {
+			writeRefusal(w, r, http.StatusBadRequest, "malformed_request", nil)
+			return
+		}
+
+		scope, _ := TenantScopeFromContext(r.Context())
+		tenantID, _ := scope.Resolve()
+
+		registered, err := ledger.RegisterCounterpartyAlias(r.Context(), tenantID, body.Alias, body.TargetTenantID, body.TargetAccountID)
+		if err != nil {
+			writeDomainError(w, r, err)
+			return
+		}
+
+		writeJSON(w, http.StatusCreated, map[string]any{
+			"alias":             registered.Alias(),
+			"target_tenant_id":  registered.TargetTenantID(),
+			"target_account_id": registered.TargetAccountID(),
+		})
+	}
+}
+
 // getBalanceHandler reads one account's stored balance.
 func getBalanceHandler(ledger *app.Ledger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
