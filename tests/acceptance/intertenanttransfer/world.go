@@ -22,9 +22,16 @@ package intertenanttransfer
 // assertion today (RED, MISSING_FUNCTIONALITY), never at a Go compile error
 // or a panic (Mandate 7).
 //
-// What this World does NOT yet wire for real: fault injection into a
-// specific leg attempt, forcing a simulated process crash at either of two
-// DISTINCT windows, and single-stepping the retry ticker. The two crash
+// Fault injection into a specific leg attempt, simulating a process crash at
+// either of two DISTINCT windows, and single-stepping the retry ticker are
+// wired for real as of step 03-01, over a test-only HTTP seam
+// (internal/adapters/http/testonly_faults.go) this World's own serve()
+// mounts by passing Deps.EnableTestOnlyFaultSeam: true -- a flag
+// cmd/api/main.go never sets, mirroring postgres.AttemptOutOfBandChange's
+// own "what the suite may never do for real, except through a named back
+// door" precedent (multitenancy/world.go), adapted to this suite's own
+// "everything through HTTP" rule (every driving-port call in this file goes
+// over the real server, never a direct Go reference into it). The two crash
 // windows are semantically different and get separate methods rather than
 // one overloaded name (2026-09-07 follow-up fix 2, replacing the earlier
 // single SimulateCrashBeforeFirstAttempt that conflated them):
@@ -34,22 +41,14 @@ package intertenanttransfer
 //   - SimulateCrashBeforeReversalAttempt: the REVERSAL-path window, between a
 //     later leg's reversal committing and an earlier leg's reversal attempt
 //     ever running (milestone-04's own crash scenario, mirroring the forward
-//     case on the compensating path).
-// No test-only driving port for either exists in internal/adapters/http yet
-// -- DELIVER's crafter owns designing that seam (most likely a test-only
-// admin endpoint behind a build tag, mirroring
-// postgres.AttemptOutOfBandChange's own "what the suite may never do for
-// real, except through a named back door" precedent in multitenancy/world.go).
-// The methods below that need it return an explicit, named
-// ErrFaultInjectionNotWired instead of silently no-op'ing -- a scenario that
-// reaches one of these Given steps fails for a stated, correct reason
-// (RED, MISSING_FUNCTIONALITY: the seam itself is unbuilt), not a fixture
-// bug.
+//     case on the compensating path). No reversal dispatcher exists yet
+//     (step 03-02 onward's own scope) to ever consume this marker -- calling
+//     it today registers the intent and nothing observably reacts to it,
+//     which is the correct, expected shape until that dispatcher lands.
 import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -68,10 +67,6 @@ import (
 	"ledgerops/internal/adapters/postgres"
 	"ledgerops/internal/app/ports"
 )
-
-// ErrFaultInjectionNotWired names the one class of scenario this suite
-// cannot yet drive through a real port -- see package doc above.
-var ErrFaultInjectionNotWired = errors.New("RED scaffold: no test-only driving port exists yet to force this fault/crash/tick -- DELIVER must design one (see world.go package doc)")
 
 type tenantRecord struct {
 	ID  string
@@ -152,6 +147,11 @@ func (w *World) serve(ctx context.Context) error {
 		Clock:             time.Now,
 		IDGenerator:       func() string { return uuidLike() },
 		TenantKeyResolver: postgres.NewTenantKeyResolver(w.appDSN),
+		// This suite's own composition root is the ONLY caller that ever
+		// sets this true (see internal/adapters/http/router.go and
+		// testonly_faults.go) — cmd/api/main.go never does, mirroring
+		// postgres.AttemptOutOfBandChange's own back-door precedent.
+		EnableTestOnlyFaultSeam: true,
 	})
 	w.server = httptest.NewServer(handler)
 	w.client = w.server.Client()
@@ -753,17 +753,25 @@ func (w *World) AssertTrialBalanceHolds(ctx context.Context) error {
 	return nil
 }
 
-// --- fault-injection seams: not yet wired (see package doc) ----------------
+// --- fault-injection seams: wired as of step 03-01 (see package doc) -------
 
+// InjectLegFault forces the named transfer's next attempt at the named leg
+// to fail with a simulated transient fault, over the test-only HTTP seam
+// (internal/adapters/http/testonly_faults.go).
 func (w *World) InjectLegFault(ctx context.Context, transferID string, leg int) error {
-	return ErrFaultInjectionNotWired
+	return w.callTestOnlyFaultSeam(ctx, "/testonly/faults/leg", map[string]any{
+		"transfer_id": transferID,
+		"leg":         leg,
+	})
 }
 
 // SimulateCrashBeforeForwardLegAttempt simulates a process crash in the
 // FORWARD-path window: after a leg has committed but before the next leg's
 // first attempt has ever run. See package doc above.
 func (w *World) SimulateCrashBeforeForwardLegAttempt(ctx context.Context, transferID string) error {
-	return ErrFaultInjectionNotWired
+	return w.callTestOnlyFaultSeam(ctx, "/testonly/faults/crash-forward", map[string]any{
+		"transfer_id": transferID,
+	})
 }
 
 // SimulateCrashBeforeReversalAttempt simulates a process crash in the
@@ -772,15 +780,43 @@ func (w *World) SimulateCrashBeforeForwardLegAttempt(ctx context.Context, transf
 // Semantically distinct from SimulateCrashBeforeForwardLegAttempt -- see
 // package doc above.
 func (w *World) SimulateCrashBeforeReversalAttempt(ctx context.Context, transferID string) error {
-	return ErrFaultInjectionNotWired
+	return w.callTestOnlyFaultSeam(ctx, "/testonly/faults/crash-reversal", map[string]any{
+		"transfer_id": transferID,
+	})
 }
 
+// RunRetryTickerOnce single-steps processDueTransfers exactly once -- no
+// real wall-clock sleep needed to observe one tick's effect.
 func (w *World) RunRetryTickerOnce(ctx context.Context) error {
-	return ErrFaultInjectionNotWired
+	return w.callTestOnlyFaultSeam(ctx, "/testonly/tick", nil)
 }
 
+// SeedTransfersDueForRetry seeds N synthetic, already-due transfer_state
+// rows directly through the store -- the batch-limit scenario's own need.
 func (w *World) SeedTransfersDueForRetry(ctx context.Context, count int) error {
-	return ErrFaultInjectionNotWired
+	return w.callTestOnlyFaultSeam(ctx, "/testonly/seed-due", map[string]any{
+		"count": count,
+	})
+}
+
+// callTestOnlyFaultSeam is every fault-injection method's own shared
+// transport: a real HTTP call to the test-only seam, as the platform admin
+// (the same credential every other cross-cutting route in this router
+// requires) -- mirroring this suite's own "every driving-port call goes
+// over the real HTTP server" rule (package doc above), never a direct Go
+// reference into the running process.
+func (w *World) callTestOnlyFaultSeam(ctx context.Context, path string, body any) error {
+	if err := w.EnsureStarted(ctx); err != nil {
+		return err
+	}
+	status, raw, err := w.rawCall(ctx, PlatformAdmin(), http.MethodPost, path, body)
+	if err != nil {
+		return err
+	}
+	if status != http.StatusOK {
+		return fmt.Errorf("test-only fault seam call to %q failed: status=%d body=%s", path, status, raw)
+	}
+	return nil
 }
 
 func (w *World) CorruptStoredBalance(ctx context.Context, account AccountName, by Money) error {

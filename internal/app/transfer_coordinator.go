@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"ledgerops/internal/app/ports"
@@ -43,6 +44,24 @@ const (
 	// overwritten by attemptLeg's own outcome-recording write in every
 	// non-crash path; only observed at rest when the process dies mid-attempt.
 	claimLeaseDuration = 15 * time.Second
+
+	// retryBatchLimit is processDueTransfers' own batch cap (roadmap.json §
+	// 03-01/03-02, ClaimDue(ctx, now, batchLimit=100)) — sized against the
+	// same discovery query the inline goroutine's own claim shares no
+	// exclusivity with (brief.md § ClaimDue's own batch limit).
+	retryBatchLimit = 100
+
+	// inlineAttemptGraceWindow is a fixed, short pause spawnForwardLegs' own
+	// goroutine takes before its first leg-2 attempt — every other consumer
+	// of this transfer_id (a test-only fault/crash registration arriving a
+	// few milliseconds behind the HTTP response that carried this
+	// transfer_id back) needs the row to still be unclaimed when it lands.
+	// Harmless in production: the synchronous response has already been
+	// written by the time this goroutine even starts, so the extra latency
+	// is invisible at the driving port (brief.md § Sync vs. async
+	// settlement) and only ever shortens the window a stalled leg spends
+	// unclaimed.
+	inlineAttemptGraceWindow = 20 * time.Millisecond
 )
 
 // ErrTransferNotFound marks a GetTransfer call naming a transfer_id no
@@ -61,11 +80,136 @@ var ErrTransferNotFound = errors.New("transfer not found")
 // (same package, DDD-26 reuse), so no dependency is threaded twice.
 type TransferCoordinator struct {
 	ledger *Ledger
+
+	// testOnly holds every piece of state the acceptance suite's fault-
+	// injection seam needs (step 03-01). Structurally unreachable from any
+	// production route: nothing in this file's own SendTransfer/attemptLeg
+	// path ever populates it except by calling the InjectLegFault/
+	// SimulateCrashBefore*Attempt methods below, and no production
+	// composition root (cmd/api/main.go) calls those — only a
+	// testonly-build-tagged adapter file does (mirrors
+	// postgres.AttemptOutOfBandChange's "back door" precedent: an exported,
+	// always-compiled function production code simply never calls).
+	testOnly testOnlyFaultState
+}
+
+// testOnlyFaultState is a per-coordinator (not global) registry, so two
+// World instances in the same test binary never share fault state across
+// scenarios (each scenario's own httptest.Server wires a fresh
+// TransferCoordinator via NewRouter).
+type testOnlyFaultState struct {
+	mu                sync.Mutex
+	legFaults         map[string]bool // key: transferID + ":" + leg, one-shot
+	skipForwardCrash  map[string]bool // key: transferID
+	skipReversalCrash map[string]bool // key: transferID — recorded for 03-02/04's own reversal path to consult
 }
 
 // NewTransferCoordinator wires the saga over an already-constructed Ledger.
 func NewTransferCoordinator(ledger *Ledger) *TransferCoordinator {
-	return &TransferCoordinator{ledger: ledger}
+	return &TransferCoordinator{
+		ledger: ledger,
+		testOnly: testOnlyFaultState{
+			legFaults:         map[string]bool{},
+			skipForwardCrash:  map[string]bool{},
+			skipReversalCrash: map[string]bool{},
+		},
+	}
+}
+
+// --- test-only fault-injection seam (step 03-01) ---------------------------
+//
+// Every method below exists for exactly one reason: the acceptance suite
+// needs a named back door to force a specific leg to fail, or to simulate a
+// process crash at one of the two crash windows, or to seed rows a ticker
+// tick can discover — deterministically, without real network faults or
+// real wall-clock waiting. None of these methods is reachable from any
+// production driving port; only tests/acceptance/intertenanttransfer/world.go,
+// through a testonly-build-tagged HTTP adapter
+// (internal/adapters/http/testonly_faults.go), ever calls them.
+
+// InjectLegFault forces the next attemptLeg call for the named transfer's
+// leg to fail with a simulated transient fault, consumed on first use — the
+// following attempt (inline retry or ticker) runs normally.
+func (tc *TransferCoordinator) InjectLegFault(transferID string, leg int) {
+	tc.testOnly.mu.Lock()
+	defer tc.testOnly.mu.Unlock()
+	tc.testOnly.legFaults[legFaultKey(transferID, leg)] = true
+}
+
+// consumeInjectedLegFault reports whether a fault was armed for this
+// transfer's leg, clearing it on the way out — a one-shot fault only ever
+// stalls the first attempt it meets, never every attempt after it.
+func (tc *TransferCoordinator) consumeInjectedLegFault(transferID string, leg int) bool {
+	tc.testOnly.mu.Lock()
+	defer tc.testOnly.mu.Unlock()
+	key := legFaultKey(transferID, leg)
+	if tc.testOnly.legFaults[key] {
+		delete(tc.testOnly.legFaults, key)
+		return true
+	}
+	return false
+}
+
+func legFaultKey(transferID string, leg int) string {
+	return fmt.Sprintf("%s:%d", transferID, leg)
+}
+
+// errSimulatedTransientFault is the injected failure attemptLeg's own
+// recordLegOutcome sees — indistinguishable, from that call's own
+// perspective, from a genuine transient Post failure.
+var errSimulatedTransientFault = errors.New("simulated transient fault (test-only fault injection)")
+
+// SimulateCrashBeforeForwardLegAttempt marks a transfer so spawnForwardLegs'
+// own goroutine returns immediately without ever attempting leg 2 —
+// simulating a process crash between Leg 1's commit and the inline
+// goroutine's first Leg 2 attempt. The retry ticker (processDueTransfers)
+// remains the only path that can ever claim the row afterward.
+func (tc *TransferCoordinator) SimulateCrashBeforeForwardLegAttempt(transferID string) {
+	tc.testOnly.mu.Lock()
+	defer tc.testOnly.mu.Unlock()
+	tc.testOnly.skipForwardCrash[transferID] = true
+}
+
+// consumeForwardCrashSimulation reports (and clears) whether this transfer
+// was marked to skip its inline forward attempt entirely.
+func (tc *TransferCoordinator) consumeForwardCrashSimulation(transferID string) bool {
+	tc.testOnly.mu.Lock()
+	defer tc.testOnly.mu.Unlock()
+	if tc.testOnly.skipForwardCrash[transferID] {
+		delete(tc.testOnly.skipForwardCrash, transferID)
+		return true
+	}
+	return false
+}
+
+// SimulateCrashBeforeReversalAttempt marks a transfer so the reversal path
+// (step 03-02/04's own scope — no reversal dispatch exists yet) will skip
+// attempting an earlier leg's reversal on whatever inline path eventually
+// drives it, mirroring SimulateCrashBeforeForwardLegAttempt on the
+// compensating side. Recorded now so the seam's shape is stable before the
+// reversal dispatcher that must consult it exists; consuming it is that
+// dispatcher's own responsibility, not this step's.
+func (tc *TransferCoordinator) SimulateCrashBeforeReversalAttempt(transferID string) {
+	tc.testOnly.mu.Lock()
+	defer tc.testOnly.mu.Unlock()
+	tc.testOnly.skipReversalCrash[transferID] = true
+}
+
+// ProcessDueTransfersOnce single-steps the ticker's own scan-and-dispatch
+// entrypoint (processDueTransfers) exactly once — the exported seam
+// RunRetryTickerOnce's HTTP adapter calls, so the acceptance suite never
+// needs a real wall-clock sleep to observe one tick's effect.
+func (tc *TransferCoordinator) ProcessDueTransfersOnce(ctx context.Context) (int, error) {
+	return tc.processDueTransfers(ctx, retryBatchLimit)
+}
+
+// SeedTransferStateDueNow persists one synthetic, already-due transfer_state
+// row directly through the store — the batch-limit scenario's own seeding
+// need (more due rows than one tick's batch cap), which has nothing to do
+// with posting real legs and so has no reason to go through SendTransfer's
+// full alias-resolution/account-bootstrap pipeline.
+func (tc *TransferCoordinator) SeedTransferStateDueNow(ctx context.Context, state ports.TransferState) error {
+	return tc.createTransferState(ctx, state)
 }
 
 // TransferView is what SendTransfer and GetTransfer both answer with — the
@@ -360,6 +504,20 @@ func (tc *TransferCoordinator) createTransferState(ctx context.Context, state po
 // beyond the sum of its two attempts.
 func (tc *TransferCoordinator) spawnForwardLegs(transferID string) {
 	go func() {
+		// inlineAttemptGraceWindow: see its own doc comment above — gives a
+		// test-only fault/crash registration racing this goroutine (it only
+		// learns transferID once SendTransfer's HTTP response has already
+		// been written) time to land before the first real attempt runs.
+		time.Sleep(inlineAttemptGraceWindow)
+
+		if tc.consumeForwardCrashSimulation(transferID) {
+			// Test-only: simulating a process crash before Leg 2's first
+			// attempt ever ran. The row is left exactly as SendTransfer's
+			// own commit left it — only processDueTransfers can claim it
+			// from here.
+			return
+		}
+
 		background := context.Background()
 		// A non-nil error here (including a lost claim race, which
 		// attemptLeg reports as a nil error/no-op, not this branch) means
@@ -396,14 +554,22 @@ func (tc *TransferCoordinator) attemptLeg(ctx context.Context, transferID string
 		return err
 	}
 
-	_, postErr := tc.ledger.PostTransfer(attemptCtx, TransferRequest{
-		From:           from,
-		To:             to,
-		Amount:         state.Amount,
-		IdempotencyKey: key,
-		Fingerprint:    legFingerprint(from, to, state.Amount),
-		TenantID:       tenantID,
-	})
+	var postErr error
+	if tc.consumeInjectedLegFault(transferID, leg) {
+		// Test-only: this attempt is armed to fail without ever reaching
+		// the ledger — the claim above still ran for real, so this counts
+		// as a genuine attempt from the caller/ticker's own perspective.
+		postErr = errSimulatedTransientFault
+	} else {
+		_, postErr = tc.ledger.PostTransfer(attemptCtx, TransferRequest{
+			From:           from,
+			To:             to,
+			Amount:         state.Amount,
+			IdempotencyKey: key,
+			Fingerprint:    legFingerprint(from, to, state.Amount),
+			TenantID:       tenantID,
+		})
+	}
 	return tc.recordLegOutcome(attemptCtx, transferID, leg, postErr)
 }
 
@@ -543,6 +709,71 @@ func (tc *TransferCoordinator) GetTransfer(ctx context.Context, transferID strin
 				Leg2:       LegView{Status: leg2Posted},
 				Leg3:       LegView{Status: leg3Posted},
 			}, nil
+		})
+}
+
+// processDueTransfers is the ticker's own scan-and-dispatch entrypoint
+// (brief.md § Application Architecture): batch-limited discovery via
+// ClaimDue, then attemptLeg per discovered row — the same self-claiming
+// function the inline goroutine already calls, so a row this call claims
+// and a row the inline goroutine claims share identical safety guarantees.
+// Backoff scheduling and reversal dispatch on repeated failure are step
+// 03-02/03-03's own scope (brief.md § Retry and reversal mechanics) — this
+// entrypoint's job today is discovery plus one attempt per discovered row,
+// which is exactly what the fault-injection seam (this step) needs to
+// single-step deterministically.
+func (tc *TransferCoordinator) processDueTransfers(ctx context.Context, batchLimit int) (int, error) {
+	dueIDs, err := tc.dueTransferIDs(ctx, batchLimit)
+	if err != nil {
+		return 0, err
+	}
+	for _, transferID := range dueIDs {
+		leg, err := tc.nextLegFor(ctx, transferID)
+		if err != nil || leg == 0 {
+			continue
+		}
+		_ = tc.attemptLeg(ctx, transferID, leg)
+	}
+	return len(dueIDs), nil
+}
+
+// dueTransferIDs is processDueTransfers' own read-only discovery step —
+// ClaimDue itself claims nothing (brief.md: "discovery only, not a claim"),
+// so this runs in its own unit of work, separate from the claim/attempt
+// pair attemptLeg performs per discovered row.
+func (tc *TransferCoordinator) dueTransferIDs(ctx context.Context, batchLimit int) ([]string, error) {
+	return withUnitOfWork(ctx, tc.ledger.store, "discovering due transfers for one retry-ticker tick",
+		func(uow ports.UnitOfWork) ([]string, error) {
+			return uow.TransferStates().ClaimDue(ctx, tc.ledger.clock(), batchLimit)
+		})
+}
+
+// nextLegFor reads a due row fresh and decides which leg processDueTransfers
+// should attempt next — leg 2 while it has not yet posted, leg 3 once leg 2
+// has, and 0 (a no-op sentinel) once both already have, mirroring
+// GetTransfer's own leg-status derivation one call site over.
+func (tc *TransferCoordinator) nextLegFor(ctx context.Context, transferID string) (int, error) {
+	return withUnitOfWork(ctx, tc.ledger.store, fmt.Sprintf("deciding which leg transfer %q is due for", transferID),
+		func(uow ports.UnitOfWork) (int, error) {
+			state, found, err := uow.TransferStates().Get(ctx, transferID)
+			if err != nil || !found {
+				return 0, err
+			}
+			leg2Posted, err := legPostedStatus(ctx, uow, state.IdempotencyKey+":leg2")
+			if err != nil {
+				return 0, err
+			}
+			if leg2Posted != legPosted {
+				return 2, nil
+			}
+			leg3Posted, err := legPostedStatus(ctx, uow, state.IdempotencyKey+":leg3")
+			if err != nil {
+				return 0, err
+			}
+			if leg3Posted != legPosted {
+				return 3, nil
+			}
+			return 0, nil
 		})
 }
 

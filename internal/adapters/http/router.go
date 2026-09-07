@@ -87,6 +87,16 @@ type Deps struct {
 	// above -- test doubles or callers constructed before this field existed
 	// are unaffected.
 	Logger *slog.Logger
+
+	// EnableTestOnlyFaultSeam mounts the test-only fault-injection/crash-
+	// simulation/ticker-tick routes (testonly_faults.go, step 03-01) —
+	// false by default, and cmd/api/main.go never sets it. Mirrors
+	// postgres.AttemptOutOfBandChange's own back-door precedent: the
+	// mounting code is compiled into every binary unconditionally, exactly
+	// like that function is, but no production composition root ever
+	// flips this on. Only the acceptance suite's own composition root
+	// (tests/acceptance/intertenanttransfer/world.go) does.
+	EnableTestOnlyFaultSeam bool
 }
 
 // NewRouter builds the production router. Real routes, real auth middleware.
@@ -208,6 +218,21 @@ func NewRouter(deps Deps) http.Handler {
 	})
 
 	mountConsole(router, consoleDistDir)
+
+	// EnableTestOnlyFaultSeam mirrors postgres.AttemptOutOfBandChange's own
+	// back-door precedent (internal/adapters/postgres/store.go): that
+	// function is compiled into every build too, unconditionally, and is
+	// unreachable from production only because production's own
+	// composition root (cmd/api/main.go) never possesses the privileged
+	// DSN it requires. There is no build tag anywhere in this codebase
+	// (verified before choosing this shape) — the equivalent "credential
+	// production never holds" here is this boolean, which cmd/api/main.go
+	// never sets and has no flag/env var wired to set. Only
+	// tests/acceptance/intertenanttransfer/world.go's own composition root
+	// (serve(), via Deps) ever passes true. See testonly_faults.go.
+	if deps.EnableTestOnlyFaultSeam {
+		mountTestOnlyFaults(router, deps, ledger, transferCoordinator)
+	}
 
 	return router
 }
