@@ -79,6 +79,12 @@ type World struct {
 	server *httptest.Server
 	client *http.Client
 
+	// Every container this World started, so Close can terminate them. A
+	// slice rather than one handle because a scenario whose Given steps
+	// start the store more than once would otherwise orphan the earlier
+	// container with no handle left to release it.
+	containers []testcontainers.Container
+
 	appDSN        string
 	privilegedDSN string
 
@@ -114,10 +120,11 @@ func NewWorld() *World {
 // --- lifecycle -------------------------------------------------------------
 
 func (w *World) StartAgainstEmptyStore(ctx context.Context) error {
-	appDSN, privilegedDSN, err := startPostgres(ctx)
+	container, appDSN, privilegedDSN, err := startPostgres(ctx)
 	if err != nil {
 		return fmt.Errorf("bringing up PostgreSQL 16: %w", err)
 	}
+	w.containers = append(w.containers, container)
 	w.appDSN, w.privilegedDSN = appDSN, privilegedDSN
 	if err := postgres.Migrate(ctx, privilegedDSN); err != nil {
 		return fmt.Errorf("migrating from zero: %w", err)
@@ -149,11 +156,32 @@ func (w *World) EnsureStarted(ctx context.Context) error {
 	return w.StartAgainstEmptyStore(ctx)
 }
 
+// Stop releases the server but keeps the store, so a scenario can serve
+// again against the same PostgreSQL instance. Releasing the container is
+// Close's job, not this one's.
 func (w *World) Stop() {
 	if w.server != nil {
 		w.server.Close()
 		w.server = nil
 	}
+}
+
+// Close is the scenario-teardown entry point: it releases the server AND
+// terminates every container this World started. Without it the containers
+// survive until the test binary exits and Ryuk reaps them, so a package's
+// worth of scenarios holds every PostgreSQL instance it ever started
+// resident at once — ~30 MiB each, which is what made a full local run
+// exhaust memory rather than merely take a while.
+//
+// Termination runs on context.Background(), not the scenario's context: a
+// failing or timed-out scenario arrives here with a cancelled context, and
+// that is precisely when the container most needs releasing.
+func (w *World) Close() {
+	w.Stop()
+	for _, container := range w.containers {
+		_ = container.Terminate(context.Background())
+	}
+	w.containers = nil
 }
 
 func (w *World) ActAs(c Caller) { w.actingAs = c }
@@ -162,11 +190,11 @@ func (w *World) ActAs(c Caller) { w.actingAs = c }
 
 var containerMu sync.Mutex
 
-func startPostgres(ctx context.Context) (appDSN string, privilegedDSN string, err error) {
+func startPostgres(ctx context.Context) (container testcontainers.Container, appDSN string, privilegedDSN string, err error) {
 	containerMu.Lock()
 	defer containerMu.Unlock()
 
-	container, err := tcpostgres.Run(ctx,
+	started, err := tcpostgres.Run(ctx,
 		"postgres:16",
 		tcpostgres.WithDatabase("ledgerops"),
 		tcpostgres.WithUsername("ledgerops_migrate"),
@@ -178,18 +206,23 @@ func startPostgres(ctx context.Context) (appDSN string, privilegedDSN string, er
 		),
 	)
 	if err != nil {
-		return "", "", err
+		return nil, "", "", err
 	}
-	privilegedDSN, err = container.ConnectionString(ctx, "sslmode=disable")
+	// Past this point the container exists, so every error path has to
+	// release it here — the caller only records the handle on success and
+	// would otherwise have nothing left to terminate it with.
+	privilegedDSN, err = started.ConnectionString(ctx, "sslmode=disable")
 	if err != nil {
-		return "", "", err
+		_ = started.Terminate(context.Background())
+		return nil, "", "", err
 	}
 	parsed, err := url.Parse(privilegedDSN)
 	if err != nil {
-		return "", "", err
+		_ = started.Terminate(context.Background())
+		return nil, "", "", err
 	}
 	parsed.User = url.UserPassword("ledgerops_app", "app-secret")
-	return parsed.String(), privilegedDSN, nil
+	return started, parsed.String(), privilegedDSN, nil
 }
 
 var uuidCounter int

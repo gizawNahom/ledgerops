@@ -50,7 +50,8 @@ func TestMain(m *testing.M) {
 
 func InitializeTestSuite(ctx *godog.TestSuiteContext) {
 	ctx.BeforeSuite(func() {
-		// Nothing global: containers are per-scenario (OPS-11 precedent).
+		// Nothing global: containers are per-scenario (OPS-11 precedent),
+		// and each scenario's own After hook terminates the ones it started.
 	})
 }
 
@@ -59,7 +60,7 @@ func InitializeScenario(ctx *godog.ScenarioContext) {
 	RegisterSteps(ctx, world)
 
 	ctx.After(func(c context.Context, sc *godog.Scenario, err error) (context.Context, error) {
-		world.Stop()
+		world.Close()
 		return c, nil
 	})
 }

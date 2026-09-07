@@ -52,6 +52,7 @@ func InitializeTestSuite(ctx *godog.TestSuiteContext) {
 	ctx.BeforeSuite(func() {
 		// Nothing global: containers are per-scenario (OPS-11 precedent) so
 		// the two-tenant environment inherits no state from a prior test.
+		// Each scenario's own After hook terminates the ones it started.
 	})
 }
 
@@ -60,7 +61,7 @@ func InitializeScenario(ctx *godog.ScenarioContext) {
 	RegisterSteps(ctx, world)
 
 	ctx.After(func(c context.Context, sc *godog.Scenario, err error) (context.Context, error) {
-		world.Stop()
+		world.Close()
 		return c, nil
 	})
 }

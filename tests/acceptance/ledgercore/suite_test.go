@@ -61,7 +61,8 @@ func InitializeTestSuite(ctx *godog.TestSuiteContext) {
 	ctx.BeforeSuite(func() {
 		// Nothing global: containers are per-scenario so that `contended` and
 		// `corrupted` inherit no state from a prior test (OPS-11). A shared
-		// container would make corrupt-04 pass on leftover drift.
+		// container would make corrupt-04 pass on leftover drift. Each
+		// scenario's own After hook terminates the ones it started.
 	})
 }
 
@@ -70,7 +71,7 @@ func InitializeScenario(ctx *godog.ScenarioContext) {
 	RegisterSteps(ctx, ledger)
 
 	ctx.After(func(c context.Context, sc *godog.Scenario, err error) (context.Context, error) {
-		ledger.Stop()
+		ledger.Close()
 		return c, nil
 	})
 }

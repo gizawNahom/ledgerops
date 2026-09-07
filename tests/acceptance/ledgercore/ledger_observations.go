@@ -78,11 +78,11 @@ var containerMu sync.Mutex
 // instance per package satisfies the `contended` and `corrupted` preconditions
 // structurally: nothing is inherited from a prior test and no pooler can sit in
 // front of it.
-func startPostgres(ctx context.Context) (appDSN string, privilegedDSN string, err error) {
+func startPostgres(ctx context.Context) (container testcontainers.Container, appDSN string, privilegedDSN string, err error) {
 	containerMu.Lock()
 	defer containerMu.Unlock()
 
-	container, err := tcpostgres.Run(ctx,
+	started, err := tcpostgres.Run(ctx,
 		"postgres:16",
 		tcpostgres.WithDatabase("ledgerops"),
 		tcpostgres.WithUsername("ledgerops_migrate"),
@@ -102,18 +102,23 @@ func startPostgres(ctx context.Context) (appDSN string, privilegedDSN string, er
 		),
 	)
 	if err != nil {
-		return "", "", err
+		return nil, "", "", err
 	}
-	privilegedDSN, err = container.ConnectionString(ctx, "sslmode=disable")
+	// Past this point the container exists, so every error path has to
+	// release it here — the caller only records the handle on success and
+	// would otherwise have nothing left to terminate it with.
+	privilegedDSN, err = started.ConnectionString(ctx, "sslmode=disable")
 	if err != nil {
-		return "", "", err
+		_ = started.Terminate(context.Background())
+		return nil, "", "", err
 	}
 	parsed, err := url.Parse(privilegedDSN)
 	if err != nil {
-		return "", "", err
+		_ = started.Terminate(context.Background())
+		return nil, "", "", err
 	}
 	parsed.User = url.UserPassword("ledgerops_app", "app-secret")
-	return parsed.String(), privilegedDSN, nil
+	return started, parsed.String(), privilegedDSN, nil
 }
 
 // --- reads through the driving ports --------------------------------------
