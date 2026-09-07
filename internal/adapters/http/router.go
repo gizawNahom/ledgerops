@@ -137,6 +137,16 @@ func NewRouter(deps Deps) http.Handler {
 
 		protected.Get("/health/trial-balance", verdictHandler(ledger, metrics))
 		protected.Get("/console/verdict", verdictHandler(ledger, metrics))
+
+		// POST /tenant-links, DELETE /tenant-links/{link_id} (inter-tenant-transfer,
+		// confirmed 2026-09-07, slice 01). RED scaffold — reuses
+		// requireOperatorKey verbatim as the platform-admin gate (§ For
+		// Acceptance Designer: "OperatorKey only"), mirroring POST /tenants'
+		// own precedent above. No new gating logic needed for the
+		// unauthenticated/wrong-key/tenant-scoped refusal — it is already
+		// covered by this group's existing middleware.
+		protected.Post("/tenant-links", scaffold("authorize_tenant_pair"))
+		protected.Delete("/tenant-links/{link_id}", scaffold("revoke_tenant_link"))
 	})
 
 	// DDD-23 Option C: POST /accounts, POST /transfers, and GET
@@ -151,7 +161,36 @@ func NewRouter(deps Deps) http.Handler {
 
 		tenantScoped.Post("/accounts", createAccountHandler(ledger))
 		tenantScoped.Get("/accounts/{id}", getBalanceHandler(ledger))
-		tenantScoped.Post("/transfers", postTransferHandler(ledger, metrics))
+		// postTransferOrCrossTenantHandler discriminates on request-body
+		// shape (inter-tenant-transfer, confirmed 2026-09-07, slice 02): a
+		// body naming "counterparty_alias" is the new cross-tenant variant
+		// (RED scaffold — TransferCoordinator.SendTransfer does not exist
+		// yet), anything else is byte-identical to today's existing,
+		// unmodified single-tenant postTransferHandler. This keeps the
+		// existing route's already-shipped contract untouched while the new
+		// variant is scaffolded, per brief.md § Driving ports ("no existing
+		// port's byte-identical behavior changes").
+		tenantScoped.Post("/transfers", postTransferOrCrossTenantHandler(ledger, metrics))
+
+		// POST /counterparties (slice 02). RED scaffold — tenant-key-only,
+		// same group as /transfers/  /accounts above.
+		tenantScoped.Post("/counterparties", scaffold("register_counterparty_alias"))
+	})
+
+	// GET /transfers/{transfer_id} (slice 02 functional, slice 05 hardened).
+	// RED scaffold. Temporarily mounted behind the existing
+	// requireTenantKeyOrOperatorKey middleware as a placeholder gate — this
+	// is NOT the final authorization boundary: ADR-016 calls for a new,
+	// per-resource requireTransferParty middleware (grants exactly the two
+	// tenants named by the transfer_id being read, plus the operator), which
+	// requireTenantKeyOrOperatorKey structurally cannot express (it grants
+	// "any authenticated tenant", not "this transfer's two tenants" — see
+	// brief.md § Inter-tenant transfer, "Dual-party authorization"). DELIVER
+	// must replace this middleware, not just the handler body, before slice
+	// 05's isolation scenarios can go GREEN.
+	router.Group(func(transfers chi.Router) {
+		transfers.Use(requireTenantKeyOrOperatorKey(deps.OperatorKey, resolveTenantKey))
+		transfers.Get("/transfers/{transfer_id}", scaffold("get_transfer"))
 	})
 
 	// GET /accounts/{id}/entries stays dual-mode (step 02-04): a tenant_key

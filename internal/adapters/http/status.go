@@ -59,6 +59,19 @@ func writeViolation(w http.ResponseWriter, r *http.Request, v domain.Violation) 
 		writeRefusal(w, r, http.StatusNotFound, string(v.Kind()), map[string]any{
 			"tenant": v.Tenant(),
 		})
+	case domain.TenantLinkAlreadyExists:
+		// RED scaffold today (inter-tenant-transfer, confirmed 2026-09-07,
+		// slice 01) — no production caller constructs this violation yet.
+		// Wired now so `exhaustive` (DDD-12/DDD-17) passes the moment the
+		// kind exists, mirroring domain.TenantNotFound's own precedent above.
+		writeRefusal(w, r, http.StatusConflict, string(v.Kind()), nil)
+	case domain.TenantLinkNotFound:
+		// RED scaffold today (slice 02).
+		writeRefusal(w, r, http.StatusNotFound, string(v.Kind()), nil)
+	case domain.CounterpartyNotFound:
+		// RED scaffold today (slice 02, second decision site per
+		// brief.md § Inter-tenant transfer / Domain Model).
+		writeRefusal(w, r, http.StatusNotFound, string(v.Kind()), nil)
 	case domain.Unbalanced:
 		// Not a wire member (ADR-008): no caller input can reach it. If it
 		// escapes anyway, that is a defect in the rulebook, not a refusal —

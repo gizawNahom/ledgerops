@@ -189,6 +189,40 @@ type postTransferRequest struct {
 // request took to answer. The insufficient-funds branch additionally counts
 // on its own dedicated series, since that refusal is the one operators watch
 // for independently of the general rejection count.
+// postTransferOrCrossTenantHandler discriminates POST /transfers on request
+// body shape (inter-tenant-transfer, confirmed 2026-09-07, slice 02, "POST
+// /transfers (extended)" — DESIGN's own instruction: "a discriminated
+// request body ... No existing port's byte-identical behavior changes").
+// A body naming "counterparty_alias" is the new cross-tenant variant --
+// RED scaffold, since TransferCoordinator.SendTransfer does not exist yet.
+// Anything else -- including a malformed body, which must still reach
+// postTransferHandler's own malformed_request refusal unchanged -- is
+// forwarded byte-identically to the existing, unmodified handler.
+func postTransferOrCrossTenantHandler(ledger *app.Ledger, metrics *Metrics) http.HandlerFunc {
+	fallback := postTransferHandler(ledger, metrics)
+	return func(w http.ResponseWriter, r *http.Request) {
+		rawBody, err := io.ReadAll(r.Body)
+		if err != nil {
+			writeRefusal(w, r, http.StatusBadRequest, "malformed_request", nil)
+			return
+		}
+		var discriminator struct {
+			CounterpartyAlias string `json:"counterparty_alias"`
+		}
+		// A decode error here is not this handler's concern -- an
+		// unparseable body is forwarded unchanged so the existing handler's
+		// own malformed_request refusal answers it, exactly as it does
+		// today.
+		_ = json.Unmarshal(rawBody, &discriminator)
+		r.Body = io.NopCloser(bytes.NewReader(rawBody))
+		if discriminator.CounterpartyAlias != "" {
+			scaffold("send_cross_tenant_transfer")(w, r)
+			return
+		}
+		fallback(w, r)
+	}
+}
+
 func postTransferHandler(ledger *app.Ledger, metrics *Metrics) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		started := time.Now()

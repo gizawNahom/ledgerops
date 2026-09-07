@@ -52,6 +52,24 @@ const (
 	// maps to account_not_found today. This is a deliberate domain-modelling
 	// position, not an oversight.
 	TenantNotFound ViolationKind = "tenant_not_found"
+	// TenantLinkAlreadyExists — authorizing a tenant pair that already holds
+	// an active TenantLink is refused (I11 first half). RED scaffold today —
+	// no domain constructor for TenantLink exists yet
+	// (inter-tenant-transfer, confirmed 2026-09-07, ADR-014).
+	TenantLinkAlreadyExists ViolationKind = "tenant_link_already_exists"
+	// TenantLinkNotFound — registering a counterparty alias against a link
+	// that was never authorized, or has been revoked, is refused (I11 second
+	// half). RED scaffold today (inter-tenant-transfer, confirmed
+	// 2026-09-07).
+	TenantLinkNotFound ViolationKind = "tenant_link_not_found"
+	// CounterpartyNotFound — sending a transfer to an alias that was never
+	// registered in the sending tenant's own namespace (including a forged
+	// or cross-namespace alias string) is refused. Aliases are strictly
+	// tenant-scoped; this member is deliberately reused at two decision
+	// sites (registration-time lookup and send-time resolution) rather than
+	// split into two members, per brief.md § Inter-tenant transfer / Domain
+	// Model. RED scaffold today.
+	CounterpartyNotFound ViolationKind = "counterparty_not_found"
 )
 
 // Violation is the single domain error type. It keeps the idiomatic Go
@@ -130,6 +148,27 @@ func NewTenantNotFound(tenantID string) Violation {
 	return Violation{kind: TenantNotFound, tenant: tenantID, sealed: sealedMarker{}}
 }
 
+// NewTenantLinkAlreadyExists names no further detail — the pair itself is
+// identified by the caller's own request, not carried in the violation
+// (mirrors NewTenantAlreadyExists' shape). RED scaffold today.
+func NewTenantLinkAlreadyExists() Violation {
+	return Violation{kind: TenantLinkAlreadyExists, sealed: sealedMarker{}}
+}
+
+// NewTenantLinkNotFound names no further detail, mirroring
+// NewTenantLinkAlreadyExists. RED scaffold today.
+func NewTenantLinkNotFound() Violation {
+	return Violation{kind: TenantLinkNotFound, sealed: sealedMarker{}}
+}
+
+// NewCounterpartyNotFound names no further detail — a caller must not be
+// able to distinguish "alias never registered" from "alias registered by
+// someone else" (US-5's own namespace-forgery scenario). RED scaffold
+// today.
+func NewCounterpartyNotFound() Violation {
+	return Violation{kind: CounterpartyNotFound, sealed: sealedMarker{}}
+}
+
 // Error satisfies the error interface.
 func (v Violation) Error() string {
 	switch v.kind {
@@ -152,6 +191,12 @@ func (v Violation) Error() string {
 		return fmt.Sprintf("tenant already exists: %s", v.tenant)
 	case TenantNotFound:
 		return fmt.Sprintf("tenant not found: %s", v.tenant)
+	case TenantLinkAlreadyExists:
+		return "tenant link already exists"
+	case TenantLinkNotFound:
+		return "tenant link not found"
+	case CounterpartyNotFound:
+		return "counterparty not found"
 	default:
 		return string(v.kind)
 	}

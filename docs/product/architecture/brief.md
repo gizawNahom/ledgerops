@@ -443,7 +443,7 @@ see § Multitenancy below for the full confirmation.
 | Tenant key | The credential scoped to exactly one tenant, minted at provisioning; distinct from the platform-admin credential (`OperatorKey`), which continues to act unscoped (`multitenancy`, confirmed 2026-09-03) |
 | Tenant link | A standing, operator-granted authorization between an unordered pair of tenants — "these two may transact." Active until explicitly revoked (D9); revocation is terminal for that link's own identity, a fresh authorization mints a new one (`inter-tenant-transfer`, confirmed 2026-09-07) |
 | Counterparty alias | A name a tenant registers, scoped to its own namespace, that resolves to another tenant's `(tenant_id, account_id)` — the only way one tenant addresses another's account; never a raw tenant id on the wire (D11). Registerable only against an active tenant link (`inter-tenant-transfer`, confirmed 2026-09-07) |
-| Transfer | **Not a domain aggregate** — the caller-facing correlation of three ordinary, independently-posted `Transaction`s sharing one application-layer `transfer_id`. Its lifecycle state (pending/settled/retrying/reversed, D10) lives in coordinator state, not in the domain core. Named here precisely to prevent a future reader from assuming otherwise (`inter-tenant-transfer`, confirmed 2026-09-07 — see § rejected alternatives below) |
+| Transfer | **Not a domain aggregate** — the caller-facing correlation of three ordinary, independently-posted `Transaction`s sharing one application-layer `transfer_id`. Its lifecycle state (pending/settled/retrying/reversed, D10; plus `reversal_failed`, Amendment 3 — a compensating reversal that itself exhausted its own retry budget) lives in coordinator state, not in the domain core. Named here precisely to prevent a future reader from assuming otherwise (`inter-tenant-transfer`, confirmed 2026-09-07 — see § rejected alternatives below) |
 | Leg | One of the three `Post` calls that make up a Transfer. Leg 1 and leg 3 are ordinary intra-tenant postings (sender's and receiver's own books); leg 2 is the internal platform-ledger movement, also intra-tenant with respect to the platform's own account scope — no leg is ever a single `Post` call spanning two business tenants (I8, unchanged) (`inter-tenant-transfer`, confirmed 2026-09-07) |
 
 ### Aggregates
@@ -2467,15 +2467,79 @@ already fixed above (N=5, 10s per-attempt timeout, 1/2/4/8s backoff ladder,
   The 204-second figure is a deliberately pessimistic upper bound, not the
   expected caller experience.
 
-**Stated assumption, not silently assumed**: this bound assumes a
-compensating reversal itself eventually succeeds within its own retry
-budget (§ above: "a reversal that itself fails transiently retries under
-the identical mechanism"). What happens if a reversal exhausts its *own*
-retry budget without ever succeeding — leaving no further fallback — is a
-residual gap this fix does not resolve; it is distinct from, and smaller
-in scope than, the hot-set-contention open risk below, named here so it is
-not mistaken for a solved case by the 204-second figure above. Flagged for
-a future pass, not designed here.
+**Stated assumption, made explicit and now resolved (Amendment 3,
+`docs/feature/inter-tenant-transfer/design/wave-decisions.md`)**: the
+204-second bound above assumes a compensating reversal itself eventually
+succeeds within its own retry budget. What happens if a reversal exhausts
+its *own* retry budget without ever succeeding — previously a residual gap,
+"leaving no further fallback" — is now a named terminal state, not an
+undefined one: see "Reversal-of-reversal exhaustion — the named terminal
+state" immediately below. This remains distinct from, and smaller in scope
+than, the hot-set-contention open risk further below, which is still
+unresolved.
+
+### Reversal-of-reversal exhaustion — the named terminal state (Amendment 3)
+
+A fifth `app.TransferStatus` value, **`reversal_failed`**, names the case
+where a compensating reversal (of Leg 2, or of Leg 1) itself exhausts its
+own N=5 retry budget under the identical mechanism (§ above) without ever
+succeeding. This is deliberately **not** a `reason` riding on the existing
+`reversed` status the way `retry_budget_exhausted` rides on it today:
+`reversed` carries the caller-facing meaning "compensation completed, the
+sender's wallet is whole again," and overloading it with a reason for
+"compensation did NOT complete" would let a caller that only checks
+`status == "reversed"` silently misreport an incomplete compensation as
+complete — exactly the failure mode this gap named. `reversed` and
+`reversal_failed` are disjoint wire values instead.
+
+The `reason` field on `TransferStateRepository.UpdateTransferStatus` (no
+signature change — it already accepts a free-form `reason string`) carries
+which leg's compensation failed: `leg1_reversal_retry_budget_exhausted` or
+`leg2_reversal_retry_budget_exhausted` — distinguishable, since compensation
+reverses Leg 2 then Leg 1 in sequence (US-4) and either step can
+independently exhaust its own budget.
+
+**Sequencing**: once one reversal step exhausts its own retry budget, the
+coordinator halts — it does not attempt the next leg's reversal anyway.
+Continuing would not produce a safer outcome, only a *different* undefined
+partial state (e.g., Leg 1 reversed while Leg 2's mirror movement stays
+permanently stuck) with no better claim to completeness than the state
+already being named. Halting and naming the state precisely is preferred
+over a second layer of compensation this design has no basis for reasoning
+about the safety of.
+
+**Surfacing**: neither Amendment 2 gauge is reused —
+`ledgerops_transfer_state_nonterminal_count` and
+`..._oldest_next_attempt_age_seconds` both measure the *still-working*
+backlog (`status IN ('pending', 'retrying')`); folding a permanently-stuck
+transfer into either would misrepresent it as part of a backlog the ticker
+is expected to drain. A new instrument,
+**`ledgerops_transfer_reversal_failed_total`**, a monotonically increasing
+Prometheus counter (not a gauge — this count never decreases on its own),
+incremented once in the same database transaction that writes `status =
+reversal_failed`, extends the existing `Metrics` component (OPS-5) exactly
+as Amendment 2's two gauges did — no new port, no new credential.
+
+**Manual-intervention driving port (e.g., an operator endpoint to force a
+re-attempt or mark a `reversal_failed` transfer resolved): explicitly
+deferred, not silently unresolved.** No story in this feature's scope (US-1
+through US-5) asks for one — mirrors D9's own "no story asks for it"
+precedent for expiry/usage limits. The counter above is this feature's
+complete observability answer for this release.
+
+**No new sealed `domain.ViolationKind` member.** `reversal_failed` is an
+`app.TransferStatus` value, not a refusal — a caller's `GET
+/transfers/{transfer_id}` still succeeds `200`, only the status/reason
+payload differs. Mirrors `transfer_not_found`'s own reasoning above:
+`Transfer` is not a domain aggregate (ADR-014), so there is no domain
+aggregate for this fact to violate, and it does not grow the
+`exhaustive`-linted `domain.ViolationKind` switch (DDD-12/DDD-17). Unlike
+`transfer_not_found`, this is not even a second, ordinary wire-mapping
+decision site — it is a plain enum value inside an existing `200` response
+body, with no parallel to the refusal-taxonomy machinery at all.
+
+Full narrative, including the rejected alternatives considered:
+`docs/feature/inter-tenant-transfer/design/wave-decisions.md`, Amendment 3.
 
 ### Account bootstrap — the platform-as-hub mechanism, made concrete
 

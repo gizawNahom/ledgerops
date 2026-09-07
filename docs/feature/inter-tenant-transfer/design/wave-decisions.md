@@ -108,6 +108,98 @@ Architecture). ADRs: `adr-015-transfer-coordinator-persistence-and-execution.md`
   "Concurrency estimate — corrected" and "Lock-contention headroom — open
   risk."
 
+- **Amendment 3 (DESIGN amendment, dispatched separately after DISTILL
+  authored a `@pending` scenario against the residual gap this feature's own
+  brief.md § Retry and reversal mechanics named but did not resolve: "what
+  happens if a compensating reversal itself exhausts its own retry budget
+  without ever succeeding."** Closes
+  `docs/feature/inter-tenant-transfer/distill/upstream-issues.md`'s open
+  item blocking `milestone-04-reverse-after-retry-budget-exhausted.feature`'s
+  last scenario. Three questions, answered:
+  1. **Named terminal state**: a fifth `app.TransferStatus` value,
+     `reversal_failed` — not a `reason` riding on `reversed`, unlike how
+     `retry_budget_exhausted` rides on `reversed` today. Reusing `reversed`
+     here was rejected outright: `reversed` already carries the caller-facing
+     meaning "compensation completed, the sender's wallet is whole again"
+     (D10); overloading it with a reason string for "compensation did NOT
+     complete" would let a caller that only checks `status == "reversed"`
+     (the natural, undocumented-but-likely integration shortcut) silently
+     misreport an incomplete compensation as a completed one — precisely the
+     failure mode the original gap named. A new terminal status makes that
+     misreport structurally impossible: `reversed` and `reversal_failed` are
+     disjoint wire values, not a status/reason pair a careless caller can
+     conflate.
+     The `reason` field on `UpdateTransferStatus(ctx, transferID, status,
+     reason string)` (already a free-form string, no port signature change
+     needed) carries which leg's compensation failed:
+     `leg1_reversal_retry_budget_exhausted` or
+     `leg2_reversal_retry_budget_exhausted` — distinguishable, since
+     compensation reverses Leg 2 then Leg 1 in sequence (US-4) and either
+     step can independently exhaust its own budget.
+     **Sequencing decision, made explicit because the original gap's "no
+     further fallback" language left it ambiguous**: once one reversal step
+     exhausts its own retry budget, the coordinator stops — it does NOT
+     attempt the next leg's reversal anyway. Continuing would not produce a
+     safer outcome; it would produce a *different* undefined partial state
+     (e.g., Leg 1 reversed while Leg 2's mirror movement is permanently
+     stuck, rather than neither reversed) with no better claim to being
+     "complete" than the state the gap already named. Halting and naming the
+     state precisely is preferred over a second layer of compensation this
+     design has no basis for reasoning about the safety of.
+  2. **Surfacing — rides neither existing Amendment-2 gauge; gets its own
+     counter, no manual-intervention port added, decided explicitly.**
+     `ledgerops_transfer_state_nonterminal_count` and
+     `..._oldest_next_attempt_age_seconds` both measure the *still-working*
+     backlog (`status IN ('pending', 'retrying')`) — folding `reversal_failed`
+     in there would misrepresent a permanently-stuck transfer as part of a
+     backlog the ticker is expected to drain, contradicting those gauges'
+     own stated purpose. New instrument: `ledgerops_transfer_reversal_failed_total`,
+     a monotonically increasing Prometheus **counter** (not a gauge — this
+     count never decreases on its own, unlike the backlog gauges; a
+     `increase(...) > 0` alert is the operationally correct read on a
+     counter, not a gauge), incremented once, in the same database
+     transaction that writes `status = reversal_failed`. Extends the
+     existing `Metrics` component (OPS-5) exactly as Amendment 2's two
+     gauges did — no new port, no new credential.
+     **Manual-intervention driving port (e.g., an operator endpoint to force
+     a re-attempt or mark a `reversal_failed` transfer resolved):
+     explicitly deferred, not silently unresolved.** No story in this
+     feature's scope (US-1 through US-5) asks for one — mirrors D9's own
+     "no story asks for it" precedent for expiry/usage limits. The counter
+     above is this feature's complete observability answer; closing a
+     `reversal_failed` transfer once one exists is left to direct database
+     operation or a future feature, named here so it is not mistaken for
+     designed-and-omitted.
+  3. **No new sealed `domain.ViolationKind` member.** `reversal_failed` is
+     an `app.TransferStatus` value, not a refusal — nothing is refused here;
+     a caller's `GET /transfers/{transfer_id}` still succeeds `200`, only
+     the status/reason payload differs. This mirrors `transfer_not_found`'s
+     own already-settled reasoning (§ Key Decisions above): `Transfer` is
+     not a domain aggregate (ADR-014), so there is no domain aggregate for
+     this fact to violate, and it does not grow the `exhaustive`-linted
+     `domain.ViolationKind` switch (DDD-12/DDD-17). Unlike
+     `transfer_not_found`, this isn't even a second, ordinary wire-mapping
+     decision site — it is a plain enum value returned inside an existing
+     `200` response body, with no parallel to the refusal-taxonomy
+     machinery at all.
+  **DISTILL-facing consequence, not this leg's to author**: the `@pending`
+  scenario in `milestone-04-reverse-after-retry-budget-exhausted.feature`
+  can be unskipped. Its positive assertion should read as: `Then the
+  transfer's status becomes "reversal_failed" with reason
+  "leg1_reversal_retry_budget_exhausted"` (the scenario's own Given
+  fails leg 1's reversal specifically — a leg-2-reversal variant, using
+  `leg2_reversal_retry_budget_exhausted`, is a second scenario DISTILL
+  should consider adding, not a substitute for the existing one). DISTILL
+  also owns adding `StatusReversalFailed TransferStatus = "reversal_failed"`
+  to `tests/acceptance/intertenanttransfer/domain_types.go`'s existing
+  four-value enum (`domain_types.go:86-94`) — a fifth value, not a
+  `reason`-only change, consistent with decision 1 above.
+  **No production code exists yet for any of this** (RED scaffold
+  throughout, per DISTILL's own wave-decisions.md) — `reversal_failed` is a
+  DESIGN-time contract, not a DELIVER retrofit; the crafter implements it
+  as part of `attemptLeg`'s reversal path from the start, same as every
+  other status transition in this feature.
+
 ## Architecture Summary
 
 No new top-level component, no new deployable, no new host. A
