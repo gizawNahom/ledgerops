@@ -112,6 +112,16 @@ const (
 //     and never itself reports settled (brief.md § Sync vs. async
 //     settlement).
 func (tc *TransferCoordinator) SendTransfer(ctx context.Context, tenantID, alias string, amount domain.Money, idempotencyKey, fingerprint string) (TransferView, error) {
+	if existing, found, err := tc.existingTransfer(ctx, tenantID, idempotencyKey); err != nil {
+		return TransferView{}, err
+	} else if found {
+		return TransferView{
+			TransferID: existing.TransferID,
+			Status:     existing.Status,
+			Leg1:       LegView{Status: legPosted},
+		}, nil
+	}
+
 	counterparty, err := tc.prepareTransfer(ctx, tenantID, alias)
 	if err != nil {
 		return TransferView{}, err
@@ -158,6 +168,33 @@ func (tc *TransferCoordinator) SendTransfer(ctx context.Context, tenantID, alias
 		Status:     legPending,
 		Leg1:       LegView{Status: legPosted},
 	}, nil
+}
+
+// existingTransfer is SendTransfer's transfer-level replay check (step
+// 02-06, migration 02-01's UNIQUE(tenant_id, idempotency_key) constraint) —
+// a DISTINCT mechanism from the per-leg IdempotencyStore replay Leg 1's own
+// PostTransfer call already performs (brief.md § For Acceptance Designer,
+// "dual idempotency mechanisms"). Read-before-write: a resend of an
+// identical (tenant_id, idempotency_key) pair must answer with the ALREADY
+// recorded transfer, never re-run alias resolution or post any leg again.
+// Scoped by BOTH tenant_id AND idempotency_key together, so two distinct
+// keys from the same tenant to the same alias produce two independent
+// transfers.
+func (tc *TransferCoordinator) existingTransfer(ctx context.Context, tenantID, idempotencyKey string) (ports.TransferState, bool, error) {
+	result, err := withUnitOfWork(ctx, tc.ledger.store, fmt.Sprintf("checking for an existing transfer under tenant %q idempotency key", tenantID),
+		func(uow ports.UnitOfWork) (existingTransferLookup, error) {
+			state, found, err := uow.TransferStates().ByTenantAndIdempotencyKey(ctx, tenantID, idempotencyKey)
+			return existingTransferLookup{state: state, found: found}, err
+		})
+	return result.state, result.found, err
+}
+
+// existingTransferLookup is existingTransfer's own return shape — bundling
+// the (value, found) pair withUnitOfWork's single-value generic signature
+// cannot carry directly, mirroring resolvedCounterparty one call site below.
+type existingTransferLookup struct {
+	state ports.TransferState
+	found bool
 }
 
 // resolvedCounterparty is prepareTransfer's own return shape — the two

@@ -627,6 +627,18 @@ func (r pactFakeTransferStateRepository) Get(ctx context.Context, transferID str
 	return state, ok, nil
 }
 
+// ByTenantAndIdempotencyKey mirrors the real adapter's own scoped-replay
+// lookup (step 02-06) -- mechanical parity, same shape as fakes_test.go's
+// own equivalent in internal/app.
+func (r pactFakeTransferStateRepository) ByTenantAndIdempotencyKey(ctx context.Context, tenantID, idempotencyKey string) (ports.TransferState, bool, error) {
+	for _, state := range r.store.transferStates {
+		if state.TenantID == tenantID && state.IdempotencyKey == idempotencyKey {
+			return state, true, nil
+		}
+	}
+	return ports.TransferState{}, false, nil
+}
+
 func (r pactFakeTransferStateRepository) UpdateStatus(ctx context.Context, transferID string, status string, reason string) error {
 	state, ok := r.store.transferStates[transferID]
 	if !ok {

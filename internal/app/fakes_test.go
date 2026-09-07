@@ -430,6 +430,18 @@ func (r fakeTransferStateRepository) Get(ctx context.Context, transferID string)
 	return state, ok, nil
 }
 
+// ByTenantAndIdempotencyKey mirrors the real adapter's own scoped-replay
+// lookup (step 02-06) — mechanical parity with the real port addition, no
+// new assertion behavior of its own.
+func (r fakeTransferStateRepository) ByTenantAndIdempotencyKey(ctx context.Context, tenantID, idempotencyKey string) (ports.TransferState, bool, error) {
+	for _, state := range r.store.transferStates {
+		if state.TenantID == tenantID && state.IdempotencyKey == idempotencyKey {
+			return state, true, nil
+		}
+	}
+	return ports.TransferState{}, false, nil
+}
+
 func (r fakeTransferStateRepository) UpdateStatus(ctx context.Context, transferID string, status string, reason string) error {
 	state, ok := r.store.transferStates[transferID]
 	if !ok {

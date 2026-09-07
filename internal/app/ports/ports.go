@@ -351,6 +351,18 @@ type TransferStateRepository interface {
 	// discipline.
 	Get(ctx context.Context, transferID string) (TransferState, bool, error)
 
+	// ByTenantAndIdempotencyKey is the transfer-level replay lookup
+	// SendTransfer performs before ever creating a new row (step 02-06,
+	// migration 02-01's UNIQUE(tenant_id, idempotency_key) constraint) — a
+	// DISTINCT mechanism from IdempotencyStore's own per-leg replay one port
+	// above (brief.md § For Acceptance Designer, "dual idempotency
+	// mechanisms"). Scoped by BOTH tenant_id AND idempotency_key together,
+	// never by idempotency_key alone, so two different tenants (or the same
+	// tenant with two different keys) never collide. An absent match
+	// answers (zero value, false, nil) — the expected shape of "no",
+	// mirroring every other lookup on this port.
+	ByTenantAndIdempotencyKey(ctx context.Context, tenantID, idempotencyKey string) (TransferState, bool, error)
+
 	// UpdateStatus transitions the named transfer's top-level status (and
 	// records or clears its terminal-state reason) in place — the
 	// coordinator's own lifecycle write, distinct from ClaimOne's lease

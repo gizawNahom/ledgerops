@@ -71,6 +71,28 @@ func (r transferStateRepository) Get(ctx context.Context, transferID string) (po
 	return state, true, nil
 }
 
+// ByTenantAndIdempotencyKey is the transfer-level replay lookup (step
+// 02-06) backing migration 02-01's UNIQUE(tenant_id, idempotency_key)
+// constraint — distinct from IdempotencyStore's own per-leg replay. An
+// absent match answers (zero value, false, nil), the expected shape of
+// "no", mirroring Get.
+func (r transferStateRepository) ByTenantAndIdempotencyKey(ctx context.Context, tenantID, idempotencyKey string) (ports.TransferState, bool, error) {
+	row := r.tx.QueryRow(ctx,
+		`SELECT transfer_id, tenant_id, idempotency_key, status, leg1_status, leg2_status, leg3_status,
+		        leg1_attempts, leg2_attempts, leg3_attempts, next_attempt_at, reason,
+		        counterparty_tenant_id, target_account_id, amount_minor, currency
+		 FROM transfer_state WHERE tenant_id = $1 AND idempotency_key = $2`, tenantID, idempotencyKey)
+
+	state, err := scanTransferState(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ports.TransferState{}, false, nil
+	}
+	if err != nil {
+		return ports.TransferState{}, false, fmt.Errorf("looking up transfer state for tenant %q idempotency key: %w", tenantID, err)
+	}
+	return state, true, nil
+}
+
 // UpdateStatus transitions the named transfer's top-level status (and
 // records or clears its terminal-state reason) in place — the coordinator's
 // own lifecycle write, distinct from ClaimOne's lease extension. Naming a
