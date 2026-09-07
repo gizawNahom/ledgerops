@@ -23,11 +23,21 @@ package intertenanttransfer
 // or a panic (Mandate 7).
 //
 // What this World does NOT yet wire for real: fault injection into a
-// specific leg attempt, forcing a simulated process crash between Leg 1's
-// commit and Leg 2's first attempt, and single-stepping the retry ticker.
-// No test-only driving port for any of these exists in
-// internal/adapters/http yet -- DELIVER's crafter owns designing that seam
-// (most likely a test-only admin endpoint behind a build tag, mirroring
+// specific leg attempt, forcing a simulated process crash at either of two
+// DISTINCT windows, and single-stepping the retry ticker. The two crash
+// windows are semantically different and get separate methods rather than
+// one overloaded name (2026-09-07 follow-up fix 2, replacing the earlier
+// single SimulateCrashBeforeFirstAttempt that conflated them):
+//   - SimulateCrashBeforeForwardLegAttempt: the FORWARD-path window, between
+//     Leg 1's commit and Leg 2's first attempt (milestone-03's crash-recovery
+//     scenario).
+//   - SimulateCrashBeforeReversalAttempt: the REVERSAL-path window, between a
+//     later leg's reversal committing and an earlier leg's reversal attempt
+//     ever running (milestone-04's own crash scenario, mirroring the forward
+//     case on the compensating path).
+// No test-only driving port for either exists in internal/adapters/http yet
+// -- DELIVER's crafter owns designing that seam (most likely a test-only
+// admin endpoint behind a build tag, mirroring
 // postgres.AttemptOutOfBandChange's own "what the suite may never do for
 // real, except through a named back door" precedent in multitenancy/world.go).
 // The methods below that need it return an explicit, named
@@ -521,13 +531,54 @@ func (w *World) parseAdversarialCaller(text string) Caller {
 	}
 }
 
+// --- driving-port calls: trial balance (I3) ---------------------------------
+
+// AssertTrialBalanceHolds asks the platform-wide "do the books balance"
+// question through the existing, unmodified GET /health/trial-balance port
+// -- the same driving port multitenancy's own CheckTrialBalance uses, called
+// unscoped here since a reversal's own I3 obligation spans every account it
+// touched (sender's tenant, receiver's tenant, and the platform's own
+// reserved ledger), not one tenant's slice alone. Combines the call and the
+// assertion into one composition-root method (Mandate-12 criterion 3 -- a
+// step body delegates, it never inlines the comparison itself).
+func (w *World) AssertTrialBalanceHolds(ctx context.Context) error {
+	if err := w.EnsureStarted(ctx); err != nil {
+		return err
+	}
+	status, raw, err := w.rawCall(ctx, PlatformAdmin(), http.MethodGet, "/health/trial-balance", nil)
+	if err != nil {
+		return err
+	}
+	var payload struct {
+		Verdict string `json:"verdict"`
+	}
+	_ = json.Unmarshal(raw, &payload)
+	if Verdict(payload.Verdict) != BooksBalanceYes {
+		return fmt.Errorf("expected the trial balance to hold after the reversal (I3), got verdict=%q status=%d (raw: %s)",
+			payload.Verdict, status, raw)
+	}
+	return nil
+}
+
 // --- fault-injection seams: not yet wired (see package doc) ----------------
 
 func (w *World) InjectLegFault(ctx context.Context, transferID string, leg int) error {
 	return ErrFaultInjectionNotWired
 }
 
-func (w *World) SimulateCrashBeforeFirstAttempt(ctx context.Context, transferID string) error {
+// SimulateCrashBeforeForwardLegAttempt simulates a process crash in the
+// FORWARD-path window: after a leg has committed but before the next leg's
+// first attempt has ever run. See package doc above.
+func (w *World) SimulateCrashBeforeForwardLegAttempt(ctx context.Context, transferID string) error {
+	return ErrFaultInjectionNotWired
+}
+
+// SimulateCrashBeforeReversalAttempt simulates a process crash in the
+// REVERSAL-path window: after a later leg's compensating reversal has
+// committed but before an earlier leg's reversal has ever been attempted.
+// Semantically distinct from SimulateCrashBeforeForwardLegAttempt -- see
+// package doc above.
+func (w *World) SimulateCrashBeforeReversalAttempt(ctx context.Context, transferID string) error {
 	return ErrFaultInjectionNotWired
 }
 

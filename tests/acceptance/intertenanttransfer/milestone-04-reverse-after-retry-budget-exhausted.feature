@@ -12,6 +12,20 @@ Feature: A transfer that cannot complete reverses, leaving the sender's wallet w
   pre-transfer value (D7 -- compensating entries only, nothing edited or
   deleted).
 
+  # Cross-reference (2026-09-07 follow-up fix 3): the "zero legs posted"
+  # case is NOT re-scenario'd here. Leg 1 has no retry budget of its own --
+  # it posts synchronously inside SendTransfer or the request is refused
+  # outright, so there is never a leg-1-exhausted-its-retries state for
+  # this file's reversal machinery to reverse FROM. That case is already
+  # covered, and belongs, in milestone-02's own
+  # "Insufficient sender funds refuses before any leg posts" scenario
+  # (tests/acceptance/intertenanttransfer/milestone-02-send-a-transfer-to-a-named-counterparty.feature) --
+  # its own Then already asserts "no leg posts", which is exactly the
+  # guarantee that no transfer_state/coordinator row is ever created for a
+  # transfer whose leg 1 itself fails outright. This file's scope starts
+  # one leg later: reversing what DID post once a later leg's retry budget
+  # is exhausted.
+
   @real-io @adapter-integration @contract-shape:bounded-change
   Scenario: Exhausting retries on leg 2 reverses leg 1 only
     Given tenant "tnt_acme" sent 50.00 to "tnt_beacon" and leg 2 has failed on all 5 attempts of its retry budget
@@ -20,6 +34,8 @@ Feature: A transfer that cannot complete reverses, leaving the sender's wallet w
     And leg 2 was attempted exactly 5 times before the transfer reversed
     And leg 1 is reversed
     And tenant "tnt_acme"'s wallet balance returns to its pre-transfer value
+    And tenant "tnt_beacon"'s wallet balance is unchanged
+    And every touched account's trial balance holds after the reversal
 
   @real-io @contract-shape:bounded-change
   Scenario: Exhausting retries on leg 3 reverses leg 2 then leg 1, in order
@@ -28,6 +44,29 @@ Feature: A transfer that cannot complete reverses, leaving the sender's wallet w
     Then leg 3 was attempted exactly 5 times before reversal began
     And leg 2 is reversed before leg 1 is reversed
     And tenant "tnt_acme"'s wallet balance and the platform account balance both return to their pre-transfer values
+    And tenant "tnt_beacon"'s wallet balance is unchanged
+    And every touched account's trial balance holds after the reversal
+
+  # Added (2026-09-07 follow-up fix 4): reversal's own exactly-once
+  # guarantee under a crash, mirroring milestone-03's forward-leg
+  # crash-recovery scenario ("A crash before any Leg 2 attempt is recovered
+  # by the retry ticker alone") but on the compensating path -- the crash
+  # window this scenario targets sits between leg 2's reversal committing
+  # and leg 1's reversal ever being attempted. Uses its own
+  # SimulateCrashBeforeReversalAttempt seam (split from the forward-path
+  # SimulateCrashBeforeForwardLegAttempt seam in the 2026-09-07 follow-up
+  # fix 2 -- the two crash windows are semantically distinct) plus the same
+  # RunRetryTickerOnce seam, rather than a fresh primitive.
+  @real-io @adapter-integration @contract-shape:bounded-change
+  Scenario: A crash between reversing leg 2 and reversing leg 1 resumes without double-reversing leg 2
+    Given tenant "tnt_acme" sent 50.00 to "tnt_beacon", leg 1 and leg 2 have posted, and leg 3 has failed on all 5 attempts of its retry budget
+    And leg 2's reversal has posted and leg 1's reversal attempt never ran, simulating a process crash between the two compensating entries
+    When the retry ticker's next tick runs, with no inline attempt ever having occurred
+    Then the transfer's status becomes "reversed" with reason "retry_budget_exhausted"
+    And leg 2 was reversed exactly once
+    And leg 1 is reversed
+    And tenant "tnt_acme"'s wallet balance returns to its pre-transfer value
+    And every touched account's trial balance holds after the reversal
 
   @real-io @contract-shape:unbounded-preservation
   Scenario: Reversal never edits or deletes an existing entry
@@ -66,7 +105,7 @@ Feature: A transfer that cannot complete reverses, leaving the sender's wallet w
   # compensation exhausted its budget ("leg1_reversal_retry_budget_exhausted"
   # / "leg2_reversal_retry_budget_exhausted"); the coordinator halts once one
   # reversal step exhausts, it does not attempt the next leg's reversal.
-  @real-io @contract-shape:unbounded-preservation
+  @real-io @contract-shape:bounded-change
   Scenario: A reversal that itself exhausts its own retry budget is a named, distinguishable state
     Given tenant "tnt_acme" sent 50.00 to "tnt_beacon" and the compensating reversal of leg 1 itself has failed on all 5 attempts of its own retry budget
     When the reversal's own retry budget is exhausted
@@ -80,7 +119,7 @@ Feature: A transfer that cannot complete reverses, leaving the sender's wallet w
   # leg 1 in sequence (US-4) and either step can independently exhaust its own
   # budget. Fits the existing Given/When vocabulary unchanged -- no new World
   # method required, same seeding + ticker seam the leg 1 variant above uses.
-  @real-io @contract-shape:unbounded-preservation
+  @real-io @contract-shape:bounded-change
   Scenario: A reversal of leg 2 that itself exhausts its own retry budget is a named, distinguishable state
     Given tenant "tnt_acme" sent 50.00 to "tnt_beacon" and the compensating reversal of leg 2 itself has failed on all 5 attempts of its own retry budget
     When the reversal's own retry budget is exhausted

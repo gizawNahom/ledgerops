@@ -366,6 +366,158 @@ session preserves that per-feature choice rather than retroactively creating
 originally tracked (the `.feature` file comment block, now resolved, and
 this note), not migrated to a file this feature never used.
 
+## 2026-09-07 — reversal AT-completeness follow-up (scoped fix, 4 items closed)
+
+Applied all four fixes proposed in this session's own prior assessment of
+`milestone-04-reverse-after-retry-budget-exhausted.feature`:
+
+1. **Receiver-balance non-effect** — added
+   `And tenant "tnt_beacon"'s wallet balance is unchanged` to both the
+   leg-2-fail and leg-3-fail reversal scenarios. New `Then` step,
+   shape-only placeholder today (same convention as the sibling
+   pre-transfer-value `Then` steps beside it).
+2. **I3 (trial balance) after reversal** — added
+   `And every touched account's trial balance holds after the reversal` to
+   the same two scenarios. Backed by a real driving-port call this
+   session: `World.AssertTrialBalanceHolds(ctx)` calls the existing,
+   unmodified `GET /health/trial-balance` port (unscoped — a reversal's
+   I3 obligation spans sender, receiver, and the platform's reserved
+   ledger, not one tenant's slice) and compares the wire `verdict` field
+   against `ledgercore.BooksBalanceYes`, reused unmodified from
+   `tests/acceptance/ledgercore/domain_types.go` (Mandate-12 reuse, not a
+   third competing `Verdict` type). Added `Verdict`/`BooksBalanceYes`
+   re-exports to this package's own `domain_types.go`.
+3. **Cross-reference to milestone-02's zero-legs-posted case** — a comment
+   block added at the top of `milestone-04-reverse-after-retry-budget-exhausted.feature`
+   (before the first scenario), explaining why the "leg 1 itself fails
+   outright" case is NOT re-scenario'd in this file: leg 1 has no retry
+   budget of its own (it posts synchronously inside `SendTransfer` or the
+   request is refused outright), so there is never a
+   leg-1-exhausted-its-retries state for this file's reversal machinery to
+   reverse FROM. That case is already covered by milestone-02's own
+   "Insufficient sender funds refuses before any leg posts" scenario,
+   whose `Then no leg posts` is exactly the guarantee that no
+   `transfer_state`/coordinator row is ever created for such a transfer.
+   Chose the in-file comment over a `milestone-02` edit — the
+   cross-reference belongs on the file that has the gap, not the file
+   that already closes it.
+4. **Exactly-once reversal under crash** — new scenario, "A crash between
+   reversing leg 2 and reversing leg 1 resumes without double-reversing
+   leg 2", mirroring milestone-03's own forward-leg crash-recovery
+   scenario ("A crash before any Leg 2 attempt is recovered by the retry
+   ticker alone") but on the compensating path. Reuses
+   `SimulateCrashBeforeFirstAttempt` (new `Given` regex, same `World`
+   method call, adapted wording) and `RunRetryTickerOnce` (the existing
+   `When the retry ticker's next tick runs, with no inline attempt ever
+   having occurred` step, verbatim, zero new registration — DRY win).
+   `Then leg 2 was reversed exactly once` is a new shape-only placeholder,
+   same convention as the other attempt-count `Then` steps in this file.
+
+**Files changed**: `milestone-04-reverse-after-retry-budget-exhausted.feature`
+(comment block + 2 scenarios extended + 1 scenario added, 7 → 8
+scenarios), `domain_types.go` (`Verdict`/`BooksBalanceYes` re-export),
+`world.go` (`AssertTrialBalanceHolds`), `steps_intertenanttransfer_test.go`
+(4 new step registrations: 1 `Given`, 2 `Then` shape-only, 1 `Then` real
+I3 assertion; 1 `When` reused unchanged).
+
+**RED classification** (`go test ./tests/acceptance/intertenanttransfer/...
+-run TestMain -count=1`, run this session, foreground, real Postgres 16 via
+Testcontainers): **41 scenarios (was 40), 5 passed, 36 failed, 0 undefined
+steps.** Every new/changed assertion fails for a disclosed, correct reason:
+
+- The two extended scenarios (leg-2-fail, leg-3-fail) still fail at their
+  existing `When the retry budget is exhausted` step
+  (`ErrFaultInjectionNotWired`) — the new `Then` lines never execute yet,
+  same disclosed seam gap every `milestone-03`/`milestone-04`
+  fault-injection scenario already hits. Not a fresh gap.
+- The new crash-recovery scenario fails at its own `Given` (`leg 2's
+  reversal has posted and leg 1's reversal attempt never ran...`) —
+  `ErrFaultInjectionNotWired`, the identical disclosed seam.
+- Compile-clean (`go build ./...`, `go vet
+  ./tests/acceptance/intertenanttransfer/...` both zero-output this
+  session) — the new `Verdict`/`AssertTrialBalanceHolds` additions
+  resolve cleanly; zero `IMPORT_ERROR`/`FIXTURE_BROKEN`/`SETUP_FAILURE`,
+  zero `WRONG_ASSERTION`/`OBSERVABLE_NOT_AT_PORT`.
+
+5 passed / 36 failed matches the prior session's own 5 passed / 35 failed
+baseline plus exactly one more failing scenario (the new crash-recovery
+scenario) — no regression, no unexpected new pass (a new pass here would
+indicate a fixture doing the feature's own work, per Critical Rule 7 — did
+not occur).
+
+**Scenario-count table above** (`## Scenario list with tags`) is now stale
+by one row for `milestone-04` — noted here rather than silently rewritten:
+was "7 (1 `@pending`)" at original authorship, is now 8 (all executable, no
+`@pending` remaining since Amendment 3's closure) after this session's
+addition. Total executable scenarios: 41 (was 40).
+
+## 2026-09-07 — reviewer follow-up (2 blockers closed, 1 non-blocking checked)
+
+Scoped fix responding to `nw-acceptance-designer-reviewer`'s
+`rejected_pending_revisions` verdict on
+`milestone-04-reverse-after-retry-budget-exhausted.feature`.
+
+1. **BLOCKER — contract-shape tag wrong on scenarios 8 & 9** — both
+   `reversal_failed` scenarios ("A reversal that itself exhausts its own
+   retry budget is a named, distinguishable state" and its leg-2 variant)
+   were tagged `@contract-shape:unbounded-preservation`; both retagged to
+   `@contract-shape:bounded-change`. Reviewer's classification rule applied
+   correctly on re-check: the scenario's `When` is a transition
+   (reversal-in-progress → the new terminal state `reversal_failed`), not an
+   invariant held across transactions — the shape this file's own two
+   sibling "exhausting retries" scenarios (leg 2, leg 3) already carry as
+   `bounded-change`. The prior tagging session (see "AT-completeness
+   follow-up" note above) tagged these two by copy-adjacency to the
+   surrounding unbounded-preservation block (reversal-never-edits,
+   not-automatically-retried, resend-treated-as-original, terminal-state-names-reason)
+   rather than by re-deriving the shape from each scenario's own `When` —
+   the mechanical error the reviewer caught. `Scenario list with tags` table
+   above is now stale by two rows for `milestone-04`'s contract-shape split
+   (was "2 bounded-change, 5 unbounded-preservation", now 4/3) — noted here
+   rather than silently rewritten.
+2. **HIGH — crash seam naming/semantic mismatch** — `SimulateCrashBeforeFirstAttempt`
+   was reused for both the forward-path crash window (leg 1 commit → leg
+   2's first attempt, milestone-03) and the new reversal-path window (leg 2
+   reversed → leg 1's reversal never attempted, milestone-04's new crash
+   scenario), under a name/doc comment describing only the forward case.
+   Fixed by splitting into two explicitly-named methods in `world.go`:
+   `SimulateCrashBeforeForwardLegAttempt` (forward path, milestone-03's
+   existing call site) and `SimulateCrashBeforeReversalAttempt` (reversal
+   path, milestone-04's new call site) — chosen over a single
+   parameterized method or a doc-comment-only fix because this suite's own
+   established convention already gives each distinct fault-injection
+   concept its own named `World` method (`InjectLegFault`,
+   `RunRetryTickerOnce`, `SeedTransfersDueForRetry` are none of them
+   parameterized-by-window); splitting matches that precedent rather than
+   introducing a new parameterization style. Both new methods still return
+   `ErrFaultInjectionNotWired` (RED scaffold, unchanged behavior) — this is
+   a rename/split for correctness of the seam's contract, not new
+   implementation. Package doc comment at the top of `world.go` and the
+   in-file cross-reference comment in `milestone-04-reverse-after-retry-budget-exhausted.feature`
+   both updated to describe both windows explicitly and name both methods.
+   `steps_intertenanttransfer_test.go` call sites updated (one per method,
+   no behavior change).
+3. **Non-blocking — `AssertTrialBalanceHolds` single-call risk — checked,
+   no fix needed.** Reviewer flagged the method makes one `GET
+   /health/trial-balance` call with no retry/consistency handling. Checked
+   `brief.md`: `TransactionRepository.TrialBalance(scope)` is documented as
+   `pure-function (return-only)` (line ~1811) and `GET /health/trial-balance`
+   as a read-only driving port with no caching or async read-model
+   mentioned anywhere in the architecture brief (lines ~1814-1816, ~101).
+   This is a synchronous monolith reading directly from the same
+   PostgreSQL 16 store the reversal write commits to — no eventual
+   consistency window exists to retry against. No fix applied.
+
+**RED classification** (`go test ./tests/acceptance/intertenanttransfer/...
+-run TestMain -count=1`, run this session, foreground, real Postgres 16 via
+Testcontainers): **41 scenarios, 5 passed, 36 failed, 0 undefined steps** —
+identical count to the prior session's baseline (retag + rename touch zero
+scenario/step wiring). All four `milestone-04` scenarios that exercise the
+renamed/retagged surface still fail at the same disclosed
+`ErrFaultInjectionNotWired` seam gap (RED, `MISSING_FUNCTIONALITY`-equivalent),
+never at a compile error or fixture bug. `go build ./...` and `go vet ./...`
+both zero-output.
+
 ## Outcomes register — not run
 
 `nwave-ai outcomes register` is confirmed broken in this install (missing

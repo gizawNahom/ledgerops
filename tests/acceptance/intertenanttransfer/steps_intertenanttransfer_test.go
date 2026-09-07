@@ -187,12 +187,26 @@ func RegisterSteps(ctx *godog.ScenarioContext, w *World) {
 
 	ctx.Given(`^leg 2's inline attempt never ran, simulating a process crash immediately after leg 1's commit$`,
 		func(c context.Context) error {
-			return w.SimulateCrashBeforeFirstAttempt(c, w.LastTransferAnswer().TransferID)
+			return w.SimulateCrashBeforeForwardLegAttempt(c, w.LastTransferAnswer().TransferID)
 		})
 
 	ctx.When(`^the retry ticker's next tick runs, with no inline attempt ever having occurred$`,
 		func(c context.Context) error {
 			return w.RunRetryTickerOnce(c)
+		})
+
+	// Fix 4 (2026-09-07): reversal's own crash window -- leg 2's reversal
+	// already posted, leg 1's reversal attempt never ran. This is a
+	// semantically distinct crash window from milestone-03's forward-leg
+	// crash scenario, so it uses its own SimulateCrashBeforeReversalAttempt
+	// seam (split from the forward-path seam in the 2026-09-07 follow-up
+	// fix 2, see world.go package doc) rather than reusing the forward-path
+	// method under a name that no longer described it. The When step
+	// immediately above it is unchanged (same wording, same regex) to
+	// resume via one ticker tick.
+	ctx.Given(`^leg 2's reversal has posted and leg 1's reversal attempt never ran, simulating a process crash between the two compensating entries$`,
+		func(c context.Context) error {
+			return w.SimulateCrashBeforeReversalAttempt(c, w.LastTransferAnswer().TransferID)
 		})
 
 	ctx.Given(`^more than the ticker's batch limit of cross-tenant transfers are simultaneously due for a retry attempt$`,
@@ -496,6 +510,19 @@ func RegisterSteps(ctx *godog.ScenarioContext, w *World) {
 	ctx.Then(`^tenant "([^"]*)"'s wallet balance and the platform account balance both return to their pre-transfer values$`,
 		func(_ string) error { return nil })
 
+	// Fix 1 (2026-09-07): the receiving tenant's own balance is unaffected by
+	// a reversal it never settled into -- shape-only placeholder today, same
+	// convention as the sibling pre-transfer-value Then steps immediately
+	// above (RED at the fault-injection Given, never reaches this line).
+	ctx.Then(`^tenant "([^"]*)"'s wallet balance is unchanged$`, func(_ string) error { return nil })
+
+	// Fix 2 (2026-09-07): I3 -- the reversal never leaves the books
+	// out-of-balance. Delegates the whole call+compare to one composition
+	// method (Mandate-12 criterion 3).
+	ctx.Then(`^every touched account's trial balance holds after the reversal$`, func(c context.Context) error {
+		return w.AssertTrialBalanceHolds(c)
+	})
+
 	ctx.Then(`^the original legs remain exactly as posted$`, func() error { return nil })
 
 	ctx.Then(`^the reversal appears as new, additional entries only$`, func() error { return nil })
@@ -526,6 +553,12 @@ func RegisterSteps(ctx *godog.ScenarioContext, w *World) {
 	ctx.Then(`^leg 2 was attempted exactly 5 times before the transfer reversed$`, func() error { return nil })
 
 	ctx.Then(`^leg 3 was attempted exactly 5 times before reversal began$`, func() error { return nil })
+
+	// Fix 4 (2026-09-07): exactly-once reversal under crash -- shape-only
+	// today, same convention as the attempt-count Then steps around it (the
+	// scenario already fails earlier, at its own Given,
+	// ErrFaultInjectionNotWired, until DELIVER wires the seam).
+	ctx.Then(`^leg 2 was reversed exactly once$`, func() error { return nil })
 
 	ctx.Then(`^the reversal of leg 1 was attempted exactly 5 times before failing$`, func() error { return nil })
 

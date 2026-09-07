@@ -213,6 +213,13 @@ type TransferAnswer struct {
 
 func (a TransferAnswer) Accepted() bool { return a.Status >= 200 && a.Status < 300 }
 
+// Verdict is the operator's one-question "do the books balance" answer (I3),
+// reused verbatim from ledgercore -- the same wire sentence multitenancy's
+// own CheckTrialBalance already asserts on, not redeclared (Mandate-12).
+type Verdict = ledgercore.Verdict
+
+const BooksBalanceYes = ledgercore.BooksBalanceYes
+
 // LegStatusOf returns the named leg's status, or "" if the response never
 // named it.
 func (a TransferAnswer) LegStatusOf(leg int) LegStatus {
