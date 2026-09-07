@@ -109,6 +109,109 @@ func provisionTenantHandler(ledger *app.Ledger) http.HandlerFunc {
 	}
 }
 
+// authorizeTenantPairRequest is the wire shape POST /tenant-links accepts.
+type authorizeTenantPairRequest struct {
+	TenantA string `json:"tenant_a"`
+	TenantB string `json:"tenant_b"`
+}
+
+// authorizeTenantPairHandler grants a standing authorization between two
+// tenants through the application shell (internal/app/usecases.go, step
+// 01-03). requireOperatorKey (unmodified, DDD-22) already gates this route:
+// only the platform-admin credential ever reaches this handler.
+//
+// tenant_a/tenant_b on the wire name tenants by the display name the operator
+// gave them at provisioning (POST /tenants' own "name" field) -- the only
+// identifier an operator naming two tenants by hand actually has. Ledger.
+// AuthorizeTenantPair (step 01-03), like CreateAccount/GetBalance, takes
+// tenant_id. resolveProvisionedTenantID performs that name -> tenant_id
+// translation here, at the adapter boundary, mirroring requireTenantKey's own
+// credential -> tenant_id translation ahead of every tenant-scoped use case
+// call -- not a change to the use case's own contract.
+func authorizeTenantPairHandler(ledger *app.Ledger, store ports.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var body authorizeTenantPairRequest
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeRefusal(w, r, http.StatusBadRequest, "malformed_request", nil)
+			return
+		}
+		if body.TenantA == "" || body.TenantB == "" {
+			writeRefusal(w, r, http.StatusBadRequest, "malformed_request", nil)
+			return
+		}
+
+		tenantAID, err := resolveProvisionedTenantID(r.Context(), store, body.TenantA)
+		if err != nil {
+			writeDomainError(w, r, err)
+			return
+		}
+		tenantBID, err := resolveProvisionedTenantID(r.Context(), store, body.TenantB)
+		if err != nil {
+			writeDomainError(w, r, err)
+			return
+		}
+
+		link, err := ledger.AuthorizeTenantPair(r.Context(), tenantAID, tenantBID)
+		if err != nil {
+			writeDomainError(w, r, err)
+			return
+		}
+
+		writeJSON(w, http.StatusCreated, tenantLinkWire(link))
+	}
+}
+
+// resolveProvisionedTenantID translates a tenant's display name into its
+// tenant_id via a dedicated, read-only unit of work -- rolled back
+// unconditionally since it never writes. An absent name surfaces
+// domain.TenantNotFound exactly as TenantRepository.ByName already produces
+// it, so it flows through writeDomainError/status.go's existing exhaustive
+// switch unchanged.
+func resolveProvisionedTenantID(ctx context.Context, store ports.Store, name string) (string, error) {
+	uow, err := store.Begin(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer uow.Rollback(ctx)
+
+	tenant, err := uow.Tenants().ByName(ctx, name)
+	if err != nil {
+		return "", err
+	}
+	return tenant.TenantID(), nil
+}
+
+// revokeTenantLinkHandler ends a standing authorization through the
+// application shell. requireOperatorKey already gates this route.
+func revokeTenantLinkHandler(ledger *app.Ledger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		linkID := chi.URLParam(r, "link_id")
+
+		if err := ledger.RevokeTenantLink(r.Context(), linkID); err != nil {
+			writeDomainError(w, r, err)
+			return
+		}
+
+		writeJSON(w, http.StatusOK, map[string]any{
+			"link_id": linkID,
+			"status":  string(domain.TenantLinkRevoked),
+		})
+	}
+}
+
+// tenantLinkWire renders a domain.TenantLink onto the wire shape both
+// AuthorizeTenantPair's success response and (eventually) any tenant-link
+// read use — link_id, both tenant ids, and status, matching DISCUSS's own
+// illustrative example.
+func tenantLinkWire(link domain.TenantLink) map[string]any {
+	return map[string]any{
+		"link_id":  link.LinkID(),
+		"tenant_a": link.TenantA(),
+		"tenant_b": link.TenantB(),
+		"status":   string(link.Status()),
+	}
+}
+
 // getBalanceHandler reads one account's stored balance.
 func getBalanceHandler(ledger *app.Ledger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {

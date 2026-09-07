@@ -139,14 +139,14 @@ func NewRouter(deps Deps) http.Handler {
 		protected.Get("/console/verdict", verdictHandler(ledger, metrics))
 
 		// POST /tenant-links, DELETE /tenant-links/{link_id} (inter-tenant-transfer,
-		// confirmed 2026-09-07, slice 01). RED scaffold — reuses
-		// requireOperatorKey verbatim as the platform-admin gate (§ For
-		// Acceptance Designer: "OperatorKey only"), mirroring POST /tenants'
-		// own precedent above. No new gating logic needed for the
-		// unauthenticated/wrong-key/tenant-scoped refusal — it is already
-		// covered by this group's existing middleware.
-		protected.Post("/tenant-links", scaffold("authorize_tenant_pair"))
-		protected.Delete("/tenant-links/{link_id}", scaffold("revoke_tenant_link"))
+		// real as of step 01-04). Reuses requireOperatorKey verbatim as the
+		// platform-admin gate (§ For Acceptance Designer: "OperatorKey
+		// only"), mirroring POST /tenants' own precedent above. No new
+		// gating logic needed for the unauthenticated/wrong-key/tenant-scoped
+		// refusal — it is already covered by this group's existing
+		// middleware, which runs before either handler body below.
+		protected.Post("/tenant-links", authorizeTenantPairHandler(ledger, deps.Store))
+		protected.Delete("/tenant-links/{link_id}", revokeTenantLinkHandler(ledger))
 	})
 
 	// DDD-23 Option C: POST /accounts, POST /transfers, and GET
