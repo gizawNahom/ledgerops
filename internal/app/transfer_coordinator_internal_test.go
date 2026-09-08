@@ -128,3 +128,35 @@ func TestReverseLeg1Movement_SwapsLeg1sOwnFromAndToUnderTheSameTenant(t *testing
 		t.Fatalf("key = %q, want %q", key, legReverseKey(state.IdempotencyKey, 1))
 	}
 }
+
+// TestReverseLeg2Movement_SwapsLeg2sOwnFromAndToUnderThePlatformTenant
+// proves the pure decision behind leg 2's own compensating reversal (04-02,
+// generalizing TestReverseLeg1Movement's own leg-1 case one leg over): the
+// two platform-mirror accounts swap sides relative to leg 2's own original
+// Post, entirely within tnt_platform's own tenant scope (I8 unmodified) —
+// the same unmodified Post function every other leg's reversal already
+// reuses, zero new domain operation.
+func TestReverseLeg2Movement_SwapsLeg2sOwnFromAndToUnderThePlatformTenant(t *testing.T) {
+	state := ports.TransferState{
+		TenantID:             "tnt_acme",
+		CounterpartyTenantID: "tnt_beacon",
+		IdempotencyKey:       "idem-abc",
+	}
+
+	from, to, tenantID, key := reverseLeg2Movement(state)
+
+	wantFrom := platformMirrorAccountID(state.CounterpartyTenantID)
+	wantTo := platformMirrorAccountID(state.TenantID)
+	if from != wantFrom {
+		t.Fatalf("from = %q, want %q (leg 2's own original To, swapped)", from, wantFrom)
+	}
+	if to != wantTo {
+		t.Fatalf("to = %q, want %q (leg 2's own original From, swapped)", to, wantTo)
+	}
+	if tenantID != platformTenantID {
+		t.Fatalf("tenantID = %q, want %q (I8: strictly intra-tenant, unmodified)", tenantID, platformTenantID)
+	}
+	if key != legReverseKey(state.IdempotencyKey, 2) {
+		t.Fatalf("key = %q, want %q", key, legReverseKey(state.IdempotencyKey, 2))
+	}
+}

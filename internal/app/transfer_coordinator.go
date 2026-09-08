@@ -284,6 +284,23 @@ func (tc *TransferCoordinator) consumeForwardCrashSimulation(transferID string) 
 	return false
 }
 
+// consumeReversalCrashSimulation reports (and clears) whether this transfer
+// was marked to skip its inline leg-1-reversal attempt (04-02) -- the
+// compensating-side mirror of consumeForwardCrashSimulation above. Checked
+// ONLY from the inline reversal path (reverseLeg2ThenLeg1, isInlinePath
+// true): the ticker's own resumeLeg1Reversal path below never consults this
+// flag, exactly as attemptLeg's own isInlinePath gate keeps the ticker from
+// ever mistaking a forward-crash flag for its own instruction to stand down.
+func (tc *TransferCoordinator) consumeReversalCrashSimulation(transferID string) bool {
+	tc.testOnly.mu.Lock()
+	defer tc.testOnly.mu.Unlock()
+	if tc.testOnly.skipReversalCrash[transferID] {
+		delete(tc.testOnly.skipReversalCrash, transferID)
+		return true
+	}
+	return false
+}
+
 // SimulateCrashBeforeReversalAttempt marks a transfer so the reversal path
 // (step 03-02/04's own scope — no reversal dispatch exists yet) will skip
 // attempting an earlier leg's reversal on whatever inline path eventually
@@ -719,7 +736,7 @@ func (tc *TransferCoordinator) attemptLeg(ctx context.Context, transferID string
 		})
 	}
 	if postErr != nil {
-		return tc.handleLegFailure(ctx, transferID, leg, state, postErr)
+		return tc.handleLegFailure(ctx, transferID, leg, state, postErr, isInlinePath)
 	}
 	return tc.recordLegSuccess(attemptCtx, transferID, leg)
 }
@@ -761,17 +778,26 @@ func backoffForAttempt(failedAttempts int, jitter float64) (time.Duration, bool)
 // due again (budget not yet exhausted), or — once the budget is exhausted —
 // triggers reversal of every leg already posted. Leg 2 exhausting its
 // budget reverses leg 1 only, since leg 3 is never attempted before leg 2
-// succeeds (attemptForwardLegsFrom's own sequencing) — this step's own
-// scope (04-01). Leg 3 exhausting its own budget (reversing leg 2 then leg
-// 1, in order) is slice 04's next step, left as a narrower scope here: that
-// leg still falls through to the ordinary "stay retrying" path below,
-// unchanged from step 03-02.
-func (tc *TransferCoordinator) handleLegFailure(ctx context.Context, transferID string, leg int, state ports.TransferState, postErr error) error {
+// succeeds (attemptForwardLegsFrom's own sequencing) — step 04-01's own
+// scope. Leg 3 exhausting its own budget reverses leg 2 then leg 1, in
+// that order (04-02, "compensating entries are unwound in reverse-of-
+// posting order") — isInlinePath is threaded through so
+// reverseLeg2ThenLeg1 can tell whether it is the one path allowed to
+// consult the reversal crash-simulation flag (mirrors attemptLeg's own
+// isInlinePath gate on the forward side).
+func (tc *TransferCoordinator) handleLegFailure(ctx context.Context, transferID string, leg int, state ports.TransferState, postErr error, isInlinePath bool) error {
 	failedAttempts := tc.recordFailedAttempt(transferID, leg)
 	delay, ok := backoffForAttempt(failedAttempts, rand.Float64())
 
 	if !ok && leg == 2 {
 		if err := tc.reverseLeg1(ctx, transferID, state); err != nil {
+			return err
+		}
+		return postErr
+	}
+
+	if !ok && leg == 3 {
+		if err := tc.reverseLeg2ThenLeg1(ctx, transferID, state, isInlinePath); err != nil {
 			return err
 		}
 		return postErr
@@ -820,16 +846,37 @@ func legReverseKey(idempotencyKey string, leg int) string {
 
 // reverseLeg1 triggers when leg 2's retry budget is exhausted (leg 3 is
 // never attempted before leg 2 succeeds, so leg 1 is the only leg that ever
-// posted). Guarded on leg 1's own posted precondition first — a compensating
-// Post is only ever issued once transfer_state's own record shows leg 1
-// already posted (structurally always true here, since SendTransfer never
-// creates a transfer_state row before leg 1 commits, but checked explicitly
-// so the precondition is visible rather than merely assumed, mirroring
-// DESIGN's own explicit instruction to read-before-compensate). The
-// reversal itself is a fresh Post call through the SAME unmodified
-// Ledger.PostTransfer every other leg already uses — zero new domain
-// operation, zero new domain.ViolationKind member.
+// posted). Issues leg 1's own compensating Post via postLeg1Reversal below,
+// then advances the transfer straight to its terminal "reversed" status —
+// leg 1 is the LAST compensating entry in every reversal sequence this
+// coordinator ever issues (whether triggered by leg 2's own exhaustion here,
+// or by leg 3's, one call site over in reverseLeg2ThenLeg1), so this is the
+// one place "reversed" is ever written.
 func (tc *TransferCoordinator) reverseLeg1(ctx context.Context, transferID string, state ports.TransferState) error {
+	if err := tc.postLeg1Reversal(ctx, transferID, state); err != nil {
+		return err
+	}
+	return tc.advanceAfterLegOutcome(ctx, transferID, statusReversed, tc.ledger.clock(), reasonRetryBudgetExhausted)
+}
+
+// postLeg1Reversal is the pure Post-issuing half of leg 1's own compensating
+// reversal — factored out of reverseLeg1 (04-02) so both reverseLeg1's own
+// inline call and resumeLeg1Reversal's ticker-driven call (below, the
+// crash-recovery path) share one mechanism rather than two independently
+// maintained copies. Guarded on leg 1's own posted precondition first — a
+// compensating Post is only ever issued once transfer_state's own record
+// shows leg 1 already posted (structurally always true here, since
+// SendTransfer never creates a transfer_state row before leg 1 commits, but
+// checked explicitly so the precondition is visible rather than merely
+// assumed, mirroring DESIGN's own explicit instruction to
+// read-before-compensate). The reversal itself is a fresh Post call through
+// the SAME unmodified Ledger.PostTransfer every other leg already uses —
+// zero new domain operation, zero new domain.ViolationKind member. Calling
+// this twice for the same transfer is safe and non-doubling: the second
+// call's Post reuses the identical legReverseKey(key, 1) idempotency key, so
+// IdempotencyStore's own unique constraint makes it a replay, not a second
+// application (the same guarantee I7 already gives one level up).
+func (tc *TransferCoordinator) postLeg1Reversal(ctx context.Context, transferID string, state ports.TransferState) error {
 	leg1Posted, err := withUnitOfWork(ctx, tc.ledger.store, fmt.Sprintf("checking leg 1's own posted precondition before reversing transfer %q", transferID),
 		func(uow ports.UnitOfWork) (string, error) {
 			return legPostedStatus(ctx, uow, state.IdempotencyKey)
@@ -854,17 +901,133 @@ func (tc *TransferCoordinator) reverseLeg1(ctx context.Context, transferID strin
 
 	reverseCtx, cancel := context.WithTimeout(ctx, attemptTimeout)
 	defer cancel()
-	if _, err := tc.ledger.PostTransfer(reverseCtx, TransferRequest{
+	_, err = tc.ledger.PostTransfer(reverseCtx, TransferRequest{
 		From:           from,
 		To:             to,
 		Amount:         state.Amount,
 		IdempotencyKey: key,
 		Fingerprint:    legFingerprint(from, to, state.Amount),
 		TenantID:       tenantID,
-	}); err != nil {
+	})
+	return err
+}
+
+// reverseLeg2Movement is reverseLeg1Movement's own leg-2 generalization
+// (04-02): the SAME two platform-mirror accounts leg 2's original Post moved
+// between, From/To swapped, entirely within tnt_platform's own tenant scope
+// (I8 unmodified) — unlike leg 1's reversal, no impure account lookup is
+// needed first, since both mirror account ids are deterministic functions of
+// the two tenant ids already carried on state.
+func reverseLeg2Movement(state ports.TransferState) (from, to, tenantID, key string) {
+	return platformMirrorAccountID(state.CounterpartyTenantID),
+		platformMirrorAccountID(state.TenantID),
+		platformTenantID,
+		legReverseKey(state.IdempotencyKey, 2)
+}
+
+// postLeg2Reversal is leg 2's own compensating Post — mirrors
+// postLeg1Reversal's shape one leg over. No posted-precondition read before
+// issuing the Post: reverseLeg2ThenLeg1 (the only caller) is only ever
+// invoked once leg 3's retry budget exhausts, which itself only happens
+// after leg 2 has successfully posted (attemptForwardLegsFrom's own
+// sequencing never attempts leg 3 before leg 2 posts) — the precondition is
+// structural, not merely assumed. Calling this twice is safe for the same
+// reason postLeg1Reversal's own repeat call is: legReverseKey(key, 2) is a
+// stable idempotency key, so IdempotencyStore itself is the double-
+// application guard.
+func (tc *TransferCoordinator) postLeg2Reversal(ctx context.Context, state ports.TransferState) error {
+	from, to, tenantID, key := reverseLeg2Movement(state)
+	reverseCtx, cancel := context.WithTimeout(ctx, attemptTimeout)
+	defer cancel()
+	_, err := tc.ledger.PostTransfer(reverseCtx, TransferRequest{
+		From:           from,
+		To:             to,
+		Amount:         state.Amount,
+		IdempotencyKey: key,
+		Fingerprint:    legFingerprint(from, to, state.Amount),
+		TenantID:       tenantID,
+	})
+	return err
+}
+
+// reverseLeg2ThenLeg1 triggers when leg 3's retry budget is exhausted (leg 1
+// and leg 2 have both already posted, by attemptForwardLegsFrom's own
+// sequencing) — compensating entries are unwound in reverse-of-posting
+// order (04-02, mirroring how a stack unwinds): leg 2 first, leg 1 second.
+// Leg 2's own reversal must COMMIT before leg 1's reversal is even
+// attempted, which is exactly the sequencing calling postLeg2Reversal to
+// completion before ever calling postLeg1Reversal below provides.
+//
+// isInlinePath gates the SimulateCrashBeforeReversalAttempt check exactly
+// like attemptLeg's own isInlinePath gates consumeForwardCrashSimulation on
+// the forward side: only the inline self-rescheduling retry goroutine (the
+// one whose 5th failed attempt landed here) may ever have been told to skip
+// its own leg-1-reversal attempt. When it is told to skip, the transfer is
+// advanced to statusRetrying with next_attempt_at reset to now — the SAME
+// status ClaimDue/ClaimOne already select on — so the retry ticker
+// (resumeLeg1Reversal below, driven from attemptDueLegs' own
+// reversalPending check) is the only path left to complete leg 1's own
+// reversal. Leg 2's reversal having already committed by this point, and
+// postLeg1Reversal/resumeLeg1Reversal never re-issuing leg 2's own Post, is
+// what proves "without double-reversing leg 2" under that crash.
+func (tc *TransferCoordinator) reverseLeg2ThenLeg1(ctx context.Context, transferID string, state ports.TransferState, isInlinePath bool) error {
+	if err := tc.postLeg2Reversal(ctx, state); err != nil {
 		return err
 	}
 
+	if isInlinePath && tc.consumeReversalCrashSimulation(transferID) {
+		return tc.advanceAfterLegOutcome(ctx, transferID, statusRetrying, tc.ledger.clock(), reasonRetryBudgetExhausted)
+	}
+
+	if err := tc.postLeg1Reversal(ctx, transferID, state); err != nil {
+		return err
+	}
+	return tc.advanceAfterLegOutcome(ctx, transferID, statusReversed, tc.ledger.clock(), reasonRetryBudgetExhausted)
+}
+
+// reversalPending reports whether transferID is a due, retrying row that is
+// actually mid-reversal — leg 2's own reversal already committed, leg 1's
+// own reversal still owed (04-02's own crash-recovery signal) — as opposed
+// to an ordinary forward-leg retry. This is the ONLY state shape
+// reverseLeg2ThenLeg1's own crash-simulation branch ever produces (a
+// statusRetrying row whose leg-2 reverse key already exists), so checking
+// the leg-2 reverse key alone is a safe, unambiguous signal: an ordinary
+// forward retry never has that key present.
+func (tc *TransferCoordinator) reversalPending(ctx context.Context, transferID string) (bool, error) {
+	return withUnitOfWork(ctx, tc.ledger.store, fmt.Sprintf("checking whether transfer %q is mid-reversal", transferID),
+		func(uow ports.UnitOfWork) (bool, error) {
+			state, found, err := uow.TransferStates().Get(ctx, transferID)
+			if err != nil || !found {
+				return false, err
+			}
+			if state.Status != statusRetrying {
+				return false, nil
+			}
+			_, leg2Reversed, err := uow.Idempotency().Lookup(ctx, legReverseKey(state.IdempotencyKey, 2))
+			return leg2Reversed, err
+		})
+}
+
+// resumeLeg1Reversal is the retry ticker's own completion of a reversal
+// sequence a simulated (or real) crash interrupted between leg 2's reversal
+// committing and leg 1's reversal ever being attempted — attemptDueLegs'
+// own reversalPending check is what routes a due transfer here instead of
+// the ordinary forward-leg dispatch. Claims the row first, exactly like
+// attemptLeg's own claim-before-anything discipline (a losing claim race is
+// a normal, silent no-op here too), then issues leg 1's own compensating
+// Post via the SAME postLeg1Reversal every inline reversal already uses.
+func (tc *TransferCoordinator) resumeLeg1Reversal(ctx context.Context, transferID string) error {
+	attemptCtx, cancel := context.WithTimeout(ctx, attemptTimeout)
+	defer cancel()
+
+	state, claimed, err := tc.claimTransfer(attemptCtx, transferID)
+	if err != nil || !claimed {
+		return err
+	}
+
+	if err := tc.postLeg1Reversal(ctx, transferID, state); err != nil {
+		return err
+	}
 	return tc.advanceAfterLegOutcome(ctx, transferID, statusReversed, tc.ledger.clock(), reasonRetryBudgetExhausted)
 }
 
@@ -1002,7 +1165,7 @@ func (tc *TransferCoordinator) GetTransfer(ctx context.Context, transferID strin
 			if err != nil {
 				return TransferView{}, err
 			}
-			leg2Posted, err := legPostedStatus(ctx, uow, state.IdempotencyKey+":leg2")
+			leg2Status, err := leg2DisplayStatus(ctx, uow, state.IdempotencyKey)
 			if err != nil {
 				return TransferView{}, err
 			}
@@ -1016,7 +1179,7 @@ func (tc *TransferCoordinator) GetTransfer(ctx context.Context, transferID strin
 				Status:     state.Status,
 				Reason:     state.Reason,
 				Leg1:       LegView{Status: leg1Status},
-				Leg2:       LegView{Status: leg2Posted},
+				Leg2:       LegView{Status: leg2Status},
 				Leg3:       LegView{Status: leg3Posted},
 			}, nil
 		})
@@ -1088,6 +1251,11 @@ func (tc *TransferCoordinator) processDueTransfers(ctx context.Context, batchLim
 // attempt (step 03-03: leg 2 posts, recordLegSuccess resets next_attempt_at
 // to now, and leg 3 is immediately next-due, all within this single call).
 func (tc *TransferCoordinator) attemptDueLegs(ctx context.Context, transferID string) {
+	if pending, err := tc.reversalPending(ctx, transferID); err == nil && pending {
+		_ = tc.resumeLeg1Reversal(ctx, transferID)
+		return
+	}
+
 	leg, err := tc.nextLegFor(ctx, transferID)
 	if err != nil || leg == 0 {
 		return
@@ -1159,6 +1327,26 @@ func leg1DisplayStatus(ctx context.Context, uow ports.UnitOfWork, idempotencyKey
 		return legReversed, nil
 	}
 	return legPosted, nil
+}
+
+// leg2DisplayStatus mirrors leg1DisplayStatus's own reverse-key-takes-
+// precedence check, generalized to leg 2 (04-02): once leg 2's own
+// compensating reversal commits (reverseLeg2ThenLeg1/resumeLeg1Reversal's
+// own scope), its caller-facing status must report "reversed", not
+// "posted" — the SAME convention leg1DisplayStatus already established one
+// leg over. Unlike leg 1 (whose forward status is always "posted" once a
+// row exists at all), leg 2's forward status can still be "pending", so the
+// non-reversed branch delegates to legPostedStatus rather than a fixed
+// constant.
+func leg2DisplayStatus(ctx context.Context, uow ports.UnitOfWork, idempotencyKey string) (string, error) {
+	_, found, err := uow.Idempotency().Lookup(ctx, legReverseKey(idempotencyKey, 2))
+	if err != nil {
+		return "", fmt.Errorf("checking leg 2 reversal status for key %q: %w", idempotencyKey, err)
+	}
+	if found {
+		return legReversed, nil
+	}
+	return legPostedStatus(ctx, uow, idempotencyKey+":leg2")
 }
 
 // legPostedStatus answers one leg's caller-facing status by looking up its
