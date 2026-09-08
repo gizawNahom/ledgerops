@@ -518,6 +518,61 @@ renamed/retagged surface still fail at the same disclosed
 never at a compile error or fixture bug. `go build ./...` and `go vet ./...`
 both zero-output.
 
+## 2026-09-08 — DELIVER back-propagation: async-retry step-definition bug (2 steps fixed)
+
+Scoped fix requested by DELIVER's own orchestrator (`/nw-deliver
+inter-tenant-transfer`, step 03-02) — DELIVER's crafter found that
+`milestone-03-retry-a-stalled-leg.feature`'s "A stalled leg 2 retries to
+settlement" scenario cannot pass against a CORRECT production implementation
+because of a step-definition bug, not a production gap. Per this skill's own
+Document Update (Back-Propagation) procedure: DISTILL-owned test
+infrastructure gap, DELIVER work otherwise unaffected, no `.feature` text
+touched.
+
+**Bug**: `leg 2's retry succeeds` and `leg 2's third attempt succeeds`
+(`steps_intertenanttransfer_test.go`, previously lines 317/321) were each
+implemented as a single, immediate `w.QueryTransfer(...)` call — a bare
+point-in-time read. Production's real backoff schedule is 1s/2s/4s/8s+~20%
+jitter (`design/wave-decisions.md`), so the actual successful retry lands
+asynchronously, roughly 1s+ (or, for the third-attempt variant, 1s+2s+4s+)
+after the injected fault. A step named "succeeds" that only reads the
+CURRENT instant can never observe the eventual `settled` state regardless of
+whether production code is correct — this is exactly the fixture/step-bug
+class the skill's own "fail-for-the-right-reason gate" exists to catch, just
+surfaced one wave late because these two scenarios were still blocked
+earlier on the disclosed `ErrFaultInjectionNotWired` seam gap at the time of
+original DISTILL authorship (see "Known gap" section above) — the bug was
+latent, not exercised, until DELIVER wired the fault-injection seam and the
+scenario reached this step for the first time.
+
+**Fix**: both steps now call `w.PollTransferUntilTerminal(c, PlatformAdmin(),
+w.LastTransferAnswer().TransferID, 15*time.Second)` — the exact same method
+and timeout the walking skeleton already uses for the identical
+observe-eventual-settlement problem (`the transfer is polled until it
+reaches a terminal state`, same file). 15s kept (not narrowed to a
+tighter bound for the single-retry case) for consistency with the one
+existing precedent in this suite rather than introducing a second
+magic-number timeout to maintain — costs nothing on the happy path since
+polling exits as soon as a terminal state is observed.
+
+**Checked for the same pattern elsewhere in the file**: grepped every
+`ctx.When`/`ctx.Then` regex containing succeed/recover/resume/complete/
+finish/settle/reach. Two other point-in-time query steps exist — `the
+transfer is queried immediately after the failed attempt` and `the transfer
+is queried after the second failed attempt` — both confirmed correct
+as-is: they assert the transient `retrying` state right after the fault,
+*before* any retry has had a chance to run (see the scenario's own Gherkin
+sequencing), so an immediate read is the intended semantics, not a
+mis-timed wait. No other instance of the bug found.
+
+**Scope discipline**: no `.feature` file edited (Gherkin text unchanged —
+only the existing `When` step's own Go implementation corrected to do what
+its name already said), no production code touched, no scenario re-authored.
+`go vet ./tests/acceptance/intertenanttransfer/...` and `go build ./...`
+both zero-output this session. Full acceptance run intentionally NOT
+executed here — DELIVER's crafter re-verifies against production code in
+its own follow-up dispatch, per the orchestrator's own instruction.
+
 ## Outcomes register — not run
 
 `nwave-ai outcomes register` is confirmed broken in this install (missing

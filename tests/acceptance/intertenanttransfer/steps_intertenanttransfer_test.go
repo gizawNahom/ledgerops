@@ -315,11 +315,22 @@ func RegisterSteps(ctx *godog.ScenarioContext, w *World) {
 	})
 
 	ctx.When(`^leg 2's retry succeeds$`, func(c context.Context) error {
-		return w.QueryTransfer(c, PlatformAdmin(), w.LastTransferAnswer().TransferID)
+		// The retry happens asynchronously per the 1s/2s/4s/8s+jitter backoff
+		// schedule (DESIGN wave-decisions.md) -- a single retry can resolve up
+		// to ~1s+jitter after the injected fault. A bare immediate query can
+		// never observe it; poll for the terminal state instead, mirroring the
+		// walking skeleton's own pattern (line 301-303). 15s bound kept
+		// consistent with that skeleton even though only one retry delay is in
+		// play here, since it costs nothing on the happy path and avoids a
+		// second magic-number timeout to maintain.
+		return w.PollTransferUntilTerminal(c, PlatformAdmin(), w.LastTransferAnswer().TransferID, 15*time.Second)
 	})
 
 	ctx.When(`^leg 2's third attempt succeeds$`, func(c context.Context) error {
-		return w.QueryTransfer(c, PlatformAdmin(), w.LastTransferAnswer().TransferID)
+		// Same async-retry bug as "leg 2's retry succeeds" above: by the third
+		// attempt, up to 1s+2s+4s+jitter has elapsed since the first fault --
+		// poll for the terminal state rather than a bare instantaneous query.
+		return w.PollTransferUntilTerminal(c, PlatformAdmin(), w.LastTransferAnswer().TransferID, 15*time.Second)
 	})
 
 	// --- Then: tenant links --------------------------------------------------
