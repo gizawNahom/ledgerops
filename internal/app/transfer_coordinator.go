@@ -78,6 +78,7 @@ const (
 	// of this transfer_id (a test-only fault/crash registration arriving a
 	// few milliseconds behind the HTTP response that carried this
 	// transfer_id back) needs the row to still be unclaimed when it lands.
+	//
 	// 50ms, not 200us (step 03-03 fix): a second real HTTP round trip
 	// (client -> httptest.Server -> handler -> back) routinely costs
 	// low-single-digit milliseconds in this suite's own request logs, so a
@@ -85,12 +86,17 @@ const (
 	// against the crash-simulation registration nearly every time,
 	// defeating "a crash before any Leg 2 attempt is recovered by the retry
 	// ticker alone" before the ticker ever got a chance to claim the row.
-	// Harmless in production: the synchronous response has already been
-	// written by the time this goroutine even starts, so the extra latency
-	// is invisible at the driving port (brief.md § Sync vs. async
-	// settlement) and only ever shortens the window a stalled leg spends
-	// unclaimed.
-	inlineAttemptGraceWindow = 200 * time.Microsecond
+	// 50ms is comfortable headroom (an order of magnitude above observed
+	// same-machine loopback latency) while staying conservative: it does not
+	// meaningfully change the product's own latency story, since Legs 2/3
+	// are already allowed to complete asynchronously at any point after the
+	// synchronous `pending` response (brief.md § Sync vs. async settlement),
+	// and 50ms is invisible relative to the existing 10s per-attempt timeout
+	// and 1s+ backoff delays. Harmless in production: the synchronous
+	// response has already been written by the time this goroutine even
+	// starts, so the extra latency is invisible at the driving port and only
+	// ever shortens the window a stalled leg spends unclaimed.
+	inlineAttemptGraceWindow = 50 * time.Millisecond
 )
 
 // ErrTransferNotFound marks a GetTransfer call naming a transfer_id no
@@ -586,10 +592,10 @@ func (tc *TransferCoordinator) spawnForwardLegs(transferID string) {
 // has already scheduled its own retry, and Leg 3 must never be attempted
 // before Leg 2 has actually posted.
 func (tc *TransferCoordinator) attemptForwardLegsFrom(ctx context.Context, transferID string, leg int) {
-	if err := tc.attemptLeg(ctx, transferID, leg); err != nil || leg != 2 {
+	if err := tc.attemptLeg(ctx, transferID, leg, true); err != nil || leg != 2 {
 		return
 	}
-	_ = tc.attemptLeg(ctx, transferID, 3)
+	_ = tc.attemptLeg(ctx, transferID, 3, true)
 }
 
 // attemptLeg is the one function both the inline goroutine above and the
@@ -602,11 +608,25 @@ func (tc *TransferCoordinator) attemptForwardLegsFrom(ctx context.Context, trans
 // what makes it equally correct whether invoked moments after SendTransfer
 // or minutes later by a ticker that only just discovered the row.
 //
+// isInlinePath distinguishes attemptForwardLegsFrom's own callers (the
+// inline goroutine spawnForwardLegs starts, plus its self-rescheduled
+// retries) from processDueTransfers' ticker path (step 03-03 fix): only the
+// inline path may ever have been told, via
+// SimulateCrashBeforeForwardLegAttempt, to simulate a crash before its own
+// first Leg 2 attempt. Before this parameter existed, the crash-simulation
+// check below fired for WHICHEVER caller's attemptLeg call claimed the row
+// first — including the ticker's own attemptDueLegs call, which, once
+// inlineAttemptGraceWindow was widened enough to let the ticker reliably
+// win that claim race, started wrongly self-releasing on the ticker's own
+// dispatch instead of ever posting Leg 2 for real, permanently starving "a
+// crash before any Leg 2 attempt is recovered by the retry ticker alone" of
+// the one caller meant to recover it.
+//
 // ctx (not attemptCtx) is deliberately what handleLegFailure/scheduleRetry
 // receive below: attemptCtx's own timeout/cancellation is scoped to this one
 // Post attempt (attemptTimeout) and must not leak into a retry goroutine
 // that may still be sleeping long after this call returns.
-func (tc *TransferCoordinator) attemptLeg(ctx context.Context, transferID string, leg int) error {
+func (tc *TransferCoordinator) attemptLeg(ctx context.Context, transferID string, leg int, isInlinePath bool) error {
 	attemptCtx, cancel := context.WithTimeout(ctx, attemptTimeout)
 	defer cancel()
 
@@ -615,7 +635,7 @@ func (tc *TransferCoordinator) attemptLeg(ctx context.Context, transferID string
 		return err
 	}
 
-	if leg == 2 && tc.consumeForwardCrashSimulation(transferID) {
+	if leg == 2 && isInlinePath && tc.consumeForwardCrashSimulation(transferID) {
 		// Test-only: simulating a process crash between Leg 1's commit and
 		// Leg 2's first attempt ever running. Checked HERE — after the
 		// claim above, at the same point consumeInjectedLegFault is
@@ -631,9 +651,11 @@ func (tc *TransferCoordinator) attemptLeg(ctx context.Context, transferID string
 		// immediately via advanceAfterLegOutcome rather than leaving the
 		// row parked for a full lease's worth of otherwise-unnecessary
 		// recovery latency, so the row is due again exactly as if this
-		// crashed process had never claimed it at all. Only the retry
-		// ticker's own later claim can attempt Leg 2 from here (this
-		// consumes the one-shot flag, so that later claim runs for real).
+		// crashed process had never claimed it at all. isInlinePath is what
+		// keeps this branch reachable ONLY from the inline path above — the
+		// ticker's own attemptDueLegs call below always passes false, so it
+		// never mistakes this test-only flag for its own instruction to
+		// stand down, and instead posts Leg 2 for real.
 		return tc.advanceAfterLegOutcome(ctx, transferID, state.Status, tc.ledger.clock(), state.Reason)
 	}
 
@@ -941,13 +963,13 @@ func (tc *TransferCoordinator) attemptDueLegs(ctx context.Context, transferID st
 	if err != nil || leg == 0 {
 		return
 	}
-	_ = tc.attemptLeg(ctx, transferID, leg)
+	_ = tc.attemptLeg(ctx, transferID, leg, false)
 
 	nextLeg, err := tc.nextLegFor(ctx, transferID)
 	if err != nil || nextLeg == 0 || nextLeg == leg {
 		return
 	}
-	_ = tc.attemptLeg(ctx, transferID, nextLeg)
+	_ = tc.attemptLeg(ctx, transferID, nextLeg, false)
 }
 
 // dueTransferIDs is processDueTransfers' own read-only discovery step —
