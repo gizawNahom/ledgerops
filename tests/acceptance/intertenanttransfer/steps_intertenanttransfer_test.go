@@ -263,9 +263,30 @@ func RegisterSteps(ctx *godog.ScenarioContext, w *World) {
 	// method under a name that no longer described it. The When step
 	// immediately above it is unchanged (same wording, same regex) to
 	// resume via one ticker tick.
+	//
+	// Fix (2026-09-08, DELIVER 04-02 back-propagation): arming the crash
+	// flag itself races nothing -- SimulateCrashBeforeReversalAttempt is a
+	// near-instant HTTP call, and reverseLeg2ThenLeg1's own consuming check
+	// (transfer_coordinator.go) only ever runs once leg 3's self-
+	// rescheduling retry goroutine genuinely exhausts its real ~15-20s
+	// backoff schedule -- comfortably later than this Given ever returns.
+	// The gap was downstream of this step: nothing in either Given ever
+	// WAITED for that real-time window to elapse before the scenario's own
+	// When step fired its single, deliberate ticker tick, so the tick
+	// routinely landed while leg 3 was still mid-retry. This Given's own
+	// text ("leg 2's reversal has posted and leg 1's reversal attempt never
+	// ran") names a POST-CONDITION, not just an arming action -- so it now
+	// polls for exactly that state (leg 2's own status reads "reversed",
+	// PollTransferUntilLegStatus's own doc comment, world.go) before
+	// returning, using the same exhaustRetryPollTimeout bound step 04-01's
+	// own fix established for the identical backoff schedule.
 	ctx.Given(`^leg 2's reversal has posted and leg 1's reversal attempt never ran, simulating a process crash between the two compensating entries$`,
 		func(c context.Context) error {
-			return w.SimulateCrashBeforeReversalAttempt(c, w.LastTransferAnswer().TransferID)
+			transferID := w.LastTransferAnswer().TransferID
+			if err := w.SimulateCrashBeforeReversalAttempt(c, transferID); err != nil {
+				return err
+			}
+			return w.PollTransferUntilLegStatus(c, PlatformAdmin(), transferID, 2, LegReversed, exhaustRetryPollTimeout)
 		})
 
 	ctx.Given(`^more than the ticker's batch limit of cross-tenant transfers are simultaneously due for a retry attempt$`,

@@ -817,6 +817,78 @@ reversal-of-reversal scenarios have unwired `Given` stubs (noted above), and
 authorization-boundary gaps (`unidentified_caller` vs expected
 `transfer_not_found`/`counterparty_not_found`).
 
+## 2026-09-08 — step 04-02 back-propagation: crash-window Given now waits for its own postcondition
+
+**Scope**: scoped fix to `tests/acceptance/intertenanttransfer/steps_intertenanttransfer_test.go`
+and `world.go` only, dispatched from `/nw-deliver inter-tenant-transfer`
+step 04-02. No `.feature` Gherkin text changed, no production code changed
+(`internal/app/transfer_coordinator.go` untouched, per the dispatch's own
+explicit instruction).
+
+**Target scenario**: "A crash between reversing leg 2 and reversing leg 1
+resumes without double-reversing leg 2"
+(`milestone-04-reverse-after-retry-budget-exhausted.feature:61`).
+
+**Root cause**: the scenario's crash-simulation `Given`
+(`leg 2's reversal has posted and leg 1's reversal attempt never ran,
+simulating a process crash between the two compensating entries`) called
+`SimulateCrashBeforeReversalAttempt` and returned immediately. Arming that
+flag itself races nothing — it's a near-instant HTTP call, and
+`reverseLeg2ThenLeg1`'s own consuming check (`transfer_coordinator.go`) only
+runs once leg 3's self-rescheduling retry goroutine genuinely exhausts its
+real ~15-20s backoff schedule. The actual gap was downstream: nothing in
+either `Given` step ever WAITED for that real-time window to elapse before
+the scenario's own `When` step (`the retry ticker's next tick runs, with no
+inline attempt ever having occurred`) fired its single, deliberate tick — so
+the tick routinely landed while leg 3 was still mid-retry (observed:
+`leg3: pending`), well before `reverseLeg2ThenLeg1`'s crash-consuming branch
+had ever run.
+
+**Fix**: the crash-simulation `Given`'s own text
+("leg 2's reversal has posted and leg 1's reversal attempt never ran") names
+a POST-CONDITION, not just an arming action. It now polls, after arming the
+flag, for that exact postcondition: leg 2's own observable status
+(`GET /transfers/{id}` → `Legs[2].Status`) reads `"reversed"` — the
+production-exposed signal that leg 3 exhausted, `reverseLeg2ThenLeg1` ran
+inline, `postLeg2Reversal` committed, the crash flag was consumed (skipping
+leg 1's own reversal attempt), and the transfer was parked back at
+`statusRetrying` (`reversalPending`'s own shape). Only once that state is
+observed does the `Given` return, so the `When` step's single ticker tick
+has something genuine to resume.
+
+**New helper**: `PollTransferUntilLegStatus(ctx, as, transferID, leg,
+want, timeout)` (`world.go`) — mirrors `PollTransferUntilStatusLeaves`'s
+shape but checks a per-leg field instead of the overall transfer status.
+Fails fast (rather than spinning to timeout) if the transfer reaches a
+terminal status before the named leg ever reaches `want` — turns a silent
+race into a clear, immediate failure instead of a timeout with a confusing
+message. Bounded by the existing `exhaustRetryPollTimeout` constant (25s,
+step 04-01's own fix) — same backoff schedule, no new timeout derivation
+needed.
+
+**Left unchanged, deliberately**: the preceding `Given`
+(`tenant "X" sent Y to "Z", leg 1 and leg 2 have posted, and leg 3 has
+failed on all 5 attempts of its retry budget`, line ~326) still just arms
+`InjectLegFaultCount(..., 3, 5)` and returns immediately — it must NOT wait
+for leg 3's full exhaustion itself, because the crash flag has to be armed
+(by the *next* `Given`) before the goroutine reaches its 5th failed attempt.
+Making the fault-arming `Given` wait for exhaustion would let
+`reverseLeg2ThenLeg1` run to completion (posting BOTH leg 2's and leg 1's
+reversals inline) before the crash flag is ever set, defeating the
+scenario's own intent. The wait belongs on the crash-arming step, which is
+where this fix put it.
+
+**Verification**: `go build ./...` clean, `go vet
+./tests/acceptance/intertenanttransfer/...` clean. `LD_LIBRARY_PATH=/tmp go
+test ./tests/acceptance/intertenanttransfer/... -run TestMain -count=1`:
+**34/41 passing** — the target scenario now green, zero regressions on the
+33 previously-passing scenarios. The 7 remaining failures are pre-existing
+and out of this fix's scope: 2 "reversal of a reversal" scenarios
+(unimplemented production path, unrelated `Given` stubs per the entry
+above) and 5 milestone-05 tenant-link/counterparty authorization-boundary
+gaps (`unidentified_caller` vs expected `transfer_not_found`/
+`counterparty_not_found`).
+
 ## Outcomes register — not run
 
 `nwave-ai outcomes register` is confirmed broken in this install (missing

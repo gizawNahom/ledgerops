@@ -631,6 +631,59 @@ func (w *World) PollTransferUntilStatusLeaves(ctx context.Context, as Caller, tr
 	}
 }
 
+// PollTransferUntilLegStatus polls (real time, bounded by timeout) until the
+// named leg's own observable status (GET /transfers/{id}'s Legs[leg].Status,
+// GetTransfer/legPostedStatus in transfer_coordinator.go) reads `want`.
+//
+// Added 2026-09-08 (milestone-04 step 04-02 back-propagation): the
+// leg-2-then-leg-1 crash-recovery scenario's own crash-simulation Given
+// ("leg 2's reversal has posted and leg 1's reversal attempt never ran ...")
+// arms SimulateCrashBeforeReversalAttempt's flag near-instantly -- that part
+// races nothing, since the flag is only ever consumed later, inline, from
+// reverseLeg2ThenLeg1 (transfer_coordinator.go) once leg 3's self-
+// rescheduling retry goroutine (handleLegFailure -> scheduleRetry) actually
+// exhausts its real ~15-20s backoff schedule (exhaustRetryPollTimeout's own
+// doc comment derives the bound). The bug this helper fixes is different:
+// nothing in either Given step ever waited for that real-time window to
+// elapse before the scenario's own When step
+// ("the retry ticker's next tick runs, with no inline attempt ever having
+// occurred") fired its single, deliberate tick -- so the tick routinely
+// landed while leg 3 was still mid-retry, long before
+// reverseLeg2ThenLeg1's crash-consuming branch had ever run. Polling here,
+// after the crash flag is armed, for leg 2's OWN status to read "reversed"
+// gives the precise, production-exposed signal that: leg 3 exhausted,
+// reverseLeg2ThenLeg1 ran inline, postLeg2Reversal committed, the crash flag
+// was consumed (skipping leg 1's own reversal attempt), and the transfer was
+// parked back at statusRetrying (reversalPending's own shape,
+// transfer_coordinator.go) -- exactly the window the scenario's own Given
+// text names, and exactly the state the ticker's single tick needs to find
+// in order to resume leg 1's reversal meaningfully.
+func (w *World) PollTransferUntilLegStatus(ctx context.Context, as Caller, transferID string, leg int, want LegStatus, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		if err := w.QueryTransfer(ctx, as, transferID); err != nil {
+			return err
+		}
+		if w.lastTransferAnswer.LegStatusOf(leg) == want {
+			return nil
+		}
+		if w.lastTransferAnswer.TxStatus == StatusReversed || w.lastTransferAnswer.TxStatus == StatusReversalFailed {
+			// Already past the window this poll is meant to catch -- either
+			// the crash flag was consumed too late to matter, or the whole
+			// reversal finished inline without ever needing the ticker.
+			// Surfacing this now (rather than spinning to timeout) turns a
+			// silent race into a clear, immediate failure.
+			return fmt.Errorf("transfer %q reached terminal status %q before leg %d's own status ever read %q (last leg %d status=%q) -- the crash window was missed",
+				transferID, w.lastTransferAnswer.TxStatus, leg, want, leg, w.lastTransferAnswer.LegStatusOf(leg))
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("transfer %q's leg %d did not reach status %q within %s (last status=%q leg %d status=%q)",
+				transferID, leg, want, timeout, w.lastTransferAnswer.TxStatus, leg, w.lastTransferAnswer.LegStatusOf(leg))
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
 // --- driving-port calls: intra-tenant account setup (existing, unmodified) -
 
 // OpenAccount opens an account through the existing, unmodified POST
