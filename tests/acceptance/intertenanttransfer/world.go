@@ -103,6 +103,21 @@ type World struct {
 	priorTransferID    string
 	secondTransferID   string
 
+	// lastTransferFrom/lastTransferTo remember seedSettlingTransfer's own
+	// sender/receiver pair -- the milestone-03 back-propagation fix (2026-09-08)
+	// needs these to resolve the tnt_platform mirror account naming convention
+	// (platformMirrorAccountID) and the sender's own settlement account,
+	// neither of which a bare transfer_id alone identifies.
+	lastTransferFrom TenantName
+	lastTransferTo   TenantName
+
+	// inspectedBalance/inspectedEntries cache the result of a real
+	// GET /accounts/{id} or GET /accounts/{id}/entries call an "inspected"
+	// When step made, for a following Then step to assert against -- never
+	// set by a Given, per Mandate 2.
+	inspectedBalance Money
+	inspectedEntries []entryWireView
+
 	lastRefusal RefusalKind
 	lastStatus  int
 }
@@ -687,6 +702,7 @@ func (w *World) AssertAccountBalance(ctx context.Context, tenant TenantName, acc
 // paper over that -- a scenario built on it fails at its own Then assertion
 // for the correct, stated reason.
 func (w *World) seedSettlingTransfer(ctx context.Context, from, to TenantName) error {
+	w.lastTransferFrom, w.lastTransferTo = from, to
 	if _, ok := w.tenants[from]; !ok {
 		if err := w.GivenTenantProvisioned(ctx, from); err != nil {
 			return err
@@ -799,6 +815,21 @@ func (w *World) InjectLegFault(ctx context.Context, transferID string, leg int) 
 	})
 }
 
+// InjectLegFaultCount forces the named transfer's next `count` consecutive
+// attempts at the named leg to each fail with a simulated transient fault,
+// over the same test-only HTTP seam as InjectLegFault (which is the count=1
+// case) -- added 2026-09-08 for "Exhausting attempt 1 and 2 before
+// succeeding on attempt 3", whose own Gherkin needs a SPECIFIC, bounded
+// number of consecutive failures rather than "the next attempt", which
+// InjectLegFault's one-shot semantics could not express.
+func (w *World) InjectLegFaultCount(ctx context.Context, transferID string, leg, count int) error {
+	return w.callTestOnlyFaultSeam(ctx, "/testonly/faults/leg", map[string]any{
+		"transfer_id": transferID,
+		"leg":         leg,
+		"fail_count":  count,
+	})
+}
+
 // SimulateCrashBeforeForwardLegAttempt simulates a process crash in the
 // FORWARD-path window: after a leg has committed but before the next leg's
 // first attempt has ever run. See package doc above.
@@ -863,6 +894,117 @@ func (w *World) callTestOnlyFaultSeam(ctx context.Context, path string, body any
 	}
 	if status != http.StatusOK {
 		return fmt.Errorf("test-only fault seam call to %q failed: status=%d body=%s", path, status, raw)
+	}
+	return nil
+}
+
+// --- platform/settlement account naming (test-infra duplication) -----------
+//
+// platformMirrorAccountIDConvention and settlementAccountID duplicate two
+// narrow production naming conventions (internal/app/transfer_coordinator.go's
+// own platformMirrorAccountID and settlementAccountName), not business logic
+// -- same precedent as this file's own package-doc header re: startPostgres/
+// serve/StartAgainstEmptyStore. World never holds a Go reference into the
+// running coordinator (package doc, "everything through HTTP"), so it cannot
+// call the unexported production functions directly and instead mirrors the
+// one string format each produces.
+const settlementAccountID = "settlement"
+
+func platformMirrorAccountIDConvention(businessTenantID string) string {
+	return "platform-" + businessTenantID
+}
+
+// entryWireView is the wire shape GET /accounts/{id}/entries answers with,
+// trimmed to the fields the milestone-03 back-propagation fix's own Then
+// steps need (handlers.go's entriesToWire).
+type entryWireView struct {
+	TransactionID string `json:"transaction_id"`
+	Counterparty  string `json:"counterparty"`
+	Amount        string `json:"amount"`
+}
+
+// InspectPlatformMirrorEntries queries the sender's own tnt_platform mirror
+// account's entry log -- the "platform account" the milestone-03 Gherkin
+// names in "Retries never produce a duplicate posted leg" -- and caches the
+// answer for the following Then step to count against. A real HTTP round
+// trip, not a status-shaped proxy (Mandate 8).
+func (w *World) InspectPlatformMirrorEntries(ctx context.Context) error {
+	if err := w.EnsureStarted(ctx); err != nil {
+		return err
+	}
+	from, ok := w.tenants[w.lastTransferFrom]
+	if !ok {
+		return fmt.Errorf("InspectPlatformMirrorEntries: sender tenant %q not resolved", w.lastTransferFrom)
+	}
+	account := platformMirrorAccountIDConvention(from.ID)
+	_, raw, err := w.rawCall(ctx, PlatformAdmin(), http.MethodGet, "/accounts/"+url.PathEscape(account)+"/entries", nil)
+	if err != nil {
+		return err
+	}
+	var payload struct {
+		Entries []entryWireView `json:"entries"`
+	}
+	_ = json.Unmarshal(raw, &payload)
+	w.inspectedEntries = payload.Entries
+	return nil
+}
+
+// AssertExactlyOnePostedLegEntry counts, from the last inspected entry log,
+// how many entries the sender's platform mirror account posted to the
+// receiver's own platform mirror -- leg 2's own movement -- and asserts
+// exactly one, the real proof that a retried leg never produces a second
+// posting (brief.md's dual-idempotency mechanism, per-leg IdempotencyStore
+// replay), replacing the earlier vacuous AssertLegStatus(2, LegPosted) check.
+func (w *World) AssertExactlyOnePostedLegEntry(leg int) error {
+	to, ok := w.tenants[w.lastTransferTo]
+	if !ok {
+		return fmt.Errorf("AssertExactlyOnePostedLegEntry: receiver tenant %q not resolved", w.lastTransferTo)
+	}
+	counterparty := platformMirrorAccountIDConvention(to.ID)
+	matched := 0
+	for _, entry := range w.inspectedEntries {
+		if entry.Counterparty == counterparty {
+			matched++
+		}
+	}
+	if matched != 1 {
+		return fmt.Errorf("expected exactly 1 posted transaction for leg %d (platform mirror -> %q), got %d across %d inspected entries",
+			leg, counterparty, matched, len(w.inspectedEntries))
+	}
+	return nil
+}
+
+// InspectSenderSettlementBalance queries the sender's own settlement
+// account -- the account Leg 1 posts into, and what this suite's own
+// Gherkin calls "the platform account" from the sending tenant's point of
+// view -- and caches its balance for the following Then step ("Funds stay
+// parked, not lost, while a leg is retrying").
+func (w *World) InspectSenderSettlementBalance(ctx context.Context) error {
+	if err := w.EnsureStarted(ctx); err != nil {
+		return err
+	}
+	_, raw, err := w.rawCall(ctx, AsTenant(w.lastTransferFrom), http.MethodGet, "/accounts/"+settlementAccountID, nil)
+	if err != nil {
+		return err
+	}
+	var payload struct {
+		Balance string `json:"balance"`
+	}
+	_ = json.Unmarshal(raw, &payload)
+	got := ParseMoney(payload.Balance)
+	if payload.Balance == "" {
+		got = 0
+	}
+	w.inspectedBalance = got
+	return nil
+}
+
+// AssertInspectedBalanceReflects compares the last InspectSenderSettlementBalance
+// answer against the amount the scenario's own Then step names.
+func (w *World) AssertInspectedBalanceReflects(want Money) error {
+	if w.inspectedBalance != want {
+		return fmt.Errorf("expected the platform account's balance to reflect exactly %s received via leg 1, pending onward movement, got %s",
+			want, w.inspectedBalance)
 	}
 	return nil
 }

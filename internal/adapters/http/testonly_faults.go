@@ -52,6 +52,11 @@ func mountTestOnlyFaults(router chi.Router, deps Deps, ledger *app.Ledger, trans
 type legFaultRequest struct {
 	TransferID string `json:"transfer_id"`
 	Leg        int    `json:"leg"`
+	// FailCount (2026-09-08, DELIVER 03-04 back-propagation) is optional and
+	// defaults to 1 (single one-shot fault, this endpoint's original
+	// behavior) — set > 1 to fail that many CONSECUTIVE attempts before the
+	// leg is allowed to succeed. See TransferCoordinator.InjectLegFaultCount.
+	FailCount int `json:"fail_count"`
 }
 
 func injectLegFaultHandler(transferCoordinator *app.TransferCoordinator) http.HandlerFunc {
@@ -61,7 +66,11 @@ func injectLegFaultHandler(transferCoordinator *app.TransferCoordinator) http.Ha
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "malformed_request"})
 			return
 		}
-		transferCoordinator.InjectLegFault(body.TransferID, body.Leg)
+		count := body.FailCount
+		if count <= 0 {
+			count = 1
+		}
+		transferCoordinator.InjectLegFaultCount(body.TransferID, body.Leg, count)
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	}
 }

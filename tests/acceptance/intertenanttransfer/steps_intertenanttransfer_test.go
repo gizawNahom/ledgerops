@@ -161,28 +161,87 @@ func RegisterSteps(ctx *godog.ScenarioContext, w *World) {
 		return w.InjectLegFault(c, w.LastTransferAnswer().TransferID, 2)
 	})
 
+	// Fix 1 (2026-09-08, DELIVER 03-04 back-propagation): was byte-identical
+	// to "whose leg 1 has posted" above -- it never armed leg 3's fault
+	// before spawnForwardLegs' own goroutine could race straight through
+	// leg 2 into leg 3 (attemptForwardLegsFrom chains leg 3 immediately
+	// after a successful leg 2, with no gap to inject into afterward -- see
+	// world.go's own InjectLegFault doc). Mirrors the already-passing "A
+	// stalled leg 2 retries" scenario's own timing: the fault is armed
+	// immediately after seeding, racing the SAME inlineAttemptGraceWindow
+	// that scenario already relies on, so leg 2 posts for real (unfaulted)
+	// and leg 3's first (and only) attempt lands on the injected fault.
 	ctx.Given(`^a cross-tenant transfer from "([^"]*)" to "([^"]*)" whose leg 1 and leg 2 have posted$`,
 		func(c context.Context, from, to string) error {
-			return w.seedSettlingTransfer(c, TenantName(from), TenantName(to))
+			if err := w.seedSettlingTransfer(c, TenantName(from), TenantName(to)); err != nil {
+				return err
+			}
+			return w.InjectLegFault(c, w.LastTransferAnswer().TransferID, 3)
 		})
 
+	// Note (2026-09-08 fix 1): the fault this scenario's own Given text
+	// describes is armed above by "whose leg 1 and leg 2 have posted"
+	// itself, before leg 3 is ever attempted -- see that step's own comment.
+	// This second registration is harmless: it arms a fresh one-shot fault
+	// for leg 3's NEXT attempt (its eventual retry), which this scenario's
+	// own Then assertions never observe.
 	ctx.Given(`^leg 3's first attempt fails with a simulated transient fault$`, func(c context.Context) error {
 		return w.InjectLegFault(c, w.LastTransferAnswer().TransferID, 3)
 	})
 
+	// Fix 8 (2026-09-08, DELIVER 03-04 back-propagation): was a plain,
+	// fault-free seedSettlingTransfer with no wait -- leg 2 posted on its
+	// first (unfaulted) attempt with nothing forcing it to fail-then-retry
+	// as this Given's own text describes, AND the immediately-following
+	// entry-log inspection raced the still-in-flight async goroutine,
+	// observing zero entries whenever it lost that race. Now arms a real
+	// leg-2 fault (consumed on the first attempt) and polls to terminal
+	// before returning, so the entry-log inspection always runs against a
+	// transfer that has genuinely failed once and settled via retry.
 	ctx.Given(`^a cross-tenant transfer from "([^"]*)" to "([^"]*)" whose leg 2 failed once and was retried successfully$`,
 		func(c context.Context, from, to string) error {
-			return w.seedSettlingTransfer(c, TenantName(from), TenantName(to))
+			if err := w.seedSettlingTransfer(c, TenantName(from), TenantName(to)); err != nil {
+				return err
+			}
+			if err := w.InjectLegFault(c, w.LastTransferAnswer().TransferID, 2); err != nil {
+				return err
+			}
+			return w.PollTransferUntilTerminal(c, PlatformAdmin(), w.LastTransferAnswer().TransferID, 15*time.Second)
 		})
 
+	// Fix 2 (2026-09-08, DELIVER 03-04 back-propagation): was a plain,
+	// fault-free seedSettlingTransfer -- leg 2 posted normally and the
+	// transfer never reached "retrying", so the precondition this Given's
+	// own text names was never actually established. Fixed the same way as
+	// the already-passing "A stalled leg 2 retries" scenario: arm the fault
+	// immediately after seeding (racing inlineAttemptGraceWindow), then
+	// bounded-poll for the transfer to actually leave "pending" before
+	// returning, so a following When step can rely on "retrying" having
+	// already been reached.
 	ctx.Given(`^a cross-tenant transfer from "([^"]*)" to "([^"]*)" whose leg 2 is retrying within its 5-attempt retry budget$`,
 		func(c context.Context, from, to string) error {
-			return w.seedSettlingTransfer(c, TenantName(from), TenantName(to))
+			if err := w.seedSettlingTransfer(c, TenantName(from), TenantName(to)); err != nil {
+				return err
+			}
+			if err := w.InjectLegFault(c, w.LastTransferAnswer().TransferID, 2); err != nil {
+				return err
+			}
+			return w.PollTransferUntilStatusLeaves(c, PlatformAdmin(), w.LastTransferAnswer().TransferID, StatusPending, 2*time.Second)
 		})
 
+	// Same bug and same fix as the Given immediately above -- this is the
+	// "Funds stay parked, not lost, while a leg is retrying" scenario's own
+	// precondition line, and needs leg 2 to have genuinely stalled before
+	// its own balance/entry-log When steps run.
 	ctx.Given(`^tenant "([^"]*)" sent (\S+) to "([^"]*)" and leg 2 is retrying$`,
 		func(c context.Context, from, amount, to string) error {
-			return w.seedSettlingTransfer(c, TenantName(from), TenantName(to))
+			if err := w.seedSettlingTransfer(c, TenantName(from), TenantName(to)); err != nil {
+				return err
+			}
+			if err := w.InjectLegFault(c, w.LastTransferAnswer().TransferID, 2); err != nil {
+				return err
+			}
+			return w.PollTransferUntilStatusLeaves(c, PlatformAdmin(), w.LastTransferAnswer().TransferID, StatusPending, 2*time.Second)
 		})
 
 	ctx.Given(`^leg 2's inline attempt never ran, simulating a process crash immediately after leg 1's commit$`,
@@ -218,9 +277,19 @@ func RegisterSteps(ctx *godog.ScenarioContext, w *World) {
 		return w.RunRetryTickerOnce(c, PlatformAdmin(), w.LastTransferAnswer().TransferID)
 	})
 
+	// Fix 3 (2026-09-08, DELIVER 03-04 back-propagation): was a plain,
+	// fault-free seedSettlingTransfer, so the transfer settled on its first
+	// attempt instead of failing twice before succeeding on attempt 3.
+	// InjectLegFault's one-shot semantics could not express "fail exactly 2
+	// consecutive attempts" -- InjectLegFaultCount extends the seam
+	// (testonly_faults.go's own /testonly/faults/leg endpoint) with an
+	// explicit fail_count.
 	ctx.Given(`^a cross-tenant transfer from "([^"]*)" to "([^"]*)" whose leg 2 fails on its first two attempts$`,
 		func(c context.Context, from, to string) error {
-			return w.seedSettlingTransfer(c, TenantName(from), TenantName(to))
+			if err := w.seedSettlingTransfer(c, TenantName(from), TenantName(to)); err != nil {
+				return err
+			}
+			return w.InjectLegFaultCount(c, w.LastTransferAnswer().TransferID, 2, 2)
 		})
 
 	ctx.Given(`^tenant "([^"]*)" sent (\S+) to "([^"]*)" and leg 2 has failed on all 5 attempts of its retry budget$`,
@@ -302,8 +371,16 @@ func RegisterSteps(ctx *godog.ScenarioContext, w *World) {
 		return w.PollTransferUntilTerminal(c, PlatformAdmin(), w.LastTransferAnswer().TransferID, 15*time.Second)
 	})
 
+	// Fix (2026-09-08, DELIVER 03-04 back-propagation): was a bare,
+	// non-polling QueryTransfer, same latent race as "the transfer is
+	// queried immediately after the failed attempt" below (fixed in 03-03's
+	// own back-propagation) -- a fault-injection Given immediately
+	// preceding this step races spawnForwardLegs' own inline goroutine, so
+	// a bare query only passed by luck. Hardened with the identical bounded
+	// poll for consistency; costs nothing when the transition has already
+	// happened.
 	ctx.When(`^the transfer is queried$`, func(c context.Context) error {
-		return w.QueryTransfer(c, PlatformAdmin(), w.LastTransferAnswer().TransferID)
+		return w.PollTransferUntilStatusLeaves(c, PlatformAdmin(), w.LastTransferAnswer().TransferID, StatusPending, 2*time.Second)
 	})
 
 	// Fix (2026-09-08, DELIVER 03-03 back-propagation): was a bare,
@@ -509,8 +586,14 @@ func RegisterSteps(ctx *godog.ScenarioContext, w *World) {
 		return nil
 	})
 
+	// Fix 4 (2026-09-08, DELIVER 03-04 back-propagation): was
+	// AssertLegStatus(2, LegPosted) -- a status check, not a count of
+	// posted transactions, so it could never prove "exactly one." Rewired
+	// to count real entries the When step immediately above already
+	// inspected on the platform mirror account (world.go's own
+	// InspectPlatformMirrorEntries/AssertExactlyOnePostedLegEntry).
 	ctx.Then(`^exactly one posted transaction exists for leg 2 of that transfer$`, func() error {
-		return w.AssertLegStatus(2, LegPosted)
+		return w.AssertExactlyOnePostedLegEntry(2)
 	})
 
 	ctx.Then(`^the response is 200 with status "([^"]*)"$`, func(status string) error {
@@ -527,8 +610,17 @@ func RegisterSteps(ctx *godog.ScenarioContext, w *World) {
 		return nil
 	})
 
+	// Fix 7 (2026-09-08, DELIVER 03-04 back-propagation): was a `return nil`
+	// placeholder -- now asserts against the balance the When step
+	// immediately above actually inspected (world.go's own
+	// AssertInspectedBalanceReflects). The sender tenant name captured by
+	// this step's own regex is already implicit in World's lastTransferFrom
+	// (set by seedSettlingTransfer), same convention as this file's other
+	// steps that capture and then ignore a purely narrative argument.
 	ctx.Then(`^it reflects exactly (\S+) received from "([^"]*)" via leg 1, pending onward movement$`,
-		func(_, _ string) error { return nil })
+		func(amount, _ string) error {
+			return w.AssertInspectedBalanceReflects(ParseMoney(amount))
+		})
 
 	ctx.Then(`^tenant "([^"]*)"'s wallet balance returns to its pre-transfer value$`, func(_ string) error { return nil })
 
@@ -660,9 +752,21 @@ func RegisterSteps(ctx *godog.ScenarioContext, w *World) {
 
 	ctx.When(`^the entry log for every account the transfer touched is inspected$`, func() error { return nil })
 
-	ctx.When(`^the platform account's balance is inspected$`, func() error { return nil })
+	// Fix 5 (2026-09-08, DELIVER 03-04 back-propagation): was a `return nil`
+	// placeholder -- now a real GET /accounts/{id} call against the sender's
+	// own settlement account (world.go's own InspectSenderSettlementBalance),
+	// cached for the following Then step.
+	ctx.When(`^the platform account's balance is inspected$`, func(c context.Context) error {
+		return w.InspectSenderSettlementBalance(c)
+	})
 
-	ctx.When(`^the platform account's entry log is inspected$`, func() error { return nil })
+	// Fix 6 (2026-09-08, DELIVER 03-04 back-propagation): was a `return nil`
+	// placeholder -- now a real GET /accounts/{id}/entries call against the
+	// sender's own tnt_platform mirror account (world.go's own
+	// InspectPlatformMirrorEntries), cached for the following Then step.
+	ctx.When(`^the platform account's entry log is inspected$`, func(c context.Context) error {
+		return w.InspectPlatformMirrorEntries(c)
+	})
 
 	ctx.Then(`^all three legs report "([^"]*)"$`, func(status string) error {
 		answer := w.LastTransferAnswer()

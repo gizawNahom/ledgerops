@@ -158,8 +158,13 @@ func (tc *TransferCoordinator) recordFailedAttempt(transferID string, leg int) i
 // scenarios (each scenario's own httptest.Server wires a fresh
 // TransferCoordinator via NewRouter).
 type testOnlyFaultState struct {
-	mu                sync.Mutex
-	legFaults         map[string]bool // key: transferID + ":" + leg, one-shot
+	mu        sync.Mutex
+	legFaults map[string]int // key: transferID + ":" + leg, remaining fail count
+	// (2026-09-08, DELIVER 03-04 back-propagation): widened from
+	// map[string]bool to map[string]int so InjectLegFaultCount can arm a
+	// SPECIFIC number of consecutive failures ("fails on its first two
+	// attempts"), not just a single one-shot fault -- InjectLegFault's own
+	// one-shot behavior is unchanged, expressed as count=1 below.
 	skipForwardCrash  map[string]bool // key: transferID
 	skipReversalCrash map[string]bool // key: transferID — recorded for 03-02/04's own reversal path to consult
 }
@@ -169,7 +174,7 @@ func NewTransferCoordinator(ledger *Ledger) *TransferCoordinator {
 	return &TransferCoordinator{
 		ledger: ledger,
 		testOnly: testOnlyFaultState{
-			legFaults:         map[string]bool{},
+			legFaults:         map[string]int{},
 			skipForwardCrash:  map[string]bool{},
 			skipReversalCrash: map[string]bool{},
 		},
@@ -190,25 +195,47 @@ func NewTransferCoordinator(ledger *Ledger) *TransferCoordinator {
 
 // InjectLegFault forces the next attemptLeg call for the named transfer's
 // leg to fail with a simulated transient fault, consumed on first use — the
-// following attempt (inline retry or ticker) runs normally.
+// following attempt (inline retry or ticker) runs normally. Equivalent to
+// InjectLegFaultCount(transferID, leg, 1).
 func (tc *TransferCoordinator) InjectLegFault(transferID string, leg int) {
+	tc.InjectLegFaultCount(transferID, leg, 1)
+}
+
+// InjectLegFaultCount forces the next `count` consecutive attemptLeg calls
+// for the named transfer's leg to each fail with a simulated transient
+// fault (2026-09-08, DELIVER 03-04 back-propagation) — added for "fails on
+// its first two attempts," which InjectLegFault's fixed one-shot semantics
+// could not express. count <= 0 arms nothing (a no-op), mirroring
+// InjectLegFault's own always-arm-exactly-one contract by construction for
+// count == 1.
+func (tc *TransferCoordinator) InjectLegFaultCount(transferID string, leg, count int) {
+	if count <= 0 {
+		return
+	}
 	tc.testOnly.mu.Lock()
 	defer tc.testOnly.mu.Unlock()
-	tc.testOnly.legFaults[transferLegKey(transferID, leg)] = true
+	tc.testOnly.legFaults[transferLegKey(transferID, leg)] = count
 }
 
 // consumeInjectedLegFault reports whether a fault was armed for this
-// transfer's leg, clearing it on the way out — a one-shot fault only ever
-// stalls the first attempt it meets, never every attempt after it.
+// transfer's leg, decrementing the remaining count and clearing the entry
+// once exhausted — a fault only ever stalls the next `count` attempts it
+// meets, never every attempt after it.
 func (tc *TransferCoordinator) consumeInjectedLegFault(transferID string, leg int) bool {
 	tc.testOnly.mu.Lock()
 	defer tc.testOnly.mu.Unlock()
 	key := transferLegKey(transferID, leg)
-	if tc.testOnly.legFaults[key] {
-		delete(tc.testOnly.legFaults, key)
-		return true
+	remaining := tc.testOnly.legFaults[key]
+	if remaining <= 0 {
+		return false
 	}
-	return false
+	remaining--
+	if remaining <= 0 {
+		delete(tc.testOnly.legFaults, key)
+	} else {
+		tc.testOnly.legFaults[key] = remaining
+	}
+	return true
 }
 
 // transferLegKey is the shared (transferID, leg) map key format for both
