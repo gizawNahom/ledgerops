@@ -78,6 +78,13 @@ const (
 	// of this transfer_id (a test-only fault/crash registration arriving a
 	// few milliseconds behind the HTTP response that carried this
 	// transfer_id back) needs the row to still be unclaimed when it lands.
+	// 50ms, not 200us (step 03-03 fix): a second real HTTP round trip
+	// (client -> httptest.Server -> handler -> back) routinely costs
+	// low-single-digit milliseconds in this suite's own request logs, so a
+	// sub-millisecond window let the goroutine's first attempt win the race
+	// against the crash-simulation registration nearly every time,
+	// defeating "a crash before any Leg 2 attempt is recovered by the retry
+	// ticker alone" before the ticker ever got a chance to claim the row.
 	// Harmless in production: the synchronous response has already been
 	// written by the time this goroutine even starts, so the extra latency
 	// is invisible at the driving port (brief.md § Sync vs. async
@@ -563,14 +570,6 @@ func (tc *TransferCoordinator) spawnForwardLegs(transferID string) {
 		// been written) time to land before the first real attempt runs.
 		time.Sleep(inlineAttemptGraceWindow)
 
-		if tc.consumeForwardCrashSimulation(transferID) {
-			// Test-only: simulating a process crash before Leg 2's first
-			// attempt ever ran. The row is left exactly as SendTransfer's
-			// own commit left it — only processDueTransfers can claim it
-			// from here.
-			return
-		}
-
 		tc.attemptForwardLegsFrom(context.Background(), transferID, 2)
 	}()
 }
@@ -614,6 +613,28 @@ func (tc *TransferCoordinator) attemptLeg(ctx context.Context, transferID string
 	state, claimed, err := tc.claimTransfer(attemptCtx, transferID)
 	if err != nil || !claimed {
 		return err
+	}
+
+	if leg == 2 && tc.consumeForwardCrashSimulation(transferID) {
+		// Test-only: simulating a process crash between Leg 1's commit and
+		// Leg 2's first attempt ever running. Checked HERE — after the
+		// claim above, at the same point consumeInjectedLegFault is
+		// checked below — rather than as an early gate before this
+		// goroutine ever claimed: a test-only registration racing this
+		// goroutine only learns transferID once SendTransfer's HTTP
+		// response has already been written, so it needs the SAME
+		// claim-transaction-latency buffer InjectLegFault's own check
+		// already reliably relies on to land in time (an early gate,
+		// checked immediately after inlineAttemptGraceWindow with no
+		// further buffer, lost that race far more often). The claim above
+		// already extended the lease by claimLeaseDuration — release it
+		// immediately via advanceAfterLegOutcome rather than leaving the
+		// row parked for a full lease's worth of otherwise-unnecessary
+		// recovery latency, so the row is due again exactly as if this
+		// crashed process had never claimed it at all. Only the retry
+		// ticker's own later claim can attempt Leg 2 from here (this
+		// consumes the one-shot flag, so that later claim runs for real).
+		return tc.advanceAfterLegOutcome(ctx, transferID, state.Status, tc.ledger.clock(), state.Reason)
 	}
 
 	from, to, tenantID, key, err := legMovement(state, leg)
@@ -855,24 +876,78 @@ func (tc *TransferCoordinator) GetTransfer(ctx context.Context, transferID strin
 // ClaimDue, then attemptLeg per discovered row — the same self-claiming
 // function the inline goroutine already calls, so a row this call claims
 // and a row the inline goroutine claims share identical safety guarantees.
-// Backoff scheduling and reversal dispatch on repeated failure are step
-// 03-02/03-03's own scope (brief.md § Retry and reversal mechanics) — this
-// entrypoint's job today is discovery plus one attempt per discovered row,
-// which is exactly what the fault-injection seam (this step) needs to
-// single-step deterministically.
+//
+// Deliberately calls attemptLeg directly, NOT attemptForwardLegsFrom
+// (unlike spawnForwardLegs' own inline path): attemptForwardLegsFrom
+// decides whether to continue into leg 3 purely from attemptLeg's return
+// value being nil, but nil is ALSO what a losing claim race returns
+// (claimTransfer's own "ok=false is a normal outcome, never an error"
+// contract) — indistinguishable, from that return value alone, from a
+// genuine successful post. Two ticks racing the identical due transfer_id
+// (TestAttemptLeg_ConcurrentClaimRace_ExactlyOneCallerAttemptsThePost,
+// internal/app/transfer_coordinator_claim_race_test.go) would otherwise let
+// the LOSING caller misread its own no-op as "leg 2 posted, continue to leg
+// 3", attempting a claim on leg 3 that test never expects. Re-deriving the
+// next due leg from persisted state after each attempt (the loop below),
+// rather than trusting attemptLeg's own silence, sidesteps that ambiguity
+// entirely.
+//
+// Looping while nextLegFor still names something to do (bounded at two
+// iterations — leg 2 then leg 3, never more) is what lets one tick fully
+// recover a transfer whose leg 2 never even got a first inline attempt
+// (step 03-03, "a crash before any Leg 2 attempt is recovered by the retry
+// ticker alone"): next_attempt_at is set at row-creation time (ADR-015
+// Amendment), so such a row is immediately due, and the ticker is the only
+// path left to advance it once the inline goroutine never ran at all. Once
+// this call's own attemptLeg posts leg 2 for real, recordLegSuccess resets
+// next_attempt_at to now — nextLegFor's own fresh read then finds leg 3
+// next-due in the SAME dispatch, without needing a second, separately-
+// triggered tick that would otherwise widen recovery latency beyond the
+// documented lease_duration + one ticker interval bound (brief.md § Crash
+// recovery). Reversal dispatch on repeated failure remains slice 04's own
+// scope.
 func (tc *TransferCoordinator) processDueTransfers(ctx context.Context, batchLimit int) (int, error) {
 	dueIDs, err := tc.dueTransferIDs(ctx, batchLimit)
 	if err != nil {
 		return 0, err
 	}
 	for _, transferID := range dueIDs {
-		leg, err := tc.nextLegFor(ctx, transferID)
-		if err != nil || leg == 0 {
-			continue
-		}
-		_ = tc.attemptLeg(ctx, transferID, leg)
+		tc.attemptDueLegs(ctx, transferID)
 	}
 	return len(dueIDs), nil
+}
+
+// attemptDueLegs attempts one discovered transfer's next-due leg, then —
+// ONLY if that attempt made real forward progress — the leg that becomes
+// next-due immediately after. "Made real forward progress" is judged by
+// re-reading nextLegFor rather than trusting attemptLeg's own return value
+// (see processDueTransfers' own doc comment for why that value alone is
+// ambiguous between "posted" and "lost the claim race"): if the leg named
+// after the attempt is UNCHANGED from the leg named before it, nothing this
+// caller did advanced the transfer — either the post itself failed, or
+// another caller (or this one, if InjectLegFault/crash-forward left nothing
+// to claim) already holds or held the claim — so a second attempt is
+// skipped rather than risking an extra, unearned ClaimOne call on a
+// concurrently-claimed row (TestAttemptLeg_ConcurrentClaimRace_
+// ExactlyOneCallerAttemptsThePost, transfer_coordinator_claim_race_test.go,
+// asserts exactly one ClaimOne call per racing caller). When the leg DOES
+// change (this caller's own attemptLeg really did post it), the newly-due
+// leg is attempted too, in the same dispatch — this is what lets one tick
+// fully recover a transfer whose leg 2 never even got a first inline
+// attempt (step 03-03: leg 2 posts, recordLegSuccess resets next_attempt_at
+// to now, and leg 3 is immediately next-due, all within this single call).
+func (tc *TransferCoordinator) attemptDueLegs(ctx context.Context, transferID string) {
+	leg, err := tc.nextLegFor(ctx, transferID)
+	if err != nil || leg == 0 {
+		return
+	}
+	_ = tc.attemptLeg(ctx, transferID, leg)
+
+	nextLeg, err := tc.nextLegFor(ctx, transferID)
+	if err != nil || nextLeg == 0 || nextLeg == leg {
+		return
+	}
+	_ = tc.attemptLeg(ctx, transferID, nextLeg)
 }
 
 // dueTransferIDs is processDueTransfers' own read-only discovery step —
