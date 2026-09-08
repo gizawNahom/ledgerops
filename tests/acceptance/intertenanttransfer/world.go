@@ -582,6 +582,40 @@ func (w *World) PollTransferUntilTerminal(ctx context.Context, as Caller, transf
 	}
 }
 
+// PollTransferUntilStatusLeaves polls (short, bounded) until the transfer's
+// reported status is no longer `from` -- unlike PollTransferUntilTerminal,
+// this does NOT wait for a terminal state (settled/reversed); it is for
+// observing an INTERMEDIATE transition (e.g. pending -> retrying) right
+// after a fault-injection Given step races the inline goroutine spawned by
+// SendCrossTenantTransfer (spawnForwardLegs, internal/app/
+// transfer_coordinator.go). That race is the same one documented on
+// InjectLegFault/SimulateCrashBeforeForwardLegAttempt: the fault/crash
+// registration is a separate, later HTTP round-trip against the already-
+// spawned goroutine, so a bare, non-polling QueryTransfer immediately after
+// registration is only safe as long as the goroutine's own inline attempt
+// hasn't landed yet -- which depends entirely on inlineAttemptGraceWindow,
+// a production-side constant this test file does not own. A short poll here
+// tolerates that window widening (companion production-side fix) without
+// coupling this test's pass/fail to a race margin. Costs nothing when the
+// transition has already happened by the first poll (single QueryTransfer,
+// no sleep).
+func (w *World) PollTransferUntilStatusLeaves(ctx context.Context, as Caller, transferID string, from TransferStatus, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		if err := w.QueryTransfer(ctx, as, transferID); err != nil {
+			return err
+		}
+		if w.lastTransferAnswer.TxStatus != from {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("transfer %q did not leave status %q within %s (last status=%q refusal=%q)",
+				transferID, from, timeout, w.lastTransferAnswer.TxStatus, w.lastTransferAnswer.Refusal)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 // --- driving-port calls: intra-tenant account setup (existing, unmodified) -
 
 // OpenAccount opens an account through the existing, unmodified POST
@@ -787,8 +821,22 @@ func (w *World) SimulateCrashBeforeReversalAttempt(ctx context.Context, transfer
 
 // RunRetryTickerOnce single-steps processDueTransfers exactly once -- no
 // real wall-clock sleep needed to observe one tick's effect.
-func (w *World) RunRetryTickerOnce(ctx context.Context) error {
-	return w.callTestOnlyFaultSeam(ctx, "/testonly/tick", nil)
+//
+// Refreshes lastTransferAnswer with a single fresh QueryTransfer right after
+// the tick call returns -- NOT a poll. processDueTransfers (internal/app/
+// transfer_coordinator.go) is fully synchronous per call: it loops directly
+// over attemptDueLegs/attemptLeg with no goroutine spawn, and the
+// /testonly/tick handler (internal/adapters/http/testonly_faults.go) calls
+// ProcessDueTransfersOnce synchronously before writing its HTTP response. So
+// by the time this call returns, every leg the ticker was going to attempt
+// this tick has already been attempted -- a single re-query is enough to
+// observe the outcome; a bounded poll would only mask a genuine synchrony
+// regression instead of catching it.
+func (w *World) RunRetryTickerOnce(ctx context.Context, as Caller, transferID string) error {
+	if err := w.callTestOnlyFaultSeam(ctx, "/testonly/tick", nil); err != nil {
+		return err
+	}
+	return w.QueryTransfer(ctx, as, transferID)
 }
 
 // SeedTransfersDueForRetry seeds N synthetic, already-due transfer_state

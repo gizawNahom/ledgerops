@@ -192,7 +192,7 @@ func RegisterSteps(ctx *godog.ScenarioContext, w *World) {
 
 	ctx.When(`^the retry ticker's next tick runs, with no inline attempt ever having occurred$`,
 		func(c context.Context) error {
-			return w.RunRetryTickerOnce(c)
+			return w.RunRetryTickerOnce(c, PlatformAdmin(), w.LastTransferAnswer().TransferID)
 		})
 
 	// Fix 4 (2026-09-07): reversal's own crash window -- leg 2's reversal
@@ -215,7 +215,7 @@ func RegisterSteps(ctx *godog.ScenarioContext, w *World) {
 		})
 
 	ctx.When(`^one retry ticker tick runs$`, func(c context.Context) error {
-		return w.RunRetryTickerOnce(c)
+		return w.RunRetryTickerOnce(c, PlatformAdmin(), w.LastTransferAnswer().TransferID)
 	})
 
 	ctx.Given(`^a cross-tenant transfer from "([^"]*)" to "([^"]*)" whose leg 2 fails on its first two attempts$`,
@@ -234,7 +234,7 @@ func RegisterSteps(ctx *godog.ScenarioContext, w *World) {
 		})
 
 	ctx.When(`^the retry budget is exhausted$`, func(c context.Context) error {
-		return w.RunRetryTickerOnce(c)
+		return w.RunRetryTickerOnce(c, PlatformAdmin(), w.LastTransferAnswer().TransferID)
 	})
 
 	ctx.Given(`^a transfer from "([^"]*)" to "([^"]*)" that has been reversed$`,
@@ -253,7 +253,7 @@ func RegisterSteps(ctx *godog.ScenarioContext, w *World) {
 		})
 
 	ctx.When(`^the retry ticker runs any number of further ticks$`, func(c context.Context) error {
-		return w.RunRetryTickerOnce(c)
+		return w.RunRetryTickerOnce(c, PlatformAdmin(), w.LastTransferAnswer().TransferID)
 	})
 
 	ctx.Given(`^tenant "([^"]*)" sent (\S+) to "([^"]*)" and the compensating reversal of leg 1 itself has failed on all 5 attempts of its own retry budget$`,
@@ -267,7 +267,7 @@ func RegisterSteps(ctx *godog.ScenarioContext, w *World) {
 		})
 
 	ctx.When(`^the reversal's own retry budget is exhausted$`, func(c context.Context) error {
-		return w.RunRetryTickerOnce(c)
+		return w.RunRetryTickerOnce(c, PlatformAdmin(), w.LastTransferAnswer().TransferID)
 	})
 
 	// --- Given/When: trace and isolation (slice 05) --------------------------
@@ -306,12 +306,26 @@ func RegisterSteps(ctx *godog.ScenarioContext, w *World) {
 		return w.QueryTransfer(c, PlatformAdmin(), w.LastTransferAnswer().TransferID)
 	})
 
+	// Fix (2026-09-08, DELIVER 03-03 back-propagation): was a bare,
+	// non-polling QueryTransfer that only passed by luck -- it assumed the
+	// register(InjectLegFault)->attempt->fail->status-becomes-retrying
+	// sequence had already completed synchronously, with zero tolerance for
+	// the inline goroutine's attempt (spawnForwardLegs) being delayed by a
+	// wider inlineAttemptGraceWindow. Swapped for a short, bounded poll that
+	// waits for status to leave "pending" -- NOT PollTransferUntilTerminal,
+	// since "retrying" is not a terminal state. 2s bound gives real headroom
+	// over whatever grace-window value the companion production-side fix
+	// lands on; costs nothing when the condition is already true.
 	ctx.When(`^the transfer is queried immediately after the failed attempt$`, func(c context.Context) error {
-		return w.QueryTransfer(c, PlatformAdmin(), w.LastTransferAnswer().TransferID)
+		return w.PollTransferUntilStatusLeaves(c, PlatformAdmin(), w.LastTransferAnswer().TransferID, StatusPending, 2*time.Second)
 	})
 
+	// Same latent race as "queried immediately after the failed attempt"
+	// above (milestone-03 "Exhausting attempt 1 and 2 before succeeding on
+	// attempt 3") -- hardened with the identical bounded poll for
+	// consistency and future-proofing.
 	ctx.When(`^the transfer is queried after the second failed attempt$`, func(c context.Context) error {
-		return w.QueryTransfer(c, PlatformAdmin(), w.LastTransferAnswer().TransferID)
+		return w.PollTransferUntilStatusLeaves(c, PlatformAdmin(), w.LastTransferAnswer().TransferID, StatusPending, 2*time.Second)
 	})
 
 	ctx.When(`^leg 2's retry succeeds$`, func(c context.Context) error {

@@ -573,6 +573,75 @@ both zero-output this session. Full acceptance run intentionally NOT
 executed here — DELIVER's crafter re-verifies against production code in
 its own follow-up dispatch, per the orchestrator's own instruction.
 
+## 2026-09-08 — DELIVER back-propagation: RunRetryTickerOnce stale-read + crash-registration race hardening (step 03-03)
+
+Scoped fix requested by DELIVER's own orchestrator (`/nw-deliver
+inter-tenant-transfer`, step 03-03, ticker-only crash recovery, batch-limited
+claim) — DELIVER's crafter found two DISTILL-owned test-infrastructure
+defects blocking "A crash before any Leg 2 attempt is recovered by the retry
+ticker alone" from passing against otherwise-correct production code. Per
+this skill's own Document Update (Back-Propagation) procedure: DISTILL-owned
+test infrastructure gap, no `.feature` text touched, no scenario
+re-authored.
+
+**Fix 1 — `RunRetryTickerOnce` never refreshed the cached transfer answer.**
+`World.RunRetryTickerOnce` POSTed to `/testonly/tick` but never re-queried
+the transfer afterward, so any subsequent `Then` step read
+`lastTransferAnswer` stale from BEFORE the tick ran — the same bug class as
+the 2026-09-08 entry above, resurfacing at a different call site. Fixed by
+changing the signature to `RunRetryTickerOnce(ctx, as Caller, transferID
+string) error` and adding a single fresh `w.QueryTransfer(ctx, as,
+transferID)` immediately after the tick call returns. **Single re-query, not
+a poll**: confirmed by reading production (`internal/app/
+transfer_coordinator.go`'s `processDueTransfers`/`attemptDueLegs`) that the
+ticker's own dispatch is fully synchronous per call — no goroutine is
+spawned inside `processDueTransfers`, and `/testonly/tick`'s own HTTP
+handler (`internal/adapters/http/testonly_faults.go`) calls
+`ProcessDueTransfersOnce` synchronously before writing its response. By the
+time the tick's HTTP round-trip returns, every leg the ticker was going to
+attempt this tick has already happened — a bounded poll here would only mask
+a genuine synchrony regression rather than catch one. All 5 call sites in
+`steps_intertenanttransfer_test.go` updated to pass
+`PlatformAdmin(), w.LastTransferAnswer().TransferID`.
+
+**Fix 2 — crash-registration race against the already-spawned inline
+goroutine.** `SendCrossTenantTransfer`'s HTTP call triggers production's
+`spawnForwardLegs` detached goroutine almost immediately (fixed
+`inlineAttemptGraceWindow` pause + one DB round-trip). The Given step
+registering "skip this leg-2 attempt" / "inject this fault" is a SEPARATE,
+later HTTP round-trip that cannot reliably win that race under the current
+timing — not fixable from the test side alone (a companion DELIVER dispatch
+widens `inlineAttemptGraceWindow` on the production side). This
+session's own contribution is on the test side only: the 2026-09-08 entry
+above (RunRetryTickerOnce fix, 2 steps) had checked `the transfer is queried
+immediately after the failed attempt` and `the transfer is queried after the
+second failed attempt` and judged both "correct as-is" as bare, immediate
+queries — that judgment is now **superseded**: those two steps have zero
+tolerance for the goroutine's attempt being delayed by a wider grace window,
+which is exactly what the companion production fix introduces. Added
+`World.PollTransferUntilStatusLeaves(ctx, as, transferID, from
+TransferStatus, timeout)` — a new, short bounded-poll helper (not
+`PollTransferUntilTerminal`, since this needs to observe the intermediate
+`retrying` state, which is not terminal) — and switched both steps to
+`w.PollTransferUntilStatusLeaves(c, PlatformAdmin(),
+w.LastTransferAnswer().TransferID, StatusPending, 2*time.Second)`. 2s bound
+chosen for real headroom over whatever grace-window value the companion
+production fix lands on; costs nothing when the transition has already
+happened by the first poll (single `QueryTransfer`, no sleep, 20ms poll
+interval thereafter).
+
+**Scope discipline**: no `.feature` file edited, no production code touched
+(`internal/app/transfer_coordinator.go` untouched, left to the companion
+crafter dispatch), no scenario re-authored — only
+`tests/acceptance/intertenanttransfer/world.go` (signature change +new
+helper) and `steps_intertenanttransfer_test.go` (5 call-site updates + 2
+step-body swaps) touched. `go build ./...` and `go vet
+./tests/acceptance/intertenanttransfer/...` both zero-output this session.
+Full acceptance run intentionally NOT executed — the production-side
+grace-window widening has not landed yet, so the target scenario will likely
+still fail until both fixes land together, per the orchestrator's own
+instruction.
+
 ## Outcomes register — not run
 
 `nwave-ai outcomes register` is confirmed broken in this install (missing
