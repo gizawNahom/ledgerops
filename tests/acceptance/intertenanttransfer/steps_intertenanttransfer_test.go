@@ -292,33 +292,100 @@ func RegisterSteps(ctx *godog.ScenarioContext, w *World) {
 			return w.InjectLegFaultCount(c, w.LastTransferAnswer().TransferID, 2, 2)
 		})
 
+	// Fix 5 (2026-09-08, DELIVER 04-01 back-propagation): was a plain,
+	// fault-free seedSettlingTransfer -- leg 2 settled on its first attempt
+	// instead of failing all 5, so the transfer never reversed and step
+	// 04-01's own target scenario could never reach its own Then. Mirrors
+	// gap 1's own fix pattern (fix 3 immediately above, InjectLegFaultCount
+	// as the count>1 generalization of InjectLegFault): arm leg 2 to fail
+	// its full retry budget right after seeding, racing the same
+	// inlineAttemptGraceWindow that fix 3's own sibling relies on.
 	ctx.Given(`^tenant "([^"]*)" sent (\S+) to "([^"]*)" and leg 2 has failed on all 5 attempts of its retry budget$`,
 		func(c context.Context, from, amount, to string) error {
-			return w.seedSettlingTransfer(c, TenantName(from), TenantName(to))
+			if err := w.seedSettlingTransfer(c, TenantName(from), TenantName(to)); err != nil {
+				return err
+			}
+			return w.InjectLegFaultCount(c, w.LastTransferAnswer().TransferID, 2, 5)
 		})
 
+	// Fix 6 (2026-09-08, DELIVER 04-01 back-propagation): was a plain,
+	// fault-free seedSettlingTransfer -- neither leg 2's real posting nor
+	// leg 3's full-budget failure was ever established, so the "leg 2 then
+	// leg 1, in order" reversal scenario this Given feeds never reached its
+	// own precondition. Fixed in two parts: (a) leg 1 and leg 2 post for
+	// REAL here (no fault armed on leg 2), exactly as the already-fixed
+	// "whose leg 1 and leg 2 have posted" Given above (same file) composes
+	// it; (b) leg 3 is then armed to fail its FULL retry budget, the
+	// InjectLegFaultCount generalization of that same Given's own one-shot
+	// InjectLegFault(..., 3) -- racing the identical inlineAttemptGraceWindow
+	// before leg 3's own inline attempt ever fires (see that Given's own
+	// comment for why arming a fault on a leg not yet due carries no race
+	// risk of its own: the fault only fires once leg 3 is actually
+	// attempted, which nextLegFor/attemptForwardLegsFrom never do before
+	// leg 2 has posted).
 	ctx.Given(`^tenant "([^"]*)" sent (\S+) to "([^"]*)", leg 1 and leg 2 have posted, and leg 3 has failed on all 5 attempts of its retry budget$`,
 		func(c context.Context, from, amount, to string) error {
-			return w.seedSettlingTransfer(c, TenantName(from), TenantName(to))
+			if err := w.seedSettlingTransfer(c, TenantName(from), TenantName(to)); err != nil {
+				return err
+			}
+			return w.InjectLegFaultCount(c, w.LastTransferAnswer().TransferID, 3, 5)
 		})
 
+	// Fix (2026-09-08, DELIVER 04-01 back-propagation, corrected from an
+	// earlier interrupted dispatch's tick-loop approach): the Given
+	// immediately preceding this step (leg 2 or leg 3 armed to fail all 5
+	// attempts of its retry budget) already has a live, self-rescheduling
+	// goroutine in flight (handleLegFailure -> scheduleRetry,
+	// transfer_coordinator.go) -- no crash is being simulated here, so a
+	// bare RunRetryTickerOnce call is a near-total no-op: the row is not
+	// independently "due" for the ticker to claim between the goroutine's
+	// own scheduled attempts. Waits, in real time, for the transfer to reach
+	// a terminal status instead -- see exhaustRetryPollTimeout's own doc
+	// comment (world.go) for the 25s bound's derivation from the 1s/2s/4s/8s
+	// backoff schedule's ~18s jittered worst case.
 	ctx.When(`^the retry budget is exhausted$`, func(c context.Context) error {
-		return w.RunRetryTickerOnce(c, PlatformAdmin(), w.LastTransferAnswer().TransferID)
+		return w.PollTransferUntilTerminal(c, PlatformAdmin(), w.LastTransferAnswer().TransferID, exhaustRetryPollTimeout)
 	})
 
+	// Fix 7 (2026-09-08, DELIVER 04-01 back-propagation): was a plain,
+	// fault-free seedSettlingTransfer -- never actually drove the transfer to
+	// "reversed", so every scenario built on this Given (entry-log
+	// immutability, no-auto-retry, terminal-reason-naming) started from a
+	// merely-pending transfer instead of the reversed one its own text
+	// names. Now composes the already-proven pieces (seed, arm leg 2's full
+	// retry budget, tick until terminal) via World's own
+	// driveTransferToReversed -- production's reversal mechanism was proven
+	// correct by step 04-01's own now-passing target scenario, so this
+	// composition works once wired for real.
 	ctx.Given(`^a transfer from "([^"]*)" to "([^"]*)" that has been reversed$`,
 		func(c context.Context, from, to string) error {
-			return w.seedSettlingTransfer(c, TenantName(from), TenantName(to))
+			return w.driveTransferToReversed(c, TenantName(from), TenantName(to))
 		})
 
+	// Fix 7b: this file's own STATUS-parameterized Given is invoked only
+	// with "reversed" across every milestone-04 scenario (grepped against
+	// this feature file) -- the STATUS capture is kept, for future-proofing,
+	// but only "reversed" is genuinely driven today; any other value
+	// surfaces a clear error rather than silently returning a merely-pending
+	// transfer under a mismatched name.
 	ctx.Given(`^a transfer from "([^"]*)" to "([^"]*)" that has reached status "([^"]*)"$`,
-		func(c context.Context, from, to, _ string) error {
-			return w.seedSettlingTransfer(c, TenantName(from), TenantName(to))
+		func(c context.Context, from, to, status string) error {
+			if TransferStatus(status) != StatusReversed {
+				return fmt.Errorf("driving a transfer to status %q is not yet supported by this Given -- only %q is exercised by milestone-04's own feature file today", status, StatusReversed)
+			}
+			return w.driveTransferToReversed(c, TenantName(from), TenantName(to))
 		})
 
+	// Fix 7c: same composition as fix 7b, but seeded under the Gherkin's own
+	// SPECIFIC idempotency key (seedSettlingTransfer generates one
+	// internally and never exposed it to a caller) so the later "resends the
+	// identical request with idempotency key ..." When step matches exactly.
 	ctx.Given(`^a transfer from "([^"]*)" to "([^"]*)" that has reached status "([^"]*)" under idempotency key "([^"]*)"$`,
-		func(c context.Context, from, to, _, _ string) error {
-			return w.seedSettlingTransfer(c, TenantName(from), TenantName(to))
+		func(c context.Context, from, to, status, key string) error {
+			if TransferStatus(status) != StatusReversed {
+				return fmt.Errorf("driving a transfer to status %q is not yet supported by this Given -- only %q is exercised by milestone-04's own feature file today", status, StatusReversed)
+			}
+			return w.driveTransferToReversedWithKey(c, TenantName(from), TenantName(to), IdempotencyKey(key))
 		})
 
 	ctx.When(`^the retry ticker runs any number of further ticks$`, func(c context.Context) error {

@@ -735,6 +735,88 @@ milestone-03 failures remaining. The 13 remaining failures are pre-existing
 milestone-04 (reversal, not yet DELIVERed) and milestone-05 (unrelated
 authorization-boundary) gaps, untouched by this session.
 
+## 2026-09-08 — retry-ticker-loop mechanism fix (milestone-04 back-propagation, corrects an interrupted prior dispatch)
+
+A prior dispatch in this same session fixed several vacuous `Given` steps in
+`steps_intertenanttransfer_test.go` but was interrupted mid-flight and left
+behind a wrong MECHANISM in the fix it did land: `World.exhaustLeg2AndReverse`
+(and the sibling `the retry budget is exhausted` `When` step, step 04-01's
+own target scenario) drove leg 2/leg 3's full 5-attempt exhaustion by calling
+`RunRetryTickerOnce` in a bounded loop (`retryBudgetTickBound = 6`).
+
+**Why that was wrong.** `attemptLeg`'s failure path (`handleLegFailure` ->
+`scheduleRetry`, `internal/app/transfer_coordinator.go`) already
+self-reschedules each retry via a real `time.Sleep(delay)` inside its own
+detached goroutine. The retry ticker
+(`RunRetryTickerOnce`/`processDueTransfers`) exists ONLY for crash recovery —
+when that self-rescheduling goroutine never got the chance to run at all
+(simulated process crash) — not as the mechanism that drives normal
+retry-to-retry progression. Calling the ticker back-to-back while the
+goroutine is already live is a near-total no-op: the row is not
+independently "due" for the ticker to claim between the goroutine's own
+scheduled attempts, since `next_attempt_at` reflects the SAME real backoff
+schedule (1s/2s/4s/8s + ~20% jitter, N=5 attempts, ~15s base / ~18s jittered
+worst case) the goroutine is already honoring.
+
+**Fix.** Replaced the tick-loop in both call sites with a real-time bounded
+poll:
+- `World.exhaustLeg2AndReverse` (`world.go`) now arms the fault
+  (`InjectLegFaultCount(ctx, transferID, 2, 5)`) then calls
+  `PollTransferUntilTerminal(ctx, PlatformAdmin(), transferID,
+  exhaustRetryPollTimeout)` — a genuine wall-clock wait instead of a fixed
+  tick count.
+- `PollTransferUntilTerminal`'s own terminal-status switch was extended to
+  recognize `StatusReversalFailed` alongside the existing
+  `StatusSettled`/`StatusReversed` — `reversal_failed` is a genuine terminal
+  status this composition (and future reversal-of-reversal scenarios) needs
+  the poll to stop on.
+- New constant `exhaustRetryPollTimeout = 25 * time.Second` (`world.go`):
+  ~18s jittered worst-case backoff + ~7s margin for attempt/network
+  overhead (each attempt's own HTTP round-trip, well under
+  `attemptTimeout = 10s` in practice).
+- The `the retry budget is exhausted` `When` step
+  (`steps_intertenanttransfer_test.go`) — shared by both "Exhausting retries
+  on leg 2 reverses leg 1 only" (step 04-01's own target scenario) and
+  "Exhausting retries on leg 3 reverses leg 2 then leg 1, in order" — now
+  calls `PollTransferUntilTerminal(..., exhaustRetryPollTimeout)` instead of
+  a bare `RunRetryTickerOnce` call. No crash is simulated in either scenario
+  (the Given immediately before arms a genuine, live-goroutine fault), so a
+  bare tick call was a no-op most of the time it was called.
+
+**Call sites deliberately left unchanged** (grepped every
+`RunRetryTickerOnce` use in the steps file): the three crash-recovery
+scenarios — "the retry ticker's next tick runs, with no inline attempt ever
+having occurred" (milestone-03), "one retry ticker tick runs" (ticker batch
+limit), and "the retry ticker runs any number of further ticks" ("A reversed
+transfer is not automatically retried", proving the ticker is a no-op on an
+already-terminal transfer) — all genuinely need a single real tick call:
+either a process crash is being simulated (the goroutine never ran at all,
+so the ticker is the ONLY thing driving progress) or the scenario's own
+point is to observe the ticker's behavior directly (batch-limit enforcement,
+post-terminal no-op). `the reversal's own retry budget is exhausted`
+(reversal-of-reversal, milestone-04's still-unimplemented next slice) was
+also left unchanged — its own `Given` steps are still fault-free
+`seedSettlingTransfer` stubs with no real precondition established yet, so
+fixing its mechanism now would be speculative ahead of that Given actually
+being wired.
+
+**Verification.** `go build ./...` clean. `LD_LIBRARY_PATH=/tmp go test
+./tests/acceptance/intertenanttransfer/... -run TestMain -count=1`: **32/41
+passing** (up from the 27/41 this session's own interrupted-dispatch
+snapshot), all 5 scenarios this fix targeted now green ("Exhausting retries
+on leg 2 reverses leg 1 only", "Reversal never edits or deletes an existing
+entry", "A reversed transfer is not automatically retried", "A reversed
+transfer's terminal state names the reason", "A resend of the same
+idempotency key after reversal is treated as the original request"). The 9
+remaining failures are pre-existing and unrelated to this fix: leg 3's own
+exhaustion-reversal is explicitly documented as unimplemented in production
+(`handleLegFailure`'s own comment — "leg 3 still falls through to the
+ordinary 'stay retrying' path below, unchanged from step 03-02"), the two
+reversal-of-reversal scenarios have unwired `Given` stubs (noted above), and
+5 milestone-05 failures are unrelated tenant-link/counterparty
+authorization-boundary gaps (`unidentified_caller` vs expected
+`transfer_not_found`/`counterparty_not_found`).
+
 ## Outcomes register — not run
 
 `nwave-ai outcomes register` is confirmed broken in this install (missing

@@ -580,7 +580,7 @@ func (w *World) PollTransferUntilTerminal(ctx context.Context, as Caller, transf
 			return err
 		}
 		switch w.lastTransferAnswer.TxStatus {
-		case StatusSettled, StatusReversed:
+		case StatusSettled, StatusReversed, StatusReversalFailed:
 			return nil
 		}
 		if w.lastTransferAnswer.Refusal != "" {
@@ -702,6 +702,17 @@ func (w *World) AssertAccountBalance(ctx context.Context, tenant TenantName, acc
 // paper over that -- a scenario built on it fails at its own Then assertion
 // for the correct, stated reason.
 func (w *World) seedSettlingTransfer(ctx context.Context, from, to TenantName) error {
+	return w.seedSettlingTransferWithKey(ctx, from, to, IdempotencyKey(fmt.Sprintf("seed-%d", time.Now().UnixNano())))
+}
+
+// seedSettlingTransferWithKey is seedSettlingTransfer's own keyed variant --
+// added 2026-09-08 (milestone-04 back-propagation fix, gap 5) for the one
+// scenario ("A resend of the same idempotency key after reversal is treated
+// as the original request") whose own When step needs the ORIGINAL send to
+// have used a SPECIFIC, Gherkin-named idempotency key rather than the
+// internally-generated "seed-<timestamp>" one, so the later resend can match
+// it exactly. seedSettlingTransfer itself is now a thin wrapper over this.
+func (w *World) seedSettlingTransferWithKey(ctx context.Context, from, to TenantName, key IdempotencyKey) error {
 	w.lastTransferFrom, w.lastTransferTo = from, to
 	if _, ok := w.tenants[from]; !ok {
 		if err := w.GivenTenantProvisioned(ctx, from); err != nil {
@@ -741,7 +752,62 @@ func (w *World) seedSettlingTransfer(ctx context.Context, from, to TenantName) e
 	if err := w.RegisterAlias(ctx, from, alias, to, receiverWallet); err != nil {
 		return err
 	}
-	return w.SendCrossTenantTransfer(ctx, from, ParseMoney("50.00"), alias, IdempotencyKey(fmt.Sprintf("seed-%d", time.Now().UnixNano())))
+	return w.SendCrossTenantTransfer(ctx, from, ParseMoney("50.00"), alias, key)
+}
+
+// exhaustRetryPollTimeout bounds exhaustLeg2AndReverse's real-time poll.
+// backoffForAttempt's own schedule (transfer_coordinator.go: 1s/2s/4s/8s,
+// backoffJitterSpread=0.2) sums to a 15s base across leg 2's 4 scheduled
+// retries (retryBudget=5 attempts total), up to 18s worst case with jitter.
+// The self-rescheduling goroutine (scheduleRetry) drives every one of those
+// retries on its own real time.Sleep -- there is no faster way to observe
+// the sequence land than waiting for it in real wall-clock time. 25s gives
+// ~7s of margin over the 18s jittered worst case for attempt/network
+// overhead (each attempt's own HTTP round-trip to the ledger, well under
+// attemptTimeout=10s in practice).
+const exhaustRetryPollTimeout = 25 * time.Second
+
+// exhaustLeg2AndReverse arms leg 2 to fail its FULL retry budget (mirrors
+// gap 1's own InjectLegFaultCount(..., 2, 5) fix) then waits, in real time,
+// for the transfer to reach a terminal status. Updated 2026-09-08
+// (milestone-04 back-propagation fix, gaps 3/4/5 -- corrected from an
+// earlier interrupted dispatch's tick-loop approach): attemptLeg's failure
+// path (handleLegFailure -> scheduleRetry, transfer_coordinator.go) already
+// self-reschedules each retry via a real time.Sleep in its own detached
+// goroutine once the fault is armed below -- the retry ticker
+// (RunRetryTickerOnce/processDueTransfers) exists ONLY to drive progress
+// after a simulated crash, where that goroutine never got the chance to
+// run. Calling the ticker back-to-back here would be a near-total no-op:
+// the row is not independently "due" between the goroutine's own scheduled
+// attempts, since next_attempt_at reflects the SAME backoff schedule the
+// goroutine is already honoring. A real-time bounded poll is the only
+// mechanism that actually observes this self-driven sequence land.
+func (w *World) exhaustLeg2AndReverse(ctx context.Context) error {
+	transferID := w.LastTransferAnswer().TransferID
+	if err := w.InjectLegFaultCount(ctx, transferID, 2, 5); err != nil {
+		return err
+	}
+	return w.PollTransferUntilTerminal(ctx, PlatformAdmin(), transferID, exhaustRetryPollTimeout)
+}
+
+// driveTransferToReversed composes seedSettlingTransfer with
+// exhaustLeg2AndReverse -- the shared implementation behind every
+// milestone-04 Given that needs a GENUINELY reversed transfer (gaps 3 and 4).
+func (w *World) driveTransferToReversed(ctx context.Context, from, to TenantName) error {
+	if err := w.seedSettlingTransfer(ctx, from, to); err != nil {
+		return err
+	}
+	return w.exhaustLeg2AndReverse(ctx)
+}
+
+// driveTransferToReversedWithKey is driveTransferToReversed's own keyed
+// variant (gap 5), seeding under a Gherkin-supplied idempotency key instead
+// of an internally-generated one.
+func (w *World) driveTransferToReversedWithKey(ctx context.Context, from, to TenantName, key IdempotencyKey) error {
+	if err := w.seedSettlingTransferWithKey(ctx, from, to, key); err != nil {
+		return err
+	}
+	return w.exhaustLeg2AndReverse(ctx)
 }
 
 // resolveTransferID lets a Then/When step refer to a transfer by the story's
