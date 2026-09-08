@@ -116,6 +116,11 @@ func NewRouter(deps Deps) http.Handler {
 	transferCoordinator := app.NewTransferCoordinator(ledger)
 
 	metrics := resolveMetrics(deps.Metrics)
+	// Step 04-03: wires ledgerops_transfer_reversal_failed_total to the one
+	// coordinator hook that ever fires it — see TransferCoordinator's own
+	// onReversalFailed doc comment for why this is a function-value hook
+	// rather than an import (internal/app cannot import this package).
+	transferCoordinator.SetReversalFailedObserver(metrics.ObserveReversalFailed)
 	logger := resolveLogger(deps.Logger)
 	resolveTenantKey := resolveTenantKeyResolver(deps.TenantKeyResolver)
 

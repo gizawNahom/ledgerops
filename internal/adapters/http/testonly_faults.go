@@ -42,6 +42,7 @@ func mountTestOnlyFaults(router chi.Router, deps Deps, ledger *app.Ledger, trans
 		testonly.Use(requireOperatorKey(deps.OperatorKey))
 
 		testonly.Post("/testonly/faults/leg", injectLegFaultHandler(transferCoordinator))
+		testonly.Post("/testonly/faults/reversal", injectReversalFaultHandler(transferCoordinator))
 		testonly.Post("/testonly/faults/crash-forward", simulateCrashBeforeForwardLegHandler(transferCoordinator))
 		testonly.Post("/testonly/faults/crash-reversal", simulateCrashBeforeReversalHandler(transferCoordinator))
 		testonly.Post("/testonly/tick", runRetryTickerOnceHandler(transferCoordinator))
@@ -71,6 +72,31 @@ func injectLegFaultHandler(transferCoordinator *app.TransferCoordinator) http.Ha
 			count = 1
 		}
 		transferCoordinator.InjectLegFaultCount(body.TransferID, body.Leg, count)
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	}
+}
+
+// injectReversalFaultHandler is injectLegFaultHandler's own reversal-side
+// mirror (step 04-03) — forces the next `count` consecutive compensating-
+// reversal Post attempts for the named transfer's leg-N reversal (leg 1 or
+// 2) to fail, the seam a "the compensating reversal of leg N itself has
+// failed on all 5 attempts of its own retry budget" Given step needs (World
+// method + Given-step wiring in
+// tests/acceptance/intertenanttransfer/{world.go,steps_intertenanttransfer_test.go}
+// remain nw-acceptance-designer's own scope, per Amendment 3's own
+// DISTILL-facing consequence note — not added here).
+func injectReversalFaultHandler(transferCoordinator *app.TransferCoordinator) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var body legFaultRequest
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "malformed_request"})
+			return
+		}
+		count := body.FailCount
+		if count <= 0 {
+			count = 1
+		}
+		transferCoordinator.InjectReversalFaultCount(body.TransferID, body.Leg, count)
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	}
 }

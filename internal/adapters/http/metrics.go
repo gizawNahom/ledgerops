@@ -63,6 +63,15 @@ type Metrics struct {
 	// registration-site discipline (package doc) still holds either way.
 	transferStateNonterminalCount     prometheus.Gauge
 	transferStateOldestNextAttemptAge prometheus.Gauge
+
+	// transferReversalFailedTotal is Amendment 3's own instrument
+	// (design/wave-decisions.md § Key Decisions Amendment 3, item 2) — a
+	// monotonically increasing COUNTER, deliberately not folded into either
+	// backlog gauge above: a transfer stuck at reversal_failed is
+	// permanently done, not part of the still-working backlog those two
+	// gauges describe, and `increase(...) > 0` is the operationally
+	// correct alert on a counter, never a gauge.
+	transferReversalFailedTotal prometheus.Counter
 }
 
 // NewMetrics constructs the registry and registers all seven declared
@@ -109,6 +118,10 @@ func NewMetrics() *Metrics {
 			Name: "ledgerops_transfer_state_oldest_next_attempt_age_seconds",
 			Help: "Age, in seconds, of the oldest due-but-unclaimed cross-tenant transfer retry.",
 		}),
+		transferReversalFailedTotal: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "ledgerops_transfer_reversal_failed_total",
+			Help: "Total number of cross-tenant transfers whose compensating reversal itself exhausted its own retry budget.",
+		}),
 	}
 
 	registry.MustRegister(
@@ -121,6 +134,7 @@ func NewMetrics() *Metrics {
 		m.driftedAccounts,
 		m.transferStateNonterminalCount,
 		m.transferStateOldestNextAttemptAge,
+		m.transferReversalFailedTotal,
 	)
 
 	// A CounterVec exposes no series at all until a label combination has
@@ -192,4 +206,18 @@ func (m *Metrics) SetDriftedAccounts(n int) {
 func (m *Metrics) SetTransferStateBacklog(nonterminalCount int, oldestNextAttemptAge time.Duration) {
 	m.transferStateNonterminalCount.Set(float64(nonterminalCount))
 	m.transferStateOldestNextAttemptAge.Set(oldestNextAttemptAge.Seconds())
+}
+
+// ObserveReversalFailed increments ledgerops_transfer_reversal_failed_total
+// — called by TransferCoordinator's own onReversalFailed hook
+// (internal/app/transfer_coordinator.go), wired at the composition root
+// (router.go), exactly once per transfer that reaches the reversal_failed
+// terminal state, immediately after that status write commits (Amendment
+// 3: "incremented once, in the same database transaction that writes
+// status = reversal_failed"). No label: one series is the complete
+// observability answer here (Amendment 3 rejected a manual-intervention
+// port or a per-leg breakdown as out of this feature's scope), mirroring
+// insufficientFundsTotal's own unlabelled shape above.
+func (m *Metrics) ObserveReversalFailed() {
+	m.transferReversalFailedTotal.Inc()
 }
