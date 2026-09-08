@@ -66,12 +66,22 @@ const (
 	// realized delay lands in [0.8x, 1.2x) of the scheduled base.
 	backoffJitterSpread = 0.2
 
-	// statusRetrying and statusSettled are transfer_state's own caller-
-	// facing status labels (brief.md § Retry and reversal mechanics /
-	// D10) — named constants here so every write site agrees on the exact
-	// wire string, mirroring legPending/legPosted one section below.
+	// statusRetrying, statusSettled, and statusReversed are transfer_state's
+	// own caller-facing status labels (brief.md § Retry and reversal
+	// mechanics / D10) — named constants here so every write site agrees on
+	// the exact wire string, mirroring legPending/legPosted one section
+	// below. statusReversed is D10's fourth caller-visible state (step
+	// 04-01): reached when a leg's retry budget exhausts and every leg
+	// already posted has been compensated.
 	statusRetrying = "retrying"
 	statusSettled  = "settled"
+	statusReversed = "reversed"
+
+	// reasonRetryBudgetExhausted is the free-form reason transfer_state's
+	// own `reason` column (migration 02-01) carries once a leg's fixed
+	// retry budget (N=5) exhausts and the coordinator reverses every leg
+	// already posted (brief.md § Retry and reversal mechanics).
+	reasonRetryBudgetExhausted = "retry_budget_exhausted"
 
 	// inlineAttemptGraceWindow is a fixed, short pause spawnForwardLegs' own
 	// goroutine takes before its first leg-2 attempt — every other consumer
@@ -324,8 +334,9 @@ type LegView struct {
 }
 
 const (
-	legPending = "pending"
-	legPosted  = "posted"
+	legPending  = "pending"
+	legPosted   = "posted"
+	legReversed = "reversed"
 )
 
 // SendTransfer is the Read → Decide → Write sandwich over three separate
@@ -708,7 +719,7 @@ func (tc *TransferCoordinator) attemptLeg(ctx context.Context, transferID string
 		})
 	}
 	if postErr != nil {
-		return tc.handleLegFailure(ctx, transferID, leg, postErr)
+		return tc.handleLegFailure(ctx, transferID, leg, state, postErr)
 	}
 	return tc.recordLegSuccess(attemptCtx, transferID, leg)
 }
@@ -745,16 +756,26 @@ func backoffForAttempt(failedAttempts int, jitter float64) (time.Duration, bool)
 }
 
 // handleLegFailure is attemptLeg's own failure path (brief.md § Retry and
-// reversal mechanics): records the failed attempt, advances the transfer to
-// "retrying" with next_attempt_at set to the computed backoff target, and —
-// while the budget is not yet exhausted — self-schedules the retry that
-// will pick this same leg back up once it becomes due again. Budget
-// exhaustion is left as a narrower scope for this step (see retryBudget's
-// own doc comment): the row is left "retrying," still due, for slice 04's
-// own reversal trigger to eventually notice and act on.
-func (tc *TransferCoordinator) handleLegFailure(ctx context.Context, transferID string, leg int, postErr error) error {
+// reversal mechanics): records the failed attempt, then either self-
+// schedules the retry that will pick this same leg back up once it becomes
+// due again (budget not yet exhausted), or — once the budget is exhausted —
+// triggers reversal of every leg already posted. Leg 2 exhausting its
+// budget reverses leg 1 only, since leg 3 is never attempted before leg 2
+// succeeds (attemptForwardLegsFrom's own sequencing) — this step's own
+// scope (04-01). Leg 3 exhausting its own budget (reversing leg 2 then leg
+// 1, in order) is slice 04's next step, left as a narrower scope here: that
+// leg still falls through to the ordinary "stay retrying" path below,
+// unchanged from step 03-02.
+func (tc *TransferCoordinator) handleLegFailure(ctx context.Context, transferID string, leg int, state ports.TransferState, postErr error) error {
 	failedAttempts := tc.recordFailedAttempt(transferID, leg)
 	delay, ok := backoffForAttempt(failedAttempts, rand.Float64())
+
+	if !ok && leg == 2 {
+		if err := tc.reverseLeg1(ctx, transferID, state); err != nil {
+			return err
+		}
+		return postErr
+	}
 
 	nextAttemptAt := tc.ledger.clock()
 	if ok {
@@ -768,6 +789,83 @@ func (tc *TransferCoordinator) handleLegFailure(ctx context.Context, transferID 
 		tc.scheduleRetry(transferID, leg, delay)
 	}
 	return postErr
+}
+
+// reverseLeg1Movement is the pure decision behind leg 1's own compensating
+// reversal (brief.md § Compensating-transaction mechanics under D7,
+// "Reverse a leg" is a specific use of the existing, unmodified Post
+// function, not a new domain operation): the SAME two accounts leg 1's
+// original Post moved between, From/To swapped, under the SAME tenant scope
+// leg 1 itself used (I8 unmodified — strictly intra-tenant). Mirrors
+// legMovement's own pure-decision shape one section above; takes
+// senderWalletAccountID as a parameter (rather than looking it up itself)
+// so this stays a pure, deterministically testable function — the impure
+// account lookup lives in reverseLeg1 below, exactly like legMovement's own
+// callers keep every impure read at the call site.
+func reverseLeg1Movement(state ports.TransferState, senderWalletAccountID string) (from, to, tenantID, key string) {
+	return settlementAccountName, senderWalletAccountID, state.TenantID, legReverseKey(state.IdempotencyKey, 1)
+}
+
+// legReverseKey is the synthesized IdempotencyStore key a leg's own
+// compensating reversal Post reuses — one segment longer than legMovement's
+// own forward-path keys ("{key}:legN"), exactly as DESIGN's own instruction
+// states ("{Idempotency-Key}:leg1:reverse"). Reusing IdempotencyStore this
+// way is the whole double-application guard: a repeat reversal attempt
+// under the identical key replays rather than re-applying, the same
+// guarantee I7 gives one level up, applied to coordinator state instead of
+// a caller-supplied key.
+func legReverseKey(idempotencyKey string, leg int) string {
+	return fmt.Sprintf("%s:leg%d:reverse", idempotencyKey, leg)
+}
+
+// reverseLeg1 triggers when leg 2's retry budget is exhausted (leg 3 is
+// never attempted before leg 2 succeeds, so leg 1 is the only leg that ever
+// posted). Guarded on leg 1's own posted precondition first — a compensating
+// Post is only ever issued once transfer_state's own record shows leg 1
+// already posted (structurally always true here, since SendTransfer never
+// creates a transfer_state row before leg 1 commits, but checked explicitly
+// so the precondition is visible rather than merely assumed, mirroring
+// DESIGN's own explicit instruction to read-before-compensate). The
+// reversal itself is a fresh Post call through the SAME unmodified
+// Ledger.PostTransfer every other leg already uses — zero new domain
+// operation, zero new domain.ViolationKind member.
+func (tc *TransferCoordinator) reverseLeg1(ctx context.Context, transferID string, state ports.TransferState) error {
+	leg1Posted, err := withUnitOfWork(ctx, tc.ledger.store, fmt.Sprintf("checking leg 1's own posted precondition before reversing transfer %q", transferID),
+		func(uow ports.UnitOfWork) (string, error) {
+			return legPostedStatus(ctx, uow, state.IdempotencyKey)
+		})
+	if err != nil {
+		return err
+	}
+	if leg1Posted != legPosted {
+		// Leg 1 never posted — nothing to reverse. Structurally
+		// unreachable today (see doc comment above); kept as an explicit,
+		// silent no-op rather than a panic, mirroring claimTransfer's own
+		// "a failed precondition is a normal outcome, never an error"
+		// convention.
+		return nil
+	}
+
+	senderWalletAccountID, err := tc.walletAccountID(ctx, state.TenantID)
+	if err != nil {
+		return err
+	}
+	from, to, tenantID, key := reverseLeg1Movement(state, senderWalletAccountID)
+
+	reverseCtx, cancel := context.WithTimeout(ctx, attemptTimeout)
+	defer cancel()
+	if _, err := tc.ledger.PostTransfer(reverseCtx, TransferRequest{
+		From:           from,
+		To:             to,
+		Amount:         state.Amount,
+		IdempotencyKey: key,
+		Fingerprint:    legFingerprint(from, to, state.Amount),
+		TenantID:       tenantID,
+	}); err != nil {
+		return err
+	}
+
+	return tc.advanceAfterLegOutcome(ctx, transferID, statusReversed, tc.ledger.clock(), reasonRetryBudgetExhausted)
 }
 
 // scheduleRetry is attemptLeg's own self-rescheduling mechanism — a
@@ -900,6 +998,10 @@ func (tc *TransferCoordinator) GetTransfer(ctx context.Context, transferID strin
 				return TransferView{}, ErrTransferNotFound
 			}
 
+			leg1Status, err := leg1DisplayStatus(ctx, uow, state.IdempotencyKey)
+			if err != nil {
+				return TransferView{}, err
+			}
 			leg2Posted, err := legPostedStatus(ctx, uow, state.IdempotencyKey+":leg2")
 			if err != nil {
 				return TransferView{}, err
@@ -913,7 +1015,7 @@ func (tc *TransferCoordinator) GetTransfer(ctx context.Context, transferID strin
 				TransferID: state.TransferID,
 				Status:     state.Status,
 				Reason:     state.Reason,
-				Leg1:       LegView{Status: legPosted},
+				Leg1:       LegView{Status: leg1Status},
 				Leg2:       LegView{Status: leg2Posted},
 				Leg3:       LegView{Status: leg3Posted},
 			}, nil
@@ -1037,6 +1139,26 @@ func (tc *TransferCoordinator) nextLegFor(ctx context.Context, transferID string
 			}
 			return 0, nil
 		})
+}
+
+// leg1DisplayStatus answers Leg1's own caller-facing status for GetTransfer.
+// A transfer_state row only ever exists once Leg 1 has posted (SendTransfer
+// creates the row only after Leg 1's own commit, never before), so "posted"
+// is the correct default the moment a row is found at all — the one thing
+// that changes it is a leg-1 reversal (reverseLeg1 above). Reversal commits
+// under a SEPARATE, synthesized key (legReverseKey(key, 1)), never touching
+// leg 1's own original posted entry (brief.md: "never edits or deletes an
+// existing entry"), so the reverse key is checked on its own and takes
+// precedence when found.
+func leg1DisplayStatus(ctx context.Context, uow ports.UnitOfWork, idempotencyKey string) (string, error) {
+	_, found, err := uow.Idempotency().Lookup(ctx, legReverseKey(idempotencyKey, 1))
+	if err != nil {
+		return "", fmt.Errorf("checking leg 1 reversal status for key %q: %w", idempotencyKey, err)
+	}
+	if found {
+		return legReversed, nil
+	}
+	return legPosted, nil
 }
 
 // legPostedStatus answers one leg's caller-facing status by looking up its

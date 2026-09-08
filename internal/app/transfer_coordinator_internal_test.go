@@ -7,20 +7,23 @@
 // function directly, so it has no other place to be verified from.
 //
 // WHY-NEW-FILE: internal/app/transfer_coordinator_internal_test.go
-//   CLOSEST-EXISTING: internal/app/usecases_test.go
-//   EXTENSION-COST: usecases_test.go is package app_test (black-box, driving-
-//     port only) — adding a white-box case there would require either
-//     exporting backoffForAttempt (leaking an implementation detail past the
-//     port boundary) or splitting the file's own package declaration, which
-//     would silently flip every other test in it to white-box scope too.
-//   PARALLEL-RATIONALE: a distinct package declaration (app, not app_test)
-//     is an incompatible compilation unit boundary Go itself enforces, not a
-//     stylistic preference — the two cannot share one file.
+//
+//	CLOSEST-EXISTING: internal/app/usecases_test.go
+//	EXTENSION-COST: usecases_test.go is package app_test (black-box, driving-
+//	  port only) — adding a white-box case there would require either
+//	  exporting backoffForAttempt (leaking an implementation detail past the
+//	  port boundary) or splitting the file's own package declaration, which
+//	  would silently flip every other test in it to white-box scope too.
+//	PARALLEL-RATIONALE: a distinct package declaration (app, not app_test)
+//	  is an incompatible compilation unit boundary Go itself enforces, not a
+//	  stylistic preference — the two cannot share one file.
 package app
 
 import (
 	"testing"
 	"time"
+
+	"ledgerops/internal/app/ports"
 )
 
 // TestBackoffForAttempt_MatchesTheDocumentedScheduleWithinJitterBand proves
@@ -74,5 +77,54 @@ func TestBackoffForAttempt_RejectsAZeroOrNegativeAttemptCount(t *testing.T) {
 		if _, ok := backoffForAttempt(failedAttempts, 0.5); ok {
 			t.Fatalf("backoffForAttempt(%d, 0.5) ok = true, want false", failedAttempts)
 		}
+	}
+}
+
+// TestLegReverseKey_SynthesizesOneSegmentLongerThanTheForwardKey proves the
+// exact wire shape DESIGN's own instruction states
+// ("{Idempotency-Key}:leg1:reverse") — reused by both reverseLeg1's own
+// double-application guard and leg1DisplayStatus's own read.
+func TestLegReverseKey_SynthesizesOneSegmentLongerThanTheForwardKey(t *testing.T) {
+	cases := []struct {
+		key  string
+		leg  int
+		want string
+	}{
+		{"idem-abc", 1, "idem-abc:leg1:reverse"},
+		{"idem-abc", 2, "idem-abc:leg2:reverse"},
+	}
+	for _, tc := range cases {
+		if got := legReverseKey(tc.key, tc.leg); got != tc.want {
+			t.Fatalf("legReverseKey(%q, %d) = %q, want %q", tc.key, tc.leg, got, tc.want)
+		}
+	}
+}
+
+// TestReverseLeg1Movement_SwapsLeg1sOwnFromAndToUnderTheSameTenant proves
+// the pure decision behind leg 1's own compensating reversal (brief.md §
+// Compensating-transaction mechanics under D7): the settlement account and
+// sender wallet swap sides relative to leg 1's own original Post, under the
+// SAME tenant scope leg 1 itself used (I8 unmodified) — a fresh use of the
+// unmodified Post function, never a new domain operation.
+func TestReverseLeg1Movement_SwapsLeg1sOwnFromAndToUnderTheSameTenant(t *testing.T) {
+	state := ports.TransferState{
+		TenantID:       "tnt_acme",
+		IdempotencyKey: "idem-abc",
+	}
+	senderWalletAccountID := "acme-wallet"
+
+	from, to, tenantID, key := reverseLeg1Movement(state, senderWalletAccountID)
+
+	if from != settlementAccountName {
+		t.Fatalf("from = %q, want the settlement account %q (leg 1's own original To, swapped)", from, settlementAccountName)
+	}
+	if to != senderWalletAccountID {
+		t.Fatalf("to = %q, want the sender's own wallet %q (leg 1's own original From, swapped)", to, senderWalletAccountID)
+	}
+	if tenantID != state.TenantID {
+		t.Fatalf("tenantID = %q, want %q (I8: strictly intra-tenant, unmodified)", tenantID, state.TenantID)
+	}
+	if key != legReverseKey(state.IdempotencyKey, 1) {
+		t.Fatalf("key = %q, want %q", key, legReverseKey(state.IdempotencyKey, 1))
 	}
 }
