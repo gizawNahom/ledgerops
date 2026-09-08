@@ -52,6 +52,17 @@ type Metrics struct {
 	trialBalanceImbalance    prometheus.Gauge
 	trialBalanceScanDuration prometheus.Histogram
 	driftedAccounts          prometheus.Gauge
+
+	// transferStateNonterminalCount and transferStateOldestNextAttemptAge
+	// are inter-tenant-transfer's own two operational-visibility gauges
+	// (ADR-015 Amendment 2, wave-decisions.md § Key Decisions item 4):
+	// caller-set (SetTransferStateBacklog below), the same pattern
+	// trialBalanceImbalance/driftedAccounts already use above, rather than a
+	// GaugeFunc computed on scrape — the coordinator, not this package,
+	// knows how to read transfer_state, and this file's own single-
+	// registration-site discipline (package doc) still holds either way.
+	transferStateNonterminalCount     prometheus.Gauge
+	transferStateOldestNextAttemptAge prometheus.Gauge
 }
 
 // NewMetrics constructs the registry and registers all seven declared
@@ -90,6 +101,14 @@ func NewMetrics() *Metrics {
 			Name: "ledgerops_drift_accounts",
 			Help: "Number of accounts whose stored balance disagreed with their entries in the most recent verification scan.",
 		}),
+		transferStateNonterminalCount: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "ledgerops_transfer_state_nonterminal_count",
+			Help: "Number of cross-tenant transfers currently in a non-terminal status (pending or retrying).",
+		}),
+		transferStateOldestNextAttemptAge: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "ledgerops_transfer_state_oldest_next_attempt_age_seconds",
+			Help: "Age, in seconds, of the oldest due-but-unclaimed cross-tenant transfer retry.",
+		}),
 	}
 
 	registry.MustRegister(
@@ -100,6 +119,8 @@ func NewMetrics() *Metrics {
 		m.trialBalanceImbalance,
 		m.trialBalanceScanDuration,
 		m.driftedAccounts,
+		m.transferStateNonterminalCount,
+		m.transferStateOldestNextAttemptAge,
 	)
 
 	// A CounterVec exposes no series at all until a label combination has
@@ -158,4 +179,17 @@ func (m *Metrics) ObserveTrialBalanceScanDuration(elapsed time.Duration) {
 // the caller already found drifted for the wire response.
 func (m *Metrics) SetDriftedAccounts(n int) {
 	m.driftedAccounts.Set(float64(n))
+}
+
+// SetTransferStateBacklog sets both inter-tenant-transfer backlog gauges
+// together, at the single call site that already knows both facts from one
+// scan of transfer_state (ADR-015 Amendment 2) — mirroring ObservePosting's
+// own "one call, two series" shape above rather than risking the two
+// numbers drifting apart across two separate calls. oldestNextAttemptAge is
+// the caller's own already-computed time.Since(oldest next_attempt_at); a
+// backlog of zero non-terminal transfers has no "oldest" to report, so the
+// caller passes 0 in that case.
+func (m *Metrics) SetTransferStateBacklog(nonterminalCount int, oldestNextAttemptAge time.Duration) {
+	m.transferStateNonterminalCount.Set(float64(nonterminalCount))
+	m.transferStateOldestNextAttemptAge.Set(oldestNextAttemptAge.Seconds())
 }

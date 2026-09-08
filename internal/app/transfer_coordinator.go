@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand"
 	"sync"
 	"time"
 
@@ -51,6 +52,27 @@ const (
 	// exclusivity with (brief.md § ClaimDue's own batch limit).
 	retryBatchLimit = 100
 
+	// retryBudget is the fixed number of attempts (US-3's own domain
+	// example, wave-decisions.md § Key Decisions: "Fixed retry budget N = 5")
+	// a single leg gets before this step's own scope stops rescheduling it —
+	// tracked in-memory per coordinator instance (recordFailedAttempt below):
+	// sufficient for this step's own scenarios (none of which survive a
+	// process crash mid-budget), leaving budget durability across a crash as
+	// slice 04's own concern alongside the reversal trigger it builds.
+	retryBudget = 5
+
+	// backoffJitterSpread is US-3's own "~20%" jitter band (wave-
+	// decisions.md), applied symmetrically around each base delay so the
+	// realized delay lands in [0.8x, 1.2x) of the scheduled base.
+	backoffJitterSpread = 0.2
+
+	// statusRetrying and statusSettled are transfer_state's own caller-
+	// facing status labels (brief.md § Retry and reversal mechanics /
+	// D10) — named constants here so every write site agrees on the exact
+	// wire string, mirroring legPending/legPosted one section below.
+	statusRetrying = "retrying"
+	statusSettled  = "settled"
+
 	// inlineAttemptGraceWindow is a fixed, short pause spawnForwardLegs' own
 	// goroutine takes before its first leg-2 attempt — every other consumer
 	// of this transfer_id (a test-only fault/crash registration arriving a
@@ -61,7 +83,7 @@ const (
 	// is invisible at the driving port (brief.md § Sync vs. async
 	// settlement) and only ever shortens the window a stalled leg spends
 	// unclaimed.
-	inlineAttemptGraceWindow = 20 * time.Millisecond
+	inlineAttemptGraceWindow = 200 * time.Microsecond
 )
 
 // ErrTransferNotFound marks a GetTransfer call naming a transfer_id no
@@ -91,6 +113,31 @@ type TransferCoordinator struct {
 	// postgres.AttemptOutOfBandChange's "back door" precedent: an exported,
 	// always-compiled function production code simply never calls).
 	testOnly testOnlyFaultState
+
+	// retry is attemptLeg's own in-memory failed-attempt counter (step
+	// 03-02) — see retryBudget's own doc comment for why in-memory scope is
+	// sufficient here.
+	retry retryAttemptTracker
+}
+
+// retryAttemptTracker counts consecutive failed attempts per (transfer_id,
+// leg) pair — a plain mutex-guarded map, not sync.Map, because every access
+// here is a read-increment-write, which sync.Map has no atomic primitive for
+// anyway.
+type retryAttemptTracker struct {
+	mu     sync.Mutex
+	counts map[string]int
+}
+
+// recordFailedAttempt increments and returns the new failed-attempt count
+// for transferID's named leg — the 1-based count backoffForAttempt reads to
+// pick the next delay off the schedule.
+func (tc *TransferCoordinator) recordFailedAttempt(transferID string, leg int) int {
+	tc.retry.mu.Lock()
+	defer tc.retry.mu.Unlock()
+	key := transferLegKey(transferID, leg)
+	tc.retry.counts[key]++
+	return tc.retry.counts[key]
 }
 
 // testOnlyFaultState is a per-coordinator (not global) registry, so two
@@ -113,6 +160,7 @@ func NewTransferCoordinator(ledger *Ledger) *TransferCoordinator {
 			skipForwardCrash:  map[string]bool{},
 			skipReversalCrash: map[string]bool{},
 		},
+		retry: retryAttemptTracker{counts: map[string]int{}},
 	}
 }
 
@@ -133,7 +181,7 @@ func NewTransferCoordinator(ledger *Ledger) *TransferCoordinator {
 func (tc *TransferCoordinator) InjectLegFault(transferID string, leg int) {
 	tc.testOnly.mu.Lock()
 	defer tc.testOnly.mu.Unlock()
-	tc.testOnly.legFaults[legFaultKey(transferID, leg)] = true
+	tc.testOnly.legFaults[transferLegKey(transferID, leg)] = true
 }
 
 // consumeInjectedLegFault reports whether a fault was armed for this
@@ -142,7 +190,7 @@ func (tc *TransferCoordinator) InjectLegFault(transferID string, leg int) {
 func (tc *TransferCoordinator) consumeInjectedLegFault(transferID string, leg int) bool {
 	tc.testOnly.mu.Lock()
 	defer tc.testOnly.mu.Unlock()
-	key := legFaultKey(transferID, leg)
+	key := transferLegKey(transferID, leg)
 	if tc.testOnly.legFaults[key] {
 		delete(tc.testOnly.legFaults, key)
 		return true
@@ -150,7 +198,11 @@ func (tc *TransferCoordinator) consumeInjectedLegFault(transferID string, leg in
 	return false
 }
 
-func legFaultKey(transferID string, leg int) string {
+// transferLegKey is the shared (transferID, leg) map key format for both
+// the test-only fault registry above and attemptLeg's own failed-attempt
+// counter below -- one composite key shape, not two independently
+// maintained ones.
+func transferLegKey(transferID string, leg int) string {
 	return fmt.Sprintf("%s:%d", transferID, leg)
 }
 
@@ -501,7 +553,8 @@ func (tc *TransferCoordinator) createTransferState(ctx context.Context, state po
 // at once, without waiting for the ticker," not "before the HTTP response
 // is written." Each attemptLeg call below gets its own fresh per-attempt
 // timeout internally; this goroutine itself carries no umbrella timeout
-// beyond the sum of its two attempts.
+// beyond the sum of its own attempts (including any self-rescheduled
+// retries — see attemptForwardLegsFrom).
 func (tc *TransferCoordinator) spawnForwardLegs(transferID string) {
 	go func() {
 		// inlineAttemptGraceWindow: see its own doc comment above — gives a
@@ -518,17 +571,26 @@ func (tc *TransferCoordinator) spawnForwardLegs(transferID string) {
 			return
 		}
 
-		background := context.Background()
-		// A non-nil error here (including a lost claim race, which
-		// attemptLeg reports as a nil error/no-op, not this branch) means
-		// Leg 2 did not post -- Leg 3 must not be attempted out of order.
-		// The retry ticker (step 03-02) is what resumes from here; this
-		// goroutine's own job is done once its first attempt has run.
-		if err := tc.attemptLeg(background, transferID, 2); err != nil {
-			return
-		}
-		_ = tc.attemptLeg(background, transferID, 3)
+		tc.attemptForwardLegsFrom(context.Background(), transferID, 2)
 	}()
+}
+
+// attemptForwardLegsFrom attempts one leg, and — if it succeeds and it was
+// Leg 2 — immediately continues to Leg 3, exactly as the original inline
+// sequence always has (brief.md § Sync vs. async settlement). This is the
+// one place that sequencing rule lives, shared by spawnForwardLegs' first
+// attempt above and every self-rescheduled retry a failure spawns
+// (scheduleRetry below) — a successful retry completes the sequence
+// identically to a successful first attempt, never leaving Leg 3
+// unattempted just because Leg 2 needed a retry to get there. A failed
+// attempt returns without continuing: handleLegFailure (inside attemptLeg)
+// has already scheduled its own retry, and Leg 3 must never be attempted
+// before Leg 2 has actually posted.
+func (tc *TransferCoordinator) attemptForwardLegsFrom(ctx context.Context, transferID string, leg int) {
+	if err := tc.attemptLeg(ctx, transferID, leg); err != nil || leg != 2 {
+		return
+	}
+	_ = tc.attemptLeg(ctx, transferID, 3)
 }
 
 // attemptLeg is the one function both the inline goroutine above and the
@@ -540,6 +602,11 @@ func (tc *TransferCoordinator) spawnForwardLegs(transferID string) {
 // transfer_state row alone, never from caller-supplied context, which is
 // what makes it equally correct whether invoked moments after SendTransfer
 // or minutes later by a ticker that only just discovered the row.
+//
+// ctx (not attemptCtx) is deliberately what handleLegFailure/scheduleRetry
+// receive below: attemptCtx's own timeout/cancellation is scoped to this one
+// Post attempt (attemptTimeout) and must not leak into a retry goroutine
+// that may still be sleeping long after this call returns.
 func (tc *TransferCoordinator) attemptLeg(ctx context.Context, transferID string, leg int) error {
 	attemptCtx, cancel := context.WithTimeout(ctx, attemptTimeout)
 	defer cancel()
@@ -570,7 +637,83 @@ func (tc *TransferCoordinator) attemptLeg(ctx context.Context, transferID string
 			TenantID:       tenantID,
 		})
 	}
-	return tc.recordLegOutcome(attemptCtx, transferID, leg, postErr)
+	if postErr != nil {
+		return tc.handleLegFailure(ctx, transferID, leg, postErr)
+	}
+	return tc.recordLegSuccess(attemptCtx, transferID, leg)
+}
+
+// backoffSchedule is the base (pre-jitter) delay before the attempt
+// following a failed attempt, indexed by how many attempts have already
+// failed (1-based; wave-decisions.md § Key Decisions: "1s/2s/4s/8s", so
+// attempts 1->2, 2->3, 3->4, 4->5 carry these four delays). Index 0 is
+// never read (backoffForAttempt rejects failedAttempts < 1).
+var backoffSchedule = [...]time.Duration{
+	1: 1 * time.Second,
+	2: 2 * time.Second,
+	3: 4 * time.Second,
+	4: 8 * time.Second,
+}
+
+// backoffForAttempt is the pure function behind the retry schedule (US-3's
+// own domain example, wave-decisions.md: fixed budget N=5, backoff
+// 1s/2s/4s/8s + ~20% jitter). failedAttempts is how many attempts have
+// already failed for one leg (1-based, from recordFailedAttempt). jitter
+// must be in [0, 1) — the caller supplies a fresh pseudo-random draw per
+// call, kept as an explicit parameter (rather than reading math/rand
+// internally) so this function stays a pure, deterministically testable
+// unit. Once the budget is exhausted (failedAttempts >= retryBudget), this
+// returns (0, false): there is no delay to schedule because there is no
+// further attempt this step's own scope reschedules.
+func backoffForAttempt(failedAttempts int, jitter float64) (time.Duration, bool) {
+	if failedAttempts < 1 || failedAttempts >= retryBudget {
+		return 0, false
+	}
+	base := backoffSchedule[failedAttempts]
+	multiplier := (1 - backoffJitterSpread) + jitter*(2*backoffJitterSpread)
+	return time.Duration(float64(base) * multiplier), true
+}
+
+// handleLegFailure is attemptLeg's own failure path (brief.md § Retry and
+// reversal mechanics): records the failed attempt, advances the transfer to
+// "retrying" with next_attempt_at set to the computed backoff target, and —
+// while the budget is not yet exhausted — self-schedules the retry that
+// will pick this same leg back up once it becomes due again. Budget
+// exhaustion is left as a narrower scope for this step (see retryBudget's
+// own doc comment): the row is left "retrying," still due, for slice 04's
+// own reversal trigger to eventually notice and act on.
+func (tc *TransferCoordinator) handleLegFailure(ctx context.Context, transferID string, leg int, postErr error) error {
+	failedAttempts := tc.recordFailedAttempt(transferID, leg)
+	delay, ok := backoffForAttempt(failedAttempts, rand.Float64())
+
+	nextAttemptAt := tc.ledger.clock()
+	if ok {
+		nextAttemptAt = nextAttemptAt.Add(delay)
+	}
+	if err := tc.advanceAfterLegOutcome(ctx, transferID, statusRetrying, nextAttemptAt, ""); err != nil {
+		return err
+	}
+
+	if ok {
+		tc.scheduleRetry(transferID, leg, delay)
+	}
+	return postErr
+}
+
+// scheduleRetry is attemptLeg's own self-rescheduling mechanism — a
+// detached goroutine that sleeps for exactly the computed backoff delay,
+// then re-enters the same claim-gated attemptForwardLegsFrom sequence this
+// leg's very first attempt went through. Because a retry re-enters through
+// attemptLeg's own ClaimOne, a concurrent ticker-driven claim on the
+// identical row (once the ticker exists, step 03-03) can never race this
+// goroutine unsafely: exactly one of them wins the claim (brief.md § Crash
+// recovery), and the loser's attemptLeg returns immediately without
+// attempting anything, exactly like any other lost claim race.
+func (tc *TransferCoordinator) scheduleRetry(transferID string, leg int, delay time.Duration) {
+	go func() {
+		time.Sleep(delay)
+		tc.attemptForwardLegsFrom(context.Background(), transferID, leg)
+	}()
 }
 
 // claimTransfer performs ClaimOne's own atomic, transaction-scoped claim
@@ -640,20 +783,15 @@ func legFingerprint(from, to string, amount domain.Money) string {
 	return fmt.Sprintf("%s|%s|%d|%s", from, to, amount.MinorUnits(), amount.Currency())
 }
 
-// recordLegOutcome is attemptLeg's own "(3) a second write" step (brief.md
-// § Retry and reversal mechanics): on success, advancing the transfer to
-// settled once Leg 3 posts. Retry/backoff/reversal on failure is slice
-// 03/04's own scope, not this step's — a failed attempt today simply
-// returns the error, leaving the claim's own 15-second lease as the retry
-// cadence until that machinery lands.
-func (tc *TransferCoordinator) recordLegOutcome(ctx context.Context, transferID string, leg int, postErr error) error {
-	if postErr != nil {
-		return postErr
-	}
-
+// recordLegSuccess is attemptLeg's own "(3) a second write" step on the
+// success path (brief.md § Retry and reversal mechanics): advancing the
+// transfer to settled once Leg 3 posts, or back to pending (its next leg
+// still owed) otherwise. The failure path's own second write is
+// handleLegFailure, above.
+func (tc *TransferCoordinator) recordLegSuccess(ctx context.Context, transferID string, leg int) error {
 	status := legPending
 	if leg == 3 {
-		status = "settled"
+		status = statusSettled
 	}
 	// next_attempt_at resets to now on every successful attempt (brief.md §
 	// Retry and reversal mechanics, "a second write... sets next_attempt_at

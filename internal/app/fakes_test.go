@@ -16,6 +16,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"sync"
 	"time"
 
 	"ledgerops/internal/app/ports"
@@ -49,6 +50,33 @@ type fakeStore struct {
 	// with — the other half of VerifyBooks' wiring proof: a tenant-scoped
 	// call must enumerate that tenant's own accounts, not legacyTenantID.
 	lastAccountsAllTenantID string
+
+	// claimMu and claimAttempts/claimWins are step 03-02's own Earned Trust
+	// instrumentation (transfer_coordinator_claim_race_test.go): every other
+	// fake repository here runs single-threaded within one test (this
+	// suite's own TEST PARADIGM note), but attemptLeg's ClaimOne-gated
+	// double-processing guarantee is a genuine concurrency property, so
+	// fakeTransferStateRepository.ClaimOne below is made real-goroutine-safe
+	// (an atomic check-then-write under claimMu, mirroring what a real
+	// SELECT ... FOR UPDATE serializes at the database) specifically so a
+	// test can race two real goroutines against it and observe exactly one
+	// winner — the same guarantee internal/adapters/postgres/
+	// transfer_state_test.go already proves at the repository layer alone.
+	claimMu       sync.Mutex
+	claimAttempts int
+	claimWins     int
+
+	// claimBarrier, when non-nil, makes ClaimOne rendezvous every caller
+	// before any of them proceeds to the actual check-then-write --
+	// otherwise two goroutines started together can still fail to overlap
+	// (one may run its whole attemptLeg call to completion, including
+	// pushing next_attempt_at into the future on failure, before the other
+	// ever reaches ClaimOne at all). A real SELECT ... FOR UPDATE gets this
+	// overlap for free from actual transaction blocking
+	// (internal/adapters/postgres's own concurrent-claim test); an
+	// in-memory fake has no such blocking to borrow, so the race test sets
+	// this barrier explicitly instead.
+	claimBarrier *sync.WaitGroup
 }
 
 func newFakeStore(accounts ...domain.Account) *fakeStore {
@@ -101,7 +129,12 @@ func (u *fakeUnitOfWork) TransferStates() ports.TransferStateRepository {
 }
 
 func (u *fakeUnitOfWork) Commit(ctx context.Context) error {
+	// claimMu: guards this spy field the same way it guards transferStates
+	// (see claimMu's own doc comment) -- step 03-02's own concurrency test
+	// commits multiple units of work from real, concurrent goroutines.
+	u.store.claimMu.Lock()
 	u.store.committed = true
+	u.store.claimMu.Unlock()
 	return nil
 }
 
@@ -418,6 +451,8 @@ type fakeTransferStateRepository struct{ store *fakeStore }
 var _ ports.TransferStateRepository = fakeTransferStateRepository{}
 
 func (r fakeTransferStateRepository) Create(ctx context.Context, state ports.TransferState) error {
+	r.store.claimMu.Lock()
+	defer r.store.claimMu.Unlock()
 	if _, exists := r.store.transferStates[state.TransferID]; exists {
 		return fmt.Errorf("fakeTransferStateRepository: transfer %q already exists", state.TransferID)
 	}
@@ -425,7 +460,13 @@ func (r fakeTransferStateRepository) Create(ctx context.Context, state ports.Tra
 	return nil
 }
 
+// Get locks claimMu -- see ClaimOne's own doc comment below: every
+// fakeTransferStateRepository method shares one lock so a concurrent
+// ClaimOne write (step 03-02's own Earned Trust test) can never race a
+// concurrent Get/ClaimDue read on the same underlying map.
 func (r fakeTransferStateRepository) Get(ctx context.Context, transferID string) (ports.TransferState, bool, error) {
+	r.store.claimMu.Lock()
+	defer r.store.claimMu.Unlock()
 	state, ok := r.store.transferStates[transferID]
 	return state, ok, nil
 }
@@ -434,6 +475,8 @@ func (r fakeTransferStateRepository) Get(ctx context.Context, transferID string)
 // lookup (step 02-06) — mechanical parity with the real port addition, no
 // new assertion behavior of its own.
 func (r fakeTransferStateRepository) ByTenantAndIdempotencyKey(ctx context.Context, tenantID, idempotencyKey string) (ports.TransferState, bool, error) {
+	r.store.claimMu.Lock()
+	defer r.store.claimMu.Unlock()
 	for _, state := range r.store.transferStates {
 		if state.TenantID == tenantID && state.IdempotencyKey == idempotencyKey {
 			return state, true, nil
@@ -443,6 +486,8 @@ func (r fakeTransferStateRepository) ByTenantAndIdempotencyKey(ctx context.Conte
 }
 
 func (r fakeTransferStateRepository) UpdateStatus(ctx context.Context, transferID string, status string, reason string) error {
+	r.store.claimMu.Lock()
+	defer r.store.claimMu.Unlock()
 	state, ok := r.store.transferStates[transferID]
 	if !ok {
 		return fmt.Errorf("fakeTransferStateRepository: unknown transfer %q", transferID)
@@ -458,6 +503,8 @@ func (r fakeTransferStateRepository) UpdateStatus(ctx context.Context, transferI
 // port's identical addition, mechanical parity only, no new assertion
 // behavior.
 func (r fakeTransferStateRepository) AdvanceAfterLegOutcome(ctx context.Context, transferID string, status string, nextAttemptAt time.Time, reason string) error {
+	r.store.claimMu.Lock()
+	defer r.store.claimMu.Unlock()
 	state, ok := r.store.transferStates[transferID]
 	if !ok {
 		return fmt.Errorf("fakeTransferStateRepository: unknown transfer %q", transferID)
@@ -469,7 +516,31 @@ func (r fakeTransferStateRepository) AdvanceAfterLegOutcome(ctx context.Context,
 	return nil
 }
 
+// ClaimOne locks claimMu around its own read-check-write, exactly the
+// sequence a real SELECT ... FOR UPDATE serializes at the database (see
+// claimMu's own doc comment on fakeStore) -- without this lock, two real
+// goroutines racing this method could both observe the row as due before
+// either writes its lease extension, both winning, which is precisely the
+// double-processing bug ClaimOne exists to prevent.
 func (r fakeTransferStateRepository) ClaimOne(ctx context.Context, transferID string, leaseDuration time.Duration) (ports.TransferState, bool, error) {
+	r.store.claimMu.Lock()
+	barrier := r.store.claimBarrier
+	r.store.claimMu.Unlock()
+	if barrier != nil {
+		// Rendezvous every racing caller here, before any of them takes the
+		// lock below -- see claimBarrier's own doc comment on fakeStore.
+		// The barrier reference itself is read under claimMu (not the
+		// barrier's own internal state) so a caller resetting claimBarrier
+		// to nil once its own race assertions are done -- see the test's
+		// own cleanup -- never races this read.
+		barrier.Done()
+		barrier.Wait()
+	}
+
+	r.store.claimMu.Lock()
+	defer r.store.claimMu.Unlock()
+	r.store.claimAttempts++
+
 	state, ok := r.store.transferStates[transferID]
 	if !ok {
 		return ports.TransferState{}, false, nil
@@ -480,10 +551,13 @@ func (r fakeTransferStateRepository) ClaimOne(ctx context.Context, transferID st
 	}
 	state.NextAttemptAt = time.Now().UTC().Add(leaseDuration)
 	r.store.transferStates[transferID] = state
+	r.store.claimWins++
 	return state, true, nil
 }
 
 func (r fakeTransferStateRepository) ClaimDue(ctx context.Context, now time.Time, batchLimit int) ([]string, error) {
+	r.store.claimMu.Lock()
+	defer r.store.claimMu.Unlock()
 	ids := make([]string, 0, len(r.store.transferStates))
 	for id := range r.store.transferStates {
 		ids = append(ids, id)
