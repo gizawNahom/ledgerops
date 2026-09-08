@@ -820,6 +820,26 @@ func (w *World) seedSettlingTransferWithKey(ctx context.Context, from, to Tenant
 // attemptTimeout=10s in practice).
 const exhaustRetryPollTimeout = 25 * time.Second
 
+// exhaustReversalRetryPollTimeout bounds the two milestone-04 scenarios whose
+// own Given arms BOTH a forward-leg fault (to trigger reversal in the first
+// place) AND a reversal-leg fault on top of it (to make the reversal itself
+// exhaust its own retry budget) -- step 04-03 back-propagation, DISTILL
+// scope. Each of those two exhaustions is its own independent run through
+// the SAME backoffForAttempt schedule (1s/2s/4s/8s, ~18s jittered worst
+// case per exhaustRetryPollTimeout's own doc comment above), and the second
+// one (the reversal's own retry loop, attemptLeg1Reversal/
+// reverseLeg2ThenLeg1 in transfer_coordinator.go) never starts until the
+// first one has fully committed its compensating Post -- so the two windows
+// are strictly sequential, not overlapping, and the total wait this poll
+// must tolerate is bounded by roughly DOUBLE exhaustRetryPollTimeout's own
+// single-exhaustion worst case (~36s), not the same ~18s a one-exhaustion
+// scenario needs. 60s keeps exhaustRetryPollTimeout's own ~7s-per-exhaustion
+// margin for attempt/network overhead across BOTH sequential windows
+// (2*18s + 2*~7s == ~50s), rather than reusing exhaustRetryPollTimeout
+// itself and risking a flaky, margin-starved timeout on exactly the two
+// scenarios that need it most.
+const exhaustReversalRetryPollTimeout = 60 * time.Second
+
 // exhaustLeg2AndReverse arms leg 2 to fail its FULL retry budget (mirrors
 // gap 1's own InjectLegFaultCount(..., 2, 5) fix) then waits, in real time,
 // for the transfer to reach a terminal status. Updated 2026-09-08
@@ -943,6 +963,23 @@ func (w *World) InjectLegFault(ctx context.Context, transferID string, leg int) 
 // InjectLegFault's one-shot semantics could not express.
 func (w *World) InjectLegFaultCount(ctx context.Context, transferID string, leg, count int) error {
 	return w.callTestOnlyFaultSeam(ctx, "/testonly/faults/leg", map[string]any{
+		"transfer_id": transferID,
+		"leg":         leg,
+		"fail_count":  count,
+	})
+}
+
+// InjectReversalFaultCount is InjectLegFaultCount's own reversal-side mirror
+// (step 04-03 back-propagation, DISTILL scope per Amendment 3's own
+// DISTILL-facing consequence note): forces the named transfer's next `count`
+// consecutive compensating-reversal Post attempts for the named leg's own
+// reversal (leg 1 or leg 2 -- see postLeg1Reversal/postLeg2Reversal,
+// internal/app/transfer_coordinator.go) to each fail with a simulated
+// transient fault, over the same request shape InjectLegFaultCount already
+// uses (legFaultRequest, internal/adapters/http/testonly_faults.go), just
+// against the reversal endpoint instead of the forward-leg one.
+func (w *World) InjectReversalFaultCount(ctx context.Context, transferID string, leg, count int) error {
+	return w.callTestOnlyFaultSeam(ctx, "/testonly/faults/reversal", map[string]any{
 		"transfer_id": transferID,
 		"leg":         leg,
 		"fail_count":  count,

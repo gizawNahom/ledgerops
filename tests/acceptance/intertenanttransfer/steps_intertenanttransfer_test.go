@@ -413,18 +413,89 @@ func RegisterSteps(ctx *godog.ScenarioContext, w *World) {
 		return w.RunRetryTickerOnce(c, PlatformAdmin(), w.LastTransferAnswer().TransferID)
 	})
 
+	// Fix (2026-09-08, DELIVER 04-03 back-propagation, DISTILL scope per
+	// Amendment 3's own DISTILL-facing consequence note): was a plain,
+	// fault-free seedSettlingTransfer -- leg 2 settled on its first attempt
+	// instead of ever exhausting, so leg 1's reversal was never triggered at
+	// all (reverseLeg1 only runs once leg 2's OWN forward retry budget is
+	// exhausted -- handleLegFailure, transfer_coordinator.go), let alone its
+	// own reversal Post ever failing. Two fault-injection calls compose the
+	// full precondition this Given's own text names: (a)
+	// InjectLegFaultCount(..., 2, 5), the already-proven fix-5 mechanism one
+	// scenario file section above, arms leg 2 to exhaust its full forward
+	// retry budget -- the ONLY way reverseLeg1/attemptLeg1Reversal is ever
+	// reached at all; (b) InjectReversalFaultCount(..., 1, 5), the reversal-
+	// side mirror added for this fix, arms leg 1's OWN compensating reversal
+	// Post to then fail its own full retry budget once attemptLeg1Reversal
+	// starts retrying it. Both calls land well before either fault is ever
+	// consumed (postLeg1Reversal's own check does not run until leg 2's
+	// entire forward exhaustion sequence has first completed, ~15-18s of
+	// real time later), so neither call races anything the way the
+	// grace-window-sensitive forward-leg fault registrations elsewhere in
+	// this file do.
 	ctx.Given(`^tenant "([^"]*)" sent (\S+) to "([^"]*)" and the compensating reversal of leg 1 itself has failed on all 5 attempts of its own retry budget$`,
 		func(c context.Context, from, amount, to string) error {
-			return w.seedSettlingTransfer(c, TenantName(from), TenantName(to))
+			if err := w.seedSettlingTransfer(c, TenantName(from), TenantName(to)); err != nil {
+				return err
+			}
+			transferID := w.LastTransferAnswer().TransferID
+			if err := w.InjectLegFaultCount(c, transferID, 2, 5); err != nil {
+				return err
+			}
+			return w.InjectReversalFaultCount(c, transferID, 1, 5)
 		})
 
+	// Fix (2026-09-08, DELIVER 04-03 back-propagation, DISTILL scope):
+	// leg 2's own reversal (reverseLeg2ThenLeg1/postLeg2Reversal) is only ever
+	// reached once leg 3's OWN forward retry budget exhausts (leg 1 and leg 2
+	// must both have posted for real first -- attemptForwardLegsFrom's own
+	// sequencing never attempts leg 3 before leg 2 posts, and leg 3 is never
+	// even scheduled until leg 2 succeeds inline). Three fault-injection
+	// calls compose this Given's own precondition, in the order each is
+	// consumed: (a) seedSettlingTransfer alone, with NO fault armed on leg
+	// 2, lets leg 1 and leg 2 both post for real -- mirrors fix 6's own
+	// "leg 1 and leg 2 have posted" Given one scenario file section above;
+	// (b) InjectLegFaultCount(..., 3, 5), armed immediately after seeding
+	// (so it is in place well before leg 2's own inline success ever hands
+	// off to leg 3 -- attemptForwardLegsFrom continues to leg 3 the instant
+	// leg 2 posts, with no grace window of its own, so this call must not be
+	// deferred), exhausts leg 3's full forward retry budget and triggers
+	// reverseLeg2ThenLeg1; (c) InjectReversalFaultCount(..., 2, 5) arms leg
+	// 2's OWN compensating reversal Post to then fail its own full retry
+	// budget once reverseLeg2ThenLeg1 starts retrying it -- consumed only
+	// after leg 3's entire forward exhaustion sequence has first completed,
+	// so it races nothing landing here alongside (b).
 	ctx.Given(`^tenant "([^"]*)" sent (\S+) to "([^"]*)" and the compensating reversal of leg 2 itself has failed on all 5 attempts of its own retry budget$`,
 		func(c context.Context, from, amount, to string) error {
-			return w.seedSettlingTransfer(c, TenantName(from), TenantName(to))
+			if err := w.seedSettlingTransfer(c, TenantName(from), TenantName(to)); err != nil {
+				return err
+			}
+			transferID := w.LastTransferAnswer().TransferID
+			if err := w.InjectLegFaultCount(c, transferID, 3, 5); err != nil {
+				return err
+			}
+			return w.InjectReversalFaultCount(c, transferID, 2, 5)
 		})
 
+	// Fix (2026-09-08, DELIVER 04-03 back-propagation, DISTILL scope): was a
+	// single RunRetryTickerOnce call plus an immediate re-query -- both
+	// reversal-exhaustion Given steps above have a live, self-rescheduling
+	// goroutine already in flight the instant they return (handleLegFailure
+	// -> scheduleRetry, and its reversal-side mirror
+	// scheduleReversalRetry, transfer_coordinator.go), exactly like the
+	// existing "the retry budget is exhausted" When step one scenario file
+	// section above -- a bare tick is a near-total no-op here for the
+	// identical reason. Polls, in real time, for the transfer to reach a
+	// terminal status, bounded by exhaustReversalRetryPollTimeout
+	// (world.go) rather than exhaustRetryPollTimeout: these two scenarios
+	// each drive TWO full, sequential 5-attempt exhaustion windows (the
+	// triggering forward leg's own budget, then the reversal's own budget on
+	// top of it) before ever reaching a terminal state, roughly double the
+	// single-exhaustion worst case exhaustRetryPollTimeout was sized for --
+	// see exhaustReversalRetryPollTimeout's own doc comment for the
+	// derivation.
 	ctx.When(`^the reversal's own retry budget is exhausted$`, func(c context.Context) error {
-		return w.RunRetryTickerOnce(c, PlatformAdmin(), w.LastTransferAnswer().TransferID)
+		return w.PollTransferUntilTerminal(c, PlatformAdmin(), w.LastTransferAnswer().TransferID, exhaustReversalRetryPollTimeout)
 	})
 
 	// --- Given/When: trace and isolation (slice 05) --------------------------

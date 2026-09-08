@@ -889,6 +889,77 @@ above) and 5 milestone-05 tenant-link/counterparty authorization-boundary
 gaps (`unidentified_caller` vs expected `transfer_not_found`/
 `counterparty_not_found`).
 
+## 2026-09-08 — reversal-of-a-reversal Given steps wired (step 04-03 back-propagation)
+
+The 2 "reversal of a reversal" scenarios flagged unimplemented in the entry
+above (`milestone-04-reverse-after-retry-budget-exhausted.feature`:
+"A reversal that itself exhausts its own retry budget..." and "...of leg 2
+that itself exhausts its own retry budget...") are now wired. DELIVER step
+04-03 had already built and committed the production fault-injection seam
+this fix needed (`POST /testonly/faults/reversal`,
+`internal/adapters/http/testonly_faults.go`, backed by
+`TransferCoordinator.InjectReversalFaultCount`/`consumeInjectedReversalFault`,
+`internal/app/transfer_coordinator.go`, commit `cc5930d`) — the two `Given`
+steps themselves were left as plain `seedSettlingTransfer` calls, never
+arming it, which is DISTILL-owned test-infrastructure scope per Amendment 3's
+own DISTILL-facing consequence note.
+
+**World method added** (`tests/acceptance/intertenanttransfer/world.go`):
+`InjectReversalFaultCount(ctx, transferID, leg, count)` — `InjectLegFaultCount`'s
+own reversal-side mirror, POSTs the identical `legFaultRequest` JSON shape
+(`transfer_id`, `leg`, `fail_count`) to `/testonly/faults/reversal` instead of
+`/testonly/faults/leg`, confirmed against `injectReversalFaultHandler`'s own
+decode shape before writing (both handlers share the same request struct).
+
+**Given-step composition, scenario 1** ("leg 1's own reversal exhausts"):
+`seedSettlingTransfer` → `InjectLegFaultCount(transferID, 2, 5)` (leg 2's own
+forward exhaustion is the ONLY path into `reverseLeg1`/`attemptLeg1Reversal` —
+`handleLegFailure`'s `leg == 2` branch, `transfer_coordinator.go`) →
+`InjectReversalFaultCount(transferID, 1, 5)` (arms leg 1's own compensating
+Post to then exhaust its own retry budget). Both fault registrations land
+immediately after `seedSettlingTransfer` returns — neither races anything,
+since `postLeg1Reversal`'s own fault check is never reached until leg 2's
+entire ~15-18s forward-exhaustion sequence has first completed.
+
+**Given-step composition, scenario 2** ("leg 2's own reversal exhausts"):
+`seedSettlingTransfer` (leg 1 AND leg 2 post for real — no fault on leg 2)
+→ `InjectLegFaultCount(transferID, 3, 5)` (armed immediately: leg 3's first
+attempt follows leg 2's success with no grace window of its own,
+`attemptForwardLegsFrom`'s own inline continuation) → `InjectReversalFaultCount
+(transferID, 2, 5)` (arms leg 2's own compensating Post, consumed only after
+leg 3's own forward exhaustion completes — no race). Leg 3's exhaustion
+triggers `reverseLeg2ThenLeg1`, whose `postLeg2Reversal` failure path halts
+the sequence at `markReversalFailed(reasonLeg2ReversalRetryBudgetExhausted)`
+without ever attempting leg 1's reversal — matching the scenario's own Then.
+
+**Timeout**: the existing `exhaustRetryPollTimeout` (25s, sized for ONE
+5-attempt exhaustion window) is insufficient here — both scenarios drive TWO
+full, sequential exhaustion windows (the triggering forward leg's own budget,
+then the reversal's own budget on top of it, never overlapping since the
+reversal retry loop never starts until the triggering leg's exhaustion has
+fully committed). Added a dedicated `exhaustReversalRetryPollTimeout = 60s`
+constant (world.go) — ~2×18s jittered worst case plus proportional margin —
+rather than reusing `exhaustRetryPollTimeout` and risking a margin-starved
+flake on exactly these two scenarios. The `When` step ("the reversal's own
+retry budget is exhausted") was changed from a single `RunRetryTickerOnce`
+call (a near-total no-op against an in-flight self-rescheduling goroutine,
+per the existing "the retry budget is exhausted" step's own precedent one
+scenario section above) to `PollTransferUntilTerminal` bounded by the new
+constant.
+
+No production code touched — `internal/app/transfer_coordinator.go` and
+`internal/adapters/http/testonly_faults.go` were read-only references,
+already correct from step 04-03.
+
+**Verification**: `go build ./...` clean, `go vet
+./tests/acceptance/intertenanttransfer/...` clean. `LD_LIBRARY_PATH=/tmp go
+test ./tests/acceptance/intertenanttransfer/... -run TestMain -count=1`:
+**36/41 passing** (34 baseline + both target scenarios now green), zero
+regressions. The 5 remaining failures are the pre-existing, out-of-scope
+milestone-05 tenant-link/counterparty authorization-boundary gaps documented
+in the entry above (`unidentified_caller` vs expected
+`transfer_not_found`/`counterparty_not_found`) — unchanged by this fix.
+
 ## Outcomes register — not run
 
 `nwave-ai outcomes register` is confirmed broken in this install (missing
