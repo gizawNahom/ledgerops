@@ -451,6 +451,23 @@ func sendCrossTenantTransferHandler(coordinator *app.TransferCoordinator) http.H
 // itself produces for a nonexistent/forbidden transfer_id -- this handler's
 // own miss (e.g. a row deleted between the middleware's read and this one)
 // is not a distinguishable case, by construction.
+//
+// Step 05-02 re-verified this wiring end to end (no production change was
+// required): the operator-trace scenario passes today via
+// requireTransferParty's own isOperatorKey bypass (router.go), and this
+// handler's errors.Is(err, app.ErrTransferNotFound) check answers the
+// non-sealed transfer_not_found refusal exactly as designed -- a plain
+// errors.Is check, deliberately outside writeDomainError's exhaustive
+// domain.Violation switch, since Transfer is application-layer coordinator
+// state, not a domain aggregate (ADR-014), so no sealed ViolationKind exists
+// for it to violate. The two third-party-tenant scenarios in
+// milestone-05-trace-and-isolate-a-transfer.feature remain blocked purely by
+// a test-infra gap: the `Given tenant "X" has no link with "Y" or "Z"` step
+// (steps_intertenanttransfer_test.go) never provisions the named tenant, so
+// its credential never resolves and the request never reaches this
+// application-layer check at all (401 unidentified_caller at the auth layer,
+// not 404 transfer_not_found here) -- escalated to nw-acceptance-designer
+// rather than fixed in this handler.
 func getTransferHandler(coordinator *app.TransferCoordinator) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		transferID := chi.URLParam(r, "transfer_id")
