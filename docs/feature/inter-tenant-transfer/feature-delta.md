@@ -675,3 +675,87 @@ proposed (see § Locked decisions) — no longer an open condition.
 **Handoff To**: `nw-solution-architect` (DESIGN wave, full artifact set) + `nw-platform-architect` (DEVOPS wave, outcome-kpis sections only)
 **Deliverables**: this file (`feature-delta.md`) + `docs/feature/inter-tenant-transfer/slices/slice-01..05-*.md` + SSOT updates (`docs/product/jobs.yaml`, `docs/product/journeys/transfer-between-tenants.yaml`, persona files)
 **Peer review**: `nw-product-owner-reviewer` — **APPROVED**, verdict recorded 2026-09-07, with user confirmation of D1–D3 as the sole outstanding condition. That condition is now resolved: the user confirmed D1–D3 as proposed on 2026-09-07 (see § Locked decisions, DoD item 8, DoR Validation footer above). No open conditions remain; this feature-delta is ready for DESIGN handoff.
+
+---
+
+## Wave: DELIVER / [REF] Implementation Summary
+
+All 21 roadmap steps (`docs/feature/inter-tenant-transfer/deliver/roadmap.json`) committed via the 3-phase TDD canon (RED→GREEN→COMMIT, ADR-025). Five slices shipped: tenant-pair authorization (01), cross-tenant transfer via a 3-leg platform-hub model (02), retry-until-settled with real backoff and crash recovery (03), bounded compensating reversal including a `reversal_failed` terminal state (04), and dual-party trace/isolation (05). Functional-paradigm hexagonal DDD throughout — pure domain core (`internal/domain/tenant_link.go`, `counterparty_alias.go`), effect shell (`internal/app/transfer_coordinator.go`), Postgres adapters, HTTP driving adapter — per the project's own `adr-007-functional-domain-core.md`.
+
+## Wave: DELIVER / [REF] Files Modified
+
+Production: `internal/domain/tenant_link.go`, `internal/domain/counterparty_alias.go`, `internal/app/transfer_coordinator.go`, `internal/adapters/postgres/tenant_links.go`, `counterparty_aliases.go`, `transfer_state.go`, `internal/adapters/http/handlers.go`, `router.go`, `testonly_faults.go`, `metrics.go`, plus migrations `0004_tenant_links`, `0005_counterparty_aliases_and_transfer_state`, `0006_transfer_state_leg_details`.
+Tests: `tests/acceptance/intertenanttransfer/world.go`, `steps_intertenanttransfer_test.go` (extended substantially during back-propagation — see § Quality Gates below), plus unit/integration tests alongside each production file.
+
+## Wave: DELIVER / [REF] Scenarios Green Count
+
+**41 of 41** acceptance scenarios pass (`tests/acceptance/intertenanttransfer/*.feature`), confirmed 2026-09-09, `go test ./tests/acceptance/intertenanttransfer/... -run TestMain -count=1 -v`, real PostgreSQL 16 (Testcontainers), real HTTP. Full repo suite (`go test ./...`) green across every package.
+
+## Wave: DELIVER / [REF] DoD Check
+
+| DISCUSS DoD item | Status |
+|---|---|
+| 1. All UAT scenarios across US-1–US-5 pass (green) | ✅ 41/41 |
+| 2. All supporting tests pass (unit, integration, component) | ✅ `go test ./...` green |
+| 3. Code refactored, no obvious debt; reviewed and approved | Pending — Phase 3 (refactor) and Phase 4 (adversarial review) run next |
+| 4. Merged to main branch | ✅ all steps committed to `main` |
+| 5. Demoable: authorize, send, retry-recover, reverse-recover, trace — one sitting | ✅ see Demo Evidence below (US-3/US-4 explained rather than live-demoed — see that section) |
+| 6. `exhaustive` linter covers new `ViolationKind` members on both switch surfaces | Believed satisfied by construction (each new member wired alongside its existing sealed-taxonomy siblings); not independently re-verified by this gate — Phase 4 review should confirm |
+| 7. Existing `demo-*`/`chaos-*` Makefile targets pass unmodified | Not independently re-run by this gate (no `inter-tenant-transfer`-specific Makefile targets exist); `demo-01` was exercised implicitly via the same running stack used for this feature's own demo evidence below, with no observed interference |
+| 8. D1–D3 confirmed by the user, 2026-09-07 | ✅ (see § Locked decisions) |
+
+## Wave: DELIVER / [REF] Demo Evidence
+
+Every non-`@infrastructure` user story's own Elevator Pitch demo command was run live against the real `docker compose` stack (real Postgres 16, real HTTP — not the acceptance-test harness), 2026-09-09, by the DELIVER orchestrator directly.
+
+**Environment matrix**: no feature-specific `devops/environments.yaml` exists for `inter-tenant-transfer` (no DEVOPS wave artifact was produced for this feature). Per `ledger-core`'s own precedent (`docs/feature/ledger-core/devops/environments.yaml`'s own header: "ledger-core is a service, not an installer. The default nWave environments (with-pre-commit, with-stale-config) model install-time coexistence and do not apply"), the same reasoning applies here. The acceptance suite's own WS strategy C (real PostgreSQL 16 via Testcontainers, never faked) already exercises the "clean" environment; no other environment variant is meaningfully distinct for this feature's own scope. Treated as satisfied by the acceptance suite's own real-infrastructure runs.
+
+**US-1 (authorize a tenant pair)** — PASS, with one noted deviation from this file's own illustrative example:
+```
+$ curl -X POST http://localhost:8080/tenant-links -H 'Authorization: Bearer demo-operator-key' -d '{"tenant_a":"tnt_acme","tenant_b":"tnt_beacon"}'
+{"link_id":"lnk_txn_351312a0-8b28-4b05-b703-1457c2483c68","status":"active","tenant_a":"tnt_txn_13babf48-7f10-44ec-ab7e-00ae63cbad8d","tenant_b":"tnt_txn_4af61530-7b15-4a82-9922-08942a6d0cd2"}
+```
+Deviation: this file's own US-1 elevator pitch showed the response echoing the caller-supplied names (`"tenant_a":"tnt_acme"`); DESIGN's own settled contract (`design/wave-decisions.md`) returns the real, server-generated `tenant_id` values instead — DISCUSS itself flagged this exact port as "illustrative — DESIGN settles the exact port," and DESIGN settled a different, real shape. The story's own illustrative example being superseded by a later, correctly-authorized decision is not a production defect. `status: "active"` and `link_id` are both present and correct.
+
+**US-2 (send a transfer to a named counterparty)** — PASS, core mechanic matches exactly:
+```
+$ curl -X POST http://localhost:8080/counterparties -H 'Authorization: Bearer <tnt_acme key>' -d '{"alias":"beacon-payout","target_tenant_id":"<tnt_beacon real id>","target_account_id":"wallet-ops"}'
+{"alias":"beacon-payout","target_account_id":"wallet-ops","target_tenant_id":"tnt_txn_4af61530-7b15-4a82-9922-08942a6d0cd2"}
+
+$ curl -X POST http://localhost:8080/transfers -H 'Authorization: Bearer <tnt_acme key>' -H 'Idempotency-Key: demo-cross-1' -d '{"counterparty_alias":"beacon-payout","amount":"50.00"}'
+{"leg1":{"status":"posted"},"status":"pending","transfer_id":"xfr_txn_68e3e438-5a09-4f10-a326-ca72d6151110"}
+HTTP 202
+
+$ curl http://localhost:8080/transfers/xfr_txn_68e3e438-5a09-4f10-a326-ca72d6151110 -H 'Authorization: Bearer <tnt_acme key>'
+(after a 2s poll)
+{"leg1":{"status":"posted"},"leg2":{"status":"posted"},"leg3":{"status":"posted"},"status":"settled","transfer_id":"xfr_txn_68e3e438-5a09-4f10-a326-ca72d6151110"}
+```
+Matches the story's own pitch exactly: `POST /transfers` responds `pending` with only `leg1` reported; the subsequent `GET` observes `settled` with all three legs. Sync/async contract holds live, not just in the test harness. One caller-facing detail confirmed: `target_tenant_id` must be the counterparty's real server-generated `tenant_id`, not its provisioning name (`/counterparties` does not resolve names the way `/tenant-links` does).
+
+**US-3 (watch a stalled leg retry automatically) and US-4 (see a transfer reverse after retry budget exhausted)** — NOT independently demoed live; explained rather than faked. Both stories' own "After" scenarios depend on a leg genuinely failing with a transient fault. Production has no real, externally-triggerable mechanism to force this by design — the fault-injection seam (`internal/adapters/http/testonly_faults.go`, step 03-01) is gated behind `EnableTestOnlyFaultSeam`, a flag `cmd/api/main.go` never sets, since it must never be reachable in a real deployment. There is no live curl sequence that can reproduce "leg 2 fails with a simulated transient fault" against the real production binary. Both stories' claimed behavior is instead proven by the acceptance suite's own real-Postgres, real-HTTP runs using that same test-only seam — `milestone-03-retry-a-stalled-leg.feature`'s 8/8 passing scenarios and `milestone-04-reverse-after-retry-budget-exhausted.feature`'s 9/9 passing scenarios (both already counted in the 41/41 total above).
+
+**US-5 (trace a transfer, and prove a third tenant cannot forge into it)** — PASS, including the security-critical isolation proof, live:
+```
+$ curl http://localhost:8080/transfers/xfr_txn_68e3e438-... -H 'Authorization: Bearer <tnt_acme key>'    → HTTP 200 (sender)
+$ curl http://localhost:8080/transfers/xfr_txn_68e3e438-... -H 'Authorization: Bearer <tnt_beacon key>'  → HTTP 200 (receiver)
+$ curl http://localhost:8080/transfers/xfr_txn_68e3e438-... -H 'Authorization: Bearer demo-operator-key' → HTTP 200 (operator)
+
+$ curl http://localhost:8080/transfers/xfr_txn_68e3e438-... -H 'Authorization: Bearer <tnt_carter key>'  (unrelated third tenant, no link to either party)
+{"error":"transfer_not_found"}
+HTTP 404
+
+$ curl http://localhost:8080/transfers/xfr_never_issued -H 'Authorization: Bearer <tnt_carter key>'      (genuinely nonexistent id)
+{"error":"transfer_not_found"}
+HTTP 404
+```
+Byte-identical refusal body and status code between "exists but forbidden" and "genuinely nonexistent" — proven live against the real running server, matching the story's own "no distinguishable signal" mandate exactly.
+
+**Overall gate verdict**: PASS, with two disclosed exceptions (US-1's superseded illustrative response shape; US-3/US-4's live-demo inapplicability by design) — neither is a defect, both are explained above rather than hidden. All 5 stories' underlying claims are proven true, either live (US-1, US-2, US-5) or via the acceptance suite's own equivalent real-infrastructure runs (US-3, US-4).
+
+## Wave: DELIVER / [REF] Quality Gates
+
+Extensive back-propagation to DISTILL-owned test infrastructure was required during this feature's own delivery — significantly more than typical, worth recording honestly here rather than only in commit messages. Recurring pattern: several pre-authored `Given` step definitions claimed to set up a specific failure/terminal state (e.g. "leg 2 has failed on all 5 attempts") but were vacuous no-ops or never actually drove the transfer to that state, masking whether production code was correct until each was found and wired to real fault-injection/polling. This pattern recurred across steps 03-02 through 05-03 and was fixed each time it was found, culminating in all 41 scenarios genuinely (not vacuously) passing.
+
+One genuine production defect was found and fixed via this same process (step 04-04): `TransferCoordinator.SendTransfer` spawned its forward-leg attempt goroutine before the HTTP handler wrote its response, undermining a timing assumption the test-only fault-injection seam depended on — under load, a leg could occasionally complete for real after a transfer had already been reversed. Fixed by moving the trigger to fire only after the response is written, verified stable across 9+ consecutive full-suite runs before being trusted.
+
+Refactor (Phase 3) and adversarial review (Phase 4) have not yet run as of this section's own writing — see roadmap/execution-log for their own eventual outcomes.
