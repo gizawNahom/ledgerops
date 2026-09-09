@@ -193,19 +193,16 @@ func NewRouter(deps Deps) http.Handler {
 		tenantScoped.Post("/counterparties", registerCounterpartyAliasHandler(ledger))
 	})
 
-	// GET /transfers/{transfer_id} (slice 02 functional, slice 05 hardened).
-	// RED scaffold. Temporarily mounted behind the existing
-	// requireTenantKeyOrOperatorKey middleware as a placeholder gate — this
-	// is NOT the final authorization boundary: ADR-016 calls for a new,
-	// per-resource requireTransferParty middleware (grants exactly the two
-	// tenants named by the transfer_id being read, plus the operator), which
+	// GET /transfers/{transfer_id} (slice 02 functional, slice 05 hardened,
+	// step 05-01). requireTransferParty (below) replaces the earlier
+	// requireTenantKeyOrOperatorKey placeholder: ADR-016 requires a
+	// per-resource gate (grants exactly the two tenants named by the
+	// transfer_id being read, plus the operator), which
 	// requireTenantKeyOrOperatorKey structurally cannot express (it grants
 	// "any authenticated tenant", not "this transfer's two tenants" — see
-	// brief.md § Inter-tenant transfer, "Dual-party authorization"). DELIVER
-	// must replace this middleware, not just the handler body, before slice
-	// 05's isolation scenarios can go GREEN.
+	// brief.md § Inter-tenant transfer, "Dual-party authorization").
 	router.Group(func(transfers chi.Router) {
-		transfers.Use(requireTenantKeyOrOperatorKey(deps.OperatorKey, resolveTenantKey))
+		transfers.Use(requireTransferParty(deps.OperatorKey, resolveTenantKey, deps.Store))
 		transfers.Get("/transfers/{transfer_id}", getTransferHandler(transferCoordinator))
 	})
 
@@ -410,6 +407,93 @@ func requireTenantKeyOrOperatorKey(operatorKey string, resolve ports.TenantKeyRe
 			next.ServeHTTP(w, r.WithContext(withTenantScope(r.Context(), ports.ScopedToTenant(tenantID))))
 		})
 	}
+}
+
+// requireTransferParty admits a caller to GET /transfers/{transfer_id} only
+// when the caller is the platform operator, or a tenant who is one of the
+// transfer's own two parties (ADR-016). requireTenantKeyOrOperatorKey is
+// structurally wrong here: it grants "any authenticated tenant", but a
+// transfer names two SPECIFIC tenants -- an unrelated third tenant's own
+// valid tenant_key must be refused even though it resolves successfully,
+// which requireTenantKeyOrOperatorKey has no way to express (it has no
+// notion of "this transfer's two tenants").
+//
+// Identifies the caller via the identical two-step check
+// requireTenantKeyOrOperatorKey already performs -- isOperatorKey first,
+// TenantKeyResolver fallback -- reusing bearerToken/isOperatorKey/
+// hashBearerToken directly rather than reinventing token parsing (brief.md §
+// Dual-party authorization).
+//
+// Reads the transfer row exactly ONCE (transferStateByID), regardless of
+// what the identity check resolved, and funnels BOTH refusal reasons --
+// transfer_id names no row at all, or transfer_id names a row neither party
+// of which is the caller -- through the SAME refusal call
+// (refuseTransferNotFound). There is no second, distinguishable "exists but
+// forbidden" branch: no code path where a forbidden read costs an extra
+// query, an extra branch, or a different log line a timing/behavioral
+// side-channel could exploit.
+func requireTransferParty(operatorKey string, resolve ports.TenantKeyResolver, store ports.Store) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			token, ok := bearerToken(r)
+			if !ok {
+				refuseUnidentifiedCaller(w, r)
+				return
+			}
+
+			isOperator := isOperatorKey(token, operatorKey)
+			var callerTenantID string
+			if !isOperator {
+				tenantID, found, err := resolve(r.Context(), hashBearerToken(token))
+				if err != nil || !found {
+					refuseUnidentifiedCaller(w, r)
+					return
+				}
+				callerTenantID = tenantID
+			}
+
+			transferID := chi.URLParam(r, "transfer_id")
+			state, found, err := transferStateByID(r.Context(), store, transferID)
+			if err != nil {
+				writeDomainError(w, r, err)
+				return
+			}
+			if !found {
+				refuseTransferNotFound(w, r)
+				return
+			}
+			if !isOperator && callerTenantID != state.TenantID && callerTenantID != state.CounterpartyTenantID {
+				refuseTransferNotFound(w, r)
+				return
+			}
+
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// transferStateByID performs the one database read requireTransferParty ever
+// issues per request -- a dedicated, read-only unit of work rolled back
+// unconditionally since it never writes, mirroring
+// resolveProvisionedTenantID's own shape (handlers.go). An absent
+// transfer_id answers (zero value, false, nil), the same "no" shape
+// TransferStateRepository.Get already returns -- not an error.
+func transferStateByID(ctx context.Context, store ports.Store, transferID string) (ports.TransferState, bool, error) {
+	uow, err := store.Begin(ctx)
+	if err != nil {
+		return ports.TransferState{}, false, err
+	}
+	defer uow.Rollback(ctx)
+
+	return uow.TransferStates().Get(ctx, transferID)
+}
+
+// refuseTransferNotFound answers the one refusal shape requireTransferParty
+// ever produces -- both the "no such transfer_id" and the "exists, but
+// caller is neither party" cases funnel here (§ requireTransferParty's own
+// doc comment).
+func refuseTransferNotFound(w http.ResponseWriter, r *http.Request) {
+	writeRefusal(w, r, http.StatusNotFound, "transfer_not_found", nil)
 }
 
 func scaffold(operation string) http.HandlerFunc {

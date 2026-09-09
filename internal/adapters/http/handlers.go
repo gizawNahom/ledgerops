@@ -443,9 +443,14 @@ func sendCrossTenantTransferHandler(coordinator *app.TransferCoordinator) http.H
 }
 
 // getTransferHandler reads the coordinator's own progress row through
-// TransferCoordinator.GetTransfer -- functional today (slice 02), the
-// dual-party authorization hardening (US-5, requireTransferParty) is a
-// later step's job (§ router.go's own comment on this route group).
+// TransferCoordinator.GetTransfer -- functional since slice 02, and gated by
+// requireTransferParty (router.go, step 05-01) since slice 05: only a caller
+// who is one of the transfer's own two parties, or the platform operator,
+// ever reaches this handler body. app.ErrTransferNotFound below still
+// answers the identical transfer_not_found refusal requireTransferParty
+// itself produces for a nonexistent/forbidden transfer_id -- this handler's
+// own miss (e.g. a row deleted between the middleware's read and this one)
+// is not a distinguishable case, by construction.
 func getTransferHandler(coordinator *app.TransferCoordinator) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		transferID := chi.URLParam(r, "transfer_id")
