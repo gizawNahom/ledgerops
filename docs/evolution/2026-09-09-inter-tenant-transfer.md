@@ -195,6 +195,67 @@ bounded polls wherever the scenario wasn't actually simulating a crash.
 
 ---
 
+## Retrospective — 5 Whys on the race condition (Phase 8)
+
+A dedicated root-cause pass (`nw-troubleshooter`) went deeper than the
+lessons above. Two independent root causes compounded rather than either
+alone explaining the full picture:
+
+**Root cause A (why the defect was possible)**: a cross-layer temporal
+invariant ("the goroutine starts only after the HTTP response is written")
+was encoded as an unverified assertion inside a tunable constant's own doc
+comment (`inlineAttemptGraceWindow`), rather than as a structural code
+dependency — so it could be silently false from the moment it was
+introduced (step 03-01), with nothing making that falseness observable.
+By contrast, this same file's *other two* detached goroutines
+(`scheduleRetry`, `scheduleReversalRetry`) are safe by construction — they
+re-enter through `ClaimOne`'s database-enforced atomic claim, not a timing
+assumption. `TriggerForwardLegs` was the one goroutine whose safety
+depended on a bare wall-clock sleep standing in for "another process's
+request has landed."
+
+**Root cause B (why it went undetected for an entire slice)**: the race
+was actually observed once, at step 03-03, as flakiness — and fixed
+*quantitatively* (widen the window 20ms→50ms) rather than by asking why an
+ordering race existed at all. That made the failure rarer, not impossible.
+Meanwhile the assertions positioned to observe exactly this failure mode
+were vacuous `return nil` placeholders that could not distinguish "leg 2
+correctly never posted" from "leg 2 posted for real and nothing checked."
+Detection required both the rare race to fire *and* a real assertion
+watching for it — from 03-01 through 04-03, the second condition was never
+true.
+
+**Process recommendations** (for future features in this codebase, not
+generic advice):
+1. Any goroutine whose correctness depends on "some other call already
+   happened" must be gated by a claim/lock/idempotency check, never by a
+   wall-clock sleep alone — a wall-clock window may only reduce
+   contention/latency, never serve as the sole correctness mechanism. Worth
+   codifying as an explicit rule in `adr-015` or a successor ADR.
+2. A production constant widened purely to reduce an observed flake rate
+   (as `inlineAttemptGraceWindow` was, once) should be treated as an
+   incomplete investigation by definition — "flakiness went away when I
+   added margin" should never be the terminal explanation on its own.
+3. Any `Then`/`When` step encoding a *negative or preservation* assertion
+   ("X never happens," "Y remains unchanged") deserves a mandatory
+   spot-check at slice close, not just an end-of-feature audit — this is
+   the assertion class that stayed silently vacuous longest in this
+   feature's own delivery, because a placeholder here produces a false
+   negative rather than an obviously-wrong false positive.
+
+**Open follow-up item, not yet actioned**: `TriggerForwardLegs`
+(`internal/app/transfer_coordinator.go`) remains the one goroutine in this
+codebase whose safety still depends on a bounded wall-clock window (now
+750ms, comfortable margin over a 113ms worst-observed round trip) rather
+than a database-enforced claim — disclosed in its own code comment as an
+accepted residual risk, but not documented anywhere at the architecture
+level. Recommend either (a) capturing it as an explicit residual-risk line
+in `adr-015`, or (b) implementing the disclosed alternative (an
+acknowledgment channel the test-only fault-injection call signals,
+replacing the timer entirely) as a follow-up hardening item.
+
+---
+
 ## Issues encountered (beyond the two above)
 
 - Session rate-limit interruptions occurred mid-step three times (steps
