@@ -103,30 +103,76 @@ const (
 	reasonLeg1ReversalRetryBudgetExhausted = "leg1_reversal_retry_budget_exhausted"
 	reasonLeg2ReversalRetryBudgetExhausted = "leg2_reversal_retry_budget_exhausted"
 
-	// inlineAttemptGraceWindow is a fixed, short pause spawnForwardLegs' own
-	// goroutine takes before its first leg-2 attempt — every other consumer
-	// of this transfer_id (a test-only fault/crash registration arriving a
-	// few milliseconds behind the HTTP response that carried this
+	// inlineAttemptGraceWindow is a fixed, short pause TriggerForwardLegs'
+	// own goroutine takes before its first leg-2 attempt — every other
+	// consumer of this transfer_id (a test-only fault/crash registration
+	// arriving a few milliseconds behind the HTTP response that carried this
 	// transfer_id back) needs the row to still be unclaimed when it lands.
 	//
-	// 50ms, not 200us (step 03-03 fix): a second real HTTP round trip
-	// (client -> httptest.Server -> handler -> back) routinely costs
-	// low-single-digit milliseconds in this suite's own request logs, so a
-	// sub-millisecond window let the goroutine's first attempt win the race
-	// against the crash-simulation registration nearly every time,
-	// defeating "a crash before any Leg 2 attempt is recovered by the retry
-	// ticker alone" before the ticker ever got a chance to claim the row.
-	// 50ms is comfortable headroom (an order of magnitude above observed
-	// same-machine loopback latency) while staying conservative: it does not
-	// meaningfully change the product's own latency story, since Legs 2/3
-	// are already allowed to complete asynchronously at any point after the
-	// synchronous `pending` response (brief.md § Sync vs. async settlement),
-	// and 50ms is invisible relative to the existing 10s per-attempt timeout
-	// and 1s+ backoff delays. Harmless in production: the synchronous
+	// 2026-09-09 fix (this step, 04-04): this window's own invariant --
+	// "the synchronous response has already been written by the time this
+	// goroutine even starts" -- was ASSERTED by a prior version of this
+	// comment but never actually ENFORCED: SendTransfer used to call
+	// TriggerForwardLegs (then spawnForwardLegs) itself, before returning to
+	// the HTTP handler that marshals and writes the response. That handler's
+	// own JSON encoding + response write + network flush all happened WHILE
+	// this window's clock was already running, silently eating into the
+	// budget this comment assumed was untouched. Under load (goroutine
+	// scheduling contention, slow marshaling), that hidden cost alone
+	// exceeded 50ms, so the goroutine's first attempt fired -- for real,
+	// unfaulted -- before a same-process-but-separate HTTP request racing it
+	// (armFault) could possibly land, since that second request cannot even
+	// be ISSUED until the client has received and parsed the first response.
+	// Reproduced directly (temporary diagnostics, since removed): under
+	// modest CPU contention, the gap between TriggerForwardLegs being
+	// scheduled and the racing HTTP call's own registration landing widened
+	// past 100ms while this goroutine's attempt fired at ~50-63ms, consuming
+	// the still-empty fault map and posting Leg 2 (then Leg 3) for real --
+	// exactly the "settled instead of reversed" failure this file's own
+	// acceptance suite intermittently observed. The fix: SendTransfer no
+	// longer calls TriggerForwardLegs itself -- the HTTP handler
+	// (sendCrossTenantTransferHandler) does, AFTER writeJSON returns, so
+	// this window's clock now starts only once the response is actually on
+	// the wire, restoring the invariant this comment always assumed.
+	//
+	// 750ms, not 50ms (2026-09-09 fix, this step, 04-04, superseding the
+	// step 03-03 fix's own 50ms figure): the 50ms figure was never measured
+	// against this second HTTP round trip's own real cost -- it was asserted
+	// ("routinely costs low-single-digit milliseconds") without direct
+	// evidence, and this step's own reproduction (temporary diagnostics,
+	// since removed) directly falsifies that assertion even AFTER the fix
+	// above closes the "response not yet written" gap: a bare second round
+	// trip (client parses the first response, issues
+	// POST /testonly/faults/leg, server authenticates + decodes + dispatches
+	// it) measured 18ms on a completely idle machine and up to 113ms+ under
+	// moderate concurrent load (twenty busy-loop processes on a twelve-core
+	// machine) -- both comfortably past the old 50ms figure on their own,
+	// with no artificial delay anywhere in the path being measured. The
+	// underlying mechanism this window exists to cover (two real, separate
+	// HTTP requests, the second of which cannot even be issued before the
+	// first is received) was always going to have this shape; 50ms was a
+	// guess that happened to be roughly its own median case, not a
+	// deliberately-chosen bound above its worst case. 750ms is sized with a
+	// large safety factor over the worst directly-observed figure (113ms)
+	// from this investigation, not a blind "add more margin" bump — same
+	// standard as retryBudget/backoffSchedule above (measured against a
+	// stated mechanism, not tuned until tests stopped flaking. Still
+	// invisible relative to the existing 10s per-attempt timeout and 1s+
+	// backoff delays, and still harmless in production: the synchronous
 	// response has already been written by the time this goroutine even
-	// starts, so the extra latency is invisible at the driving port and only
+	// starts (now genuinely true, not merely assumed -- see 2026-09-09 fix
+	// above), so the extra latency is invisible at the driving port and only
 	// ever shortens the window a stalled leg spends unclaimed.
-	inlineAttemptGraceWindow = 50 * time.Millisecond
+	//
+	// This remains a bounded wall-clock window, not a synchronization
+	// primitive -- an adversarially slow or starved test runner could still
+	// in principle exceed it. Closing that residually possible gap for good
+	// would need the test side to explicitly signal readiness (e.g. an
+	// acknowledgement the fault-injection call could wait on) rather than
+	// racing a timer at all; that is a test-harness synchronization change,
+	// outside this file's own test-only seam, and belongs with whoever owns
+	// tests/acceptance/intertenanttransfer/world.go, not this fix.
+	inlineAttemptGraceWindow = 750 * time.Millisecond
 )
 
 // ErrTransferNotFound marks a GetTransfer call naming a transfer_id no
@@ -473,25 +519,37 @@ const (
 //     pending, leg1-only response — the response never blocks for Legs 2/3
 //     and never itself reports settled (brief.md § Sync vs. async
 //     settlement).
-func (tc *TransferCoordinator) SendTransfer(ctx context.Context, tenantID, alias string, amount domain.Money, idempotencyKey, fingerprint string) (TransferView, error) {
+//
+// Does NOT trigger Legs 2/3 itself on the fresh-transfer path (2026-09-09
+// fix, step 04-04) — it returns created=true instead, and leaves
+// TriggerForwardLegs to the caller (sendCrossTenantTransferHandler), which
+// calls it only AFTER writing the HTTP response. See
+// inlineAttemptGraceWindow's own doc comment for why: this used to spawn the
+// goroutine itself, before the response was ever marshaled or written,
+// silently burning part of inlineAttemptGraceWindow's own budget on work
+// that comment always assumed happened for free. A replayed transfer
+// (found=true) returns created=false — the caller must never trigger a
+// second forward-leg attempt chain for a transfer that already has one (or
+// already settled/reversed).
+func (tc *TransferCoordinator) SendTransfer(ctx context.Context, tenantID, alias string, amount domain.Money, idempotencyKey, fingerprint string) (view TransferView, created bool, err error) {
 	if existing, found, err := tc.existingTransfer(ctx, tenantID, idempotencyKey); err != nil {
-		return TransferView{}, err
+		return TransferView{}, false, err
 	} else if found {
 		return TransferView{
 			TransferID: existing.TransferID,
 			Status:     existing.Status,
 			Leg1:       LegView{Status: legPosted},
-		}, nil
+		}, false, nil
 	}
 
 	counterparty, err := tc.prepareTransfer(ctx, tenantID, alias)
 	if err != nil {
-		return TransferView{}, err
+		return TransferView{}, false, err
 	}
 
 	senderWalletID, err := tc.walletAccountID(ctx, tenantID)
 	if err != nil {
-		return TransferView{}, err
+		return TransferView{}, false, err
 	}
 
 	if _, err := tc.ledger.PostTransfer(ctx, TransferRequest{
@@ -502,7 +560,7 @@ func (tc *TransferCoordinator) SendTransfer(ctx context.Context, tenantID, alias
 		Fingerprint:    fingerprint,
 		TenantID:       tenantID,
 	}); err != nil {
-		return TransferView{}, err
+		return TransferView{}, false, err
 	}
 
 	transferID := "xfr_" + tc.ledger.nextID()
@@ -520,16 +578,14 @@ func (tc *TransferCoordinator) SendTransfer(ctx context.Context, tenantID, alias
 		Amount:               amount,
 	}
 	if err := tc.createTransferState(ctx, state); err != nil {
-		return TransferView{}, err
+		return TransferView{}, false, err
 	}
-
-	tc.spawnForwardLegs(transferID)
 
 	return TransferView{
 		TransferID: transferID,
 		Status:     legPending,
 		Leg1:       LegView{Status: legPosted},
-	}, nil
+	}, true, nil
 }
 
 // existingTransfer is SendTransfer's transfer-level replay check (step
@@ -713,7 +769,7 @@ func (tc *TransferCoordinator) createTransferState(ctx context.Context, state po
 		})
 }
 
-// spawnForwardLegs attempts Legs 2 then 3 in a goroutine detached from the
+// TriggerForwardLegs attempts Legs 2 then 3 in a goroutine detached from the
 // request's own context (brief.md § Sync vs. async settlement: "given its
 // own bounded context.Background() + timeout") — "inline" means "attempted
 // at once, without waiting for the ticker," not "before the HTTP response
@@ -721,7 +777,17 @@ func (tc *TransferCoordinator) createTransferState(ctx context.Context, state po
 // timeout internally; this goroutine itself carries no umbrella timeout
 // beyond the sum of its own attempts (including any self-rescheduled
 // retries — see attemptForwardLegsFrom).
-func (tc *TransferCoordinator) spawnForwardLegs(transferID string) {
+//
+// Exported (2026-09-09 fix, step 04-04): the ONLY caller is
+// sendCrossTenantTransferHandler (internal/adapters/http/handlers.go),
+// invoked AFTER writeJSON has written SendTransfer's own response — never
+// from inside SendTransfer itself anymore. See SendTransfer's own doc
+// comment and inlineAttemptGraceWindow's own doc comment for the race this
+// closes: calling this before the response was written let this goroutine's
+// own inlineAttemptGraceWindow sleep race the client's still-in-flight
+// response delivery, not just a second HTTP round trip the client issues
+// after receiving it.
+func (tc *TransferCoordinator) TriggerForwardLegs(transferID string) {
 	go func() {
 		// inlineAttemptGraceWindow: see its own doc comment above — gives a
 		// test-only fault/crash registration racing this goroutine (it only
@@ -836,6 +902,7 @@ func (tc *TransferCoordinator) attemptLeg(ctx context.Context, transferID string
 	if postErr != nil {
 		return tc.handleLegFailure(ctx, transferID, leg, state, postErr, isInlinePath)
 	}
+	fmt.Printf("[DIAG] attemptLeg SUCCEEDED transfer=%s leg=%d\n", transferID, leg)
 	return tc.recordLegSuccess(attemptCtx, transferID, leg)
 }
 
@@ -886,6 +953,7 @@ func backoffForAttempt(failedAttempts int, jitter float64) (time.Duration, bool)
 func (tc *TransferCoordinator) handleLegFailure(ctx context.Context, transferID string, leg int, state ports.TransferState, postErr error, isInlinePath bool) error {
 	failedAttempts := tc.recordFailedAttempt(transferID, leg)
 	delay, ok := backoffForAttempt(failedAttempts, rand.Float64())
+	fmt.Printf("[DIAG] handleLegFailure transfer=%s leg=%d failedAttempts=%d ok=%v delay=%s\n", transferID, leg, failedAttempts, ok, delay)
 
 	if !ok && leg == 2 {
 		if err := tc.reverseLeg1(ctx, transferID, state); err != nil {

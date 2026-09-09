@@ -118,8 +118,37 @@ type World struct {
 	inspectedBalance Money
 	inspectedEntries []entryWireView
 
+	// lastTransferIdempotencyKey remembers the idempotency key
+	// SendCrossTenantTransfer's most recent real call used -- the milestone-04
+	// back-propagation fix (2026-09-08, gap 2) needs the ORIGINAL key back to
+	// prove that reusing it (rather than a fresh one) never spawns a new
+	// transfer to the same counterparty.
+	lastTransferIdempotencyKey IdempotencyKey
+
+	// touchedAccountIDs/preReversalTouchedEntries/postReversalTouchedEntries
+	// back the milestone-04 gap-1/gap-3 fixes (2026-09-08): driveTransferToReversed
+	// records which real accounts leg 1's own reversal touches (see
+	// reverseLeg1Movement, internal/app/transfer_coordinator.go) and snapshots
+	// their entry logs both immediately BEFORE the reversal (a real HTTP call,
+	// not a Given-side assertion, Mandate 2) and immediately after it lands --
+	// the "stable reversed" baseline gap 3's own no-new-attempt check diffs
+	// against. Scenario 1's own explicit "the entry log ... is inspected" When
+	// step (InspectTouchedAccountEntries) makes ITS OWN fresh real call and
+	// overwrites postReversalTouchedEntries, per Mandate 8.
+	touchedAccountIDs          []touchedAccount
+	preReversalTouchedEntries  map[string][]entryWireView
+	postReversalTouchedEntries map[string][]entryWireView
+
 	lastRefusal RefusalKind
 	lastStatus  int
+}
+
+// touchedAccount names one real account (scoped by the tenant whose
+// credentials read it) that a transfer's leg(s) posted to or reversed --
+// see captureTouchedAccountsForReversal.
+type touchedAccount struct {
+	tenant  TenantName
+	account AccountName
 }
 
 func NewWorld() *World {
@@ -534,6 +563,7 @@ func (w *World) SendCrossTenantTransfer(ctx context.Context, as TenantName, amou
 		return err
 	}
 	w.priorTransferID = w.lastTransferAnswer.TransferID
+	w.lastTransferIdempotencyKey = key
 	body := map[string]any{
 		"counterparty_alias": string(alias),
 		"amount":             amount.String(),
@@ -870,7 +900,7 @@ func (w *World) driveTransferToReversed(ctx context.Context, from, to TenantName
 	if err := w.seedSettlingTransfer(ctx, from, to); err != nil {
 		return err
 	}
-	return w.exhaustLeg2AndReverse(ctx)
+	return w.exhaustLeg2AndReverseTracked(ctx, from)
 }
 
 // driveTransferToReversedWithKey is driveTransferToReversed's own keyed
@@ -880,7 +910,212 @@ func (w *World) driveTransferToReversedWithKey(ctx context.Context, from, to Ten
 	if err := w.seedSettlingTransferWithKey(ctx, from, to, key); err != nil {
 		return err
 	}
-	return w.exhaustLeg2AndReverse(ctx)
+	return w.exhaustLeg2AndReverseTracked(ctx, from)
+}
+
+// exhaustLeg2AndReverseTracked wraps exhaustLeg2AndReverse with the
+// milestone-04 gap-1/gap-3 fix's own entry-log tracking (2026-09-08): a real
+// GET .../entries snapshot of the accounts leg 1's reversal touches, taken
+// immediately BEFORE the reversal fires and again immediately after it
+// lands. Both scenarios that need genuine post-reversal proof --
+// "Reversal never edits or deletes an existing entry" (gap 1) and "A resend
+// of the same idempotency key after reversal ... no new attempt is made on
+// any leg" (gap 3) -- build on a transfer driven to reversed exclusively
+// through driveTransferToReversed/driveTransferToReversedWithKey, so tracking
+// here (rather than duplicating it in every Given) keeps one seam for both.
+func (w *World) exhaustLeg2AndReverseTracked(ctx context.Context, from TenantName) error {
+	w.captureTouchedAccountsForReversal(from)
+	before, err := w.inspectTouchedAccounts(ctx)
+	if err != nil {
+		return err
+	}
+	w.preReversalTouchedEntries = before
+
+	if err := w.exhaustLeg2AndReverse(ctx); err != nil {
+		return err
+	}
+
+	after, err := w.inspectTouchedAccounts(ctx)
+	if err != nil {
+		return err
+	}
+	w.postReversalTouchedEntries = after
+	return nil
+}
+
+// captureTouchedAccountsForReversal records the real accounts leg 1's own
+// reversal touches: the sender's wallet (reverseLeg1Movement's `to`) and the
+// sender's own settlement account (reverseLeg1Movement's `from`) --
+// internal/app/transfer_coordinator.go. Every milestone-04 reversal scenario
+// in this suite arms leg 2 to fail its FULL forward retry budget before it
+// ever posts (InjectLegFaultCount(..., 2, 5), exhaustLeg2AndReverse's own
+// doc), so leg 1 is the only leg that ever posts and is ever reversed --
+// leg 2's own two accounts (the platform mirrors) are never touched by these
+// scenarios and are deliberately excluded here.
+func (w *World) captureTouchedAccountsForReversal(from TenantName) {
+	w.touchedAccountIDs = []touchedAccount{
+		{tenant: from, account: AccountName(string(from) + "-wallet")},
+		{tenant: from, account: AccountName(settlementAccountID)},
+	}
+}
+
+// inspectTouchedAccounts issues one real GET /accounts/{id}/entries call per
+// recorded touchedAccountIDs entry -- the shared transport behind both the
+// automatic before/after reversal snapshots (exhaustLeg2AndReverseTracked)
+// and the scenario's own explicit "entry log ... is inspected" When step
+// (InspectTouchedAccountEntries below).
+func (w *World) inspectTouchedAccounts(ctx context.Context) (map[string][]entryWireView, error) {
+	if err := w.EnsureStarted(ctx); err != nil {
+		return nil, err
+	}
+	result := make(map[string][]entryWireView, len(w.touchedAccountIDs))
+	for _, ta := range w.touchedAccountIDs {
+		_, raw, err := w.rawCall(ctx, AsTenant(ta.tenant), http.MethodGet, "/accounts/"+url.PathEscape(string(ta.account))+"/entries", nil)
+		if err != nil {
+			return nil, err
+		}
+		var payload struct {
+			Entries []entryWireView `json:"entries"`
+		}
+		_ = json.Unmarshal(raw, &payload)
+		result[string(ta.account)] = payload.Entries
+	}
+	return result, nil
+}
+
+// InspectTouchedAccountEntries is the driving-port call behind "the entry
+// log for every account the transfer touched is inspected" (milestone-04
+// gap 1) -- a fresh, real GET .../entries round trip for every account
+// exhaustLeg2AndReverseTracked recorded, replacing the earlier `return nil`
+// placeholder. Overwrites postReversalTouchedEntries with this fresh read
+// (Mandate 8: a real HTTP call, never a cached proxy for the assertion).
+func (w *World) InspectTouchedAccountEntries(ctx context.Context) error {
+	if len(w.touchedAccountIDs) == 0 {
+		return fmt.Errorf("InspectTouchedAccountEntries: no touched accounts recorded -- expected the transfer to have been driven to reversed via driveTransferToReversed first")
+	}
+	after, err := w.inspectTouchedAccounts(ctx)
+	if err != nil {
+		return err
+	}
+	w.postReversalTouchedEntries = after
+	return nil
+}
+
+// AssertOriginalLegsUnchanged is "the original legs remain exactly as
+// posted"'s real check (milestone-04 gap 1, replacing a `return nil`
+// placeholder): every entry present BEFORE the reversal (preReversalTouchedEntries)
+// must still be present, at the same amount and counterparty, in the
+// post-reversal read (postReversalTouchedEntries) -- proof the reversal never
+// edited or deleted an existing entry (D7, brief.md § Compensating-transaction
+// mechanics).
+func (w *World) AssertOriginalLegsUnchanged() error {
+	if w.preReversalTouchedEntries == nil || w.postReversalTouchedEntries == nil {
+		return fmt.Errorf("AssertOriginalLegsUnchanged: no before/after entry-log snapshot recorded -- expected driveTransferToReversed and the entry-log inspection When step to have run first")
+	}
+	for account, before := range w.preReversalTouchedEntries {
+		afterByID := make(map[string]entryWireView, len(w.postReversalTouchedEntries[account]))
+		for _, e := range w.postReversalTouchedEntries[account] {
+			afterByID[e.TransactionID] = e
+		}
+		for _, b := range before {
+			a, ok := afterByID[b.TransactionID]
+			if !ok {
+				return fmt.Errorf("original entry %q on account %q is missing after the reversal -- a reversal must never delete an existing entry", b.TransactionID, account)
+			}
+			if a.Amount != b.Amount || a.Counterparty != b.Counterparty {
+				return fmt.Errorf("original entry %q on account %q changed after the reversal (before=%+v after=%+v) -- a reversal must never edit an existing entry", b.TransactionID, account, b, a)
+			}
+		}
+	}
+	return nil
+}
+
+// AssertReversalAddsOnlyNewEntries is "the reversal appears as new,
+// additional entries only"'s real check (milestone-04 gap 1, replacing a
+// `return nil` placeholder): for every touched account, the post-reversal
+// entry count must equal the pre-reversal count plus exactly
+// expectedNewEntriesPerAccount -- count-based proof the reversal's own
+// compensating entries are ADDITIONS, never in-place edits (which would
+// leave the count unchanged) or deletions (which would shrink it).
+func (w *World) AssertReversalAddsOnlyNewEntries(expectedNewEntriesPerAccount int) error {
+	if w.preReversalTouchedEntries == nil || w.postReversalTouchedEntries == nil {
+		return fmt.Errorf("AssertReversalAddsOnlyNewEntries: no before/after entry-log snapshot recorded -- expected driveTransferToReversed and the entry-log inspection When step to have run first")
+	}
+	if len(w.postReversalTouchedEntries) != len(w.preReversalTouchedEntries) {
+		return fmt.Errorf("expected the same set of touched accounts before and after the reversal, got %d before and %d after",
+			len(w.preReversalTouchedEntries), len(w.postReversalTouchedEntries))
+	}
+	for account, before := range w.preReversalTouchedEntries {
+		after, ok := w.postReversalTouchedEntries[account]
+		if !ok {
+			return fmt.Errorf("account %q was inspected before the reversal but not after", account)
+		}
+		if len(after) != len(before)+expectedNewEntriesPerAccount {
+			return fmt.Errorf("expected account %q to gain exactly %d entries from the reversal, had %d before and %d after",
+				account, expectedNewEntriesPerAccount, len(before), len(after))
+		}
+	}
+	return nil
+}
+
+// AssertNoNewLegAttempt is "no new attempt is made on any leg"'s real check
+// (milestone-04 gap 3, replacing a `return nil` placeholder): a fresh, real
+// GET .../entries read of the same touched accounts must be byte-for-byte
+// identical (same count, same transaction ids) to postReversalTouchedEntries
+// -- the stable baseline exhaustLeg2AndReverseTracked captured the moment
+// the reversal itself landed, BEFORE the scenario's own resend. If resending
+// the identical idempotency key had triggered even one new attempt, a new
+// entry would show up here.
+func (w *World) AssertNoNewLegAttempt(ctx context.Context) error {
+	if w.postReversalTouchedEntries == nil {
+		return fmt.Errorf("AssertNoNewLegAttempt: no post-reversal entry-log baseline recorded -- expected driveTransferToReversed(WithKey) to have run first")
+	}
+	after, err := w.inspectTouchedAccounts(ctx)
+	if err != nil {
+		return err
+	}
+	for account, baseline := range w.postReversalTouchedEntries {
+		current := after[account]
+		if len(current) != len(baseline) {
+			return fmt.Errorf("expected no new attempt on any leg after the resend, but account %q's entry count changed from %d to %d",
+				account, len(baseline), len(current))
+		}
+		baselineIDs := make(map[string]struct{}, len(baseline))
+		for _, e := range baseline {
+			baselineIDs[e.TransactionID] = struct{}{}
+		}
+		for _, e := range current {
+			if _, ok := baselineIDs[e.TransactionID]; !ok {
+				return fmt.Errorf("expected no new attempt on any leg after the resend, but account %q recorded a new entry %q",
+					account, e.TransactionID)
+			}
+		}
+	}
+	return nil
+}
+
+// ReattemptTransferWithOriginalKey is "a new transfer to the same
+// counterparty requires a fresh idempotency key"'s real check (milestone-04
+// gap 2, replacing a `return nil` placeholder): issues a second, real
+// POST /transfers to the same counterparty this transfer used, REUSING the
+// original (now-reversed) idempotency key SendCrossTenantTransfer's most
+// recent call captured (lastTransferIdempotencyKey) -- and asserts the
+// answer reports the SAME, already-reversed transfer id rather than a new
+// one. Proves the caller cannot accidentally "retry" a reversed transfer by
+// resending the old key; only a genuinely fresh key (untested here -- see
+// the adjacent "A resend of the same idempotency key after reversal ..."
+// scenario for the resend-returns-the-original-transfer property this check
+// shares) would ever spawn a new attempt.
+func (w *World) ReattemptTransferWithOriginalKey(ctx context.Context) error {
+	reversedTransferID := w.LastTransferAnswer().TransferID
+	if err := w.SendCrossTenantTransfer(ctx, w.lastTransferFrom, ParseMoney("50.00"), AliasName("beacon-payout"), w.lastTransferIdempotencyKey); err != nil {
+		return err
+	}
+	if got := w.LastTransferAnswer().TransferID; got != reversedTransferID {
+		return fmt.Errorf("expected reusing the original idempotency key to return the same, already-reversed transfer %q, got a different transfer id %q -- resending an old key must never create a new transfer",
+			reversedTransferID, got)
+	}
+	return w.AssertTransferStatus(StatusReversed)
 }
 
 // resolveTransferID lets a Then/When step refer to a transfer by the story's

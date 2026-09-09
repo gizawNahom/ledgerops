@@ -419,13 +419,26 @@ func sendCrossTenantTransferHandler(coordinator *app.TransferCoordinator) http.H
 		tenantID, _ := scope.Resolve()
 
 		fingerprint := fingerprintCrossTenantTransfer(body.CounterpartyAlias, amount)
-		view, err := coordinator.SendTransfer(r.Context(), tenantID, body.CounterpartyAlias, amount, key, fingerprint)
+		view, created, err := coordinator.SendTransfer(r.Context(), tenantID, body.CounterpartyAlias, amount, key, fingerprint)
 		if err != nil {
 			writeDomainError(w, r, err)
 			return
 		}
 
 		writeJSON(w, http.StatusAccepted, transferViewAnswer(view, false))
+
+		// TriggerForwardLegs fires AFTER the response above is written, not
+		// before (2026-09-09 fix, step 04-04) -- see TransferCoordinator.
+		// SendTransfer's own doc comment: calling this before writeJSON let
+		// inlineAttemptGraceWindow's own grace period race the response's own
+		// marshal-and-write cost, not just a second HTTP round trip a test
+		// caller issues after actually receiving the response. created is
+		// false on an idempotent replay -- a transfer that already has (or
+		// already exhausted) its own forward-leg chain must never get a
+		// second one triggered underneath it.
+		if created {
+			coordinator.TriggerForwardLegs(view.TransferID)
+		}
 	}
 }
 

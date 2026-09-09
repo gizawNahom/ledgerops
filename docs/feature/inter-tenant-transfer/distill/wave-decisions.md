@@ -960,6 +960,68 @@ milestone-05 tenant-link/counterparty authorization-boundary gaps documented
 in the entry above (`unidentified_caller` vs expected
 `transfer_not_found`/`counterparty_not_found`) — unchanged by this fix.
 
+## 2026-09-08 — DELIVER 04-04 back-propagation: 3 vacuous-assertion gaps wired to genuine checks
+
+DELIVER step 04-04 (`docs/feature/inter-tenant-transfer/deliver/blocked/04-04-blocked-by-dependency.md`)
+found all 4 of `milestone-04-reverse-after-retry-budget-exhausted.feature`'s
+own target scenarios passing at the Cucumber level, but 3 of the 4 partly via
+vacuous `Then`/`When` placeholders (`return nil`) in
+`steps_intertenanttransfer_test.go` rather than genuine assertions —
+Testing Theater. Escalated to `nw-acceptance-designer`; fixed in this
+session, test-infrastructure only, zero production code touched
+(`internal/app/transfer_coordinator.go`, `internal/adapters/http/handlers.go`
+unchanged).
+
+**Gap 1** — "Reversal never edits or deletes an existing entry": both
+`Then` steps (`the original legs remain exactly as posted`, `the reversal
+appears as new, additional entries only`) AND their own `When` dependency
+(`the entry log for every account the transfer touched is inspected`,
+also vacuous — not separately named in the escalation report) are now real.
+Added `exhaustLeg2AndReverseTracked` (world.go), wrapping
+`exhaustLeg2AndReverse`: a real `GET /accounts/{id}/entries` snapshot of the
+two accounts leg 1's own reversal touches (the sender's wallet and the
+sender's own settlement account — `reverseLeg1Movement`,
+transfer_coordinator.go; leg 2 never posts in these scenarios, so leg 1 is
+the only leg ever reversed), taken immediately before and after the
+reversal. `InspectTouchedAccountEntries` (the `When` step) re-reads fresh
+(Mandate 8 — never a cached proxy). `AssertOriginalLegsUnchanged` diffs
+by transaction id (presence + amount + counterparty unchanged);
+`AssertReversalAddsOnlyNewEntries(1)` asserts each touched account's entry
+count grew by exactly 1 (this scenario's own precondition reverses exactly
+one leg).
+
+**Gap 2** — "A reversed transfer is not automatically retried" → `a new
+transfer to the same counterparty requires a fresh idempotency key`: added
+`ReattemptTransferWithOriginalKey` (world.go) — a real second
+`POST /transfers` to the same counterparty, reusing the original (now
+reversed) transfer's own idempotency key (captured via a new
+`lastTransferIdempotencyKey` field, set by every `SendCrossTenantTransfer`
+call), asserting the answer reports the SAME transfer id, still `reversed`.
+**Note per the escalation's own request**: this substantially overlaps the
+adjacent scenario's own genuine check ("A resend of the same idempotency key
+after reversal is treated as the original request" → `the response reports
+the same, already-reversed transfer`, already wired to
+`AssertTransferStatus(StatusReversed)`). Both scenarios prove "reusing an
+old key after reversal returns the same transfer, never a new one" — no
+artificial difference was invented to distinguish them; documenting the
+overlap here rather than manufacturing one.
+
+**Gap 3** — "A resend of the same idempotency key after reversal ...": `no
+new attempt is made on any leg` now calls `AssertNoNewLegAttempt` (world.go)
+— a fresh real re-read of the same touched-account entry logs, diffed
+against the stable post-reversal baseline `exhaustLeg2AndReverseTracked`
+captured the moment the reversal itself landed (before the scenario's own
+resend); any new attempt would show up as a new entry.
+
+**Verification**: `go build ./...` clean, `go vet
+./tests/acceptance/intertenanttransfer/...` clean. `LD_LIBRARY_PATH=/tmp go
+test ./tests/acceptance/intertenanttransfer/... -run TestMain -count=1`:
+**36/41 scenarios, 260/265 steps passing** — identical to the escalation
+report's own baseline. Zero regressions; none of the 3 newly-real assertions
+failed (no hidden production gap surfaced). The 5 remaining failures are the
+same pre-existing, out-of-scope milestone-05 `unidentified_caller` isolation
+gaps documented above, unchanged by this fix.
+
 ## Outcomes register — not run
 
 `nwave-ai outcomes register` is confirmed broken in this install (missing

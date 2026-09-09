@@ -736,7 +736,14 @@ func RegisterSteps(ctx *godog.ScenarioContext, w *World) {
 
 	ctx.Then(`^exactly one set of legs exists for that transfer id$`, func() error { return nil })
 
-	ctx.Then(`^no new attempt is made on any leg$`, func() error { return nil })
+	// Fix (2026-09-08, DELIVER 04-04 back-propagation, gap 3): was a `return
+	// nil` placeholder -- now a real re-inspection of the same touched
+	// accounts exhaustLeg2AndReverseTracked already snapshotted right after
+	// the reversal landed (world.go's own AssertNoNewLegAttempt), asserting
+	// the resend added no new entry on any account.
+	ctx.Then(`^no new attempt is made on any leg$`, func(c context.Context) error {
+		return w.AssertNoNewLegAttempt(c)
+	})
 
 	ctx.Then(`^the two transfer ids reported are distinct$`, func() error {
 		if w.priorTransferID == "" || w.priorTransferID == w.LastTransferAnswer().TransferID {
@@ -799,11 +806,34 @@ func RegisterSteps(ctx *godog.ScenarioContext, w *World) {
 		return w.AssertTrialBalanceHolds(c)
 	})
 
-	ctx.Then(`^the original legs remain exactly as posted$`, func() error { return nil })
+	// Fix (2026-09-08, DELIVER 04-04 back-propagation, gap 1): was a `return
+	// nil` placeholder -- now diffs the real before/after entry-log snapshots
+	// exhaustLeg2AndReverseTracked and the "entry log ... is inspected" When
+	// step above populated (world.go's own AssertOriginalLegsUnchanged).
+	ctx.Then(`^the original legs remain exactly as posted$`, func() error {
+		return w.AssertOriginalLegsUnchanged()
+	})
 
-	ctx.Then(`^the reversal appears as new, additional entries only$`, func() error { return nil })
+	// Fix (2026-09-08, DELIVER 04-04 back-propagation, gap 1): was a `return
+	// nil` placeholder -- now a count-based diff of the same before/after
+	// snapshots (world.go's own AssertReversalAddsOnlyNewEntries). This
+	// scenario's own precondition ("a transfer ... that has been reversed",
+	// composed from driveTransferToReversed's leg-2-exhausts-first-so-only-
+	// leg-1-ever-posts-or-reverses convention -- see exhaustLeg2AndReverse's
+	// own doc) reverses exactly ONE leg, so exactly one new entry lands on
+	// each of the two touched accounts.
+	ctx.Then(`^the reversal appears as new, additional entries only$`, func() error {
+		return w.AssertReversalAddsOnlyNewEntries(1)
+	})
 
-	ctx.Then(`^a new transfer to the same counterparty requires a fresh idempotency key$`, func() error { return nil })
+	// Fix (2026-09-08, DELIVER 04-04 back-propagation, gap 2): was a `return
+	// nil` placeholder -- now a real second POST /transfers reusing the
+	// original (now-reversed) idempotency key (world.go's own
+	// ReattemptTransferWithOriginalKey), asserting it returns the SAME
+	// transfer rather than spawning a new one.
+	ctx.Then(`^a new transfer to the same counterparty requires a fresh idempotency key$`, func(c context.Context) error {
+		return w.ReattemptTransferWithOriginalKey(c)
+	})
 
 	ctx.Then(`^the transfer's status remains "([^"]*)"$`, func(status string) error {
 		return w.AssertTransferStatus(ParseTransferStatus(status))
@@ -909,7 +939,15 @@ func RegisterSteps(ctx *godog.ScenarioContext, w *World) {
 		return w.AssertReason(reason)
 	})
 
-	ctx.When(`^the entry log for every account the transfer touched is inspected$`, func() error { return nil })
+	// Fix (2026-09-08, DELIVER 04-04 back-propagation, gap 1 dependency): was
+	// a `return nil` placeholder -- now a real GET .../entries round trip per
+	// touched account (world.go's own InspectTouchedAccountEntries), caching
+	// a fresh post-reversal read for the two Then steps immediately below to
+	// diff against the pre-reversal snapshot driveTransferToReversed already
+	// took.
+	ctx.When(`^the entry log for every account the transfer touched is inspected$`, func(c context.Context) error {
+		return w.InspectTouchedAccountEntries(c)
+	})
 
 	// Fix 5 (2026-09-08, DELIVER 03-04 back-propagation): was a `return nil`
 	// placeholder -- now a real GET /accounts/{id} call against the sender's
