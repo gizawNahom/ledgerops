@@ -385,6 +385,22 @@ type sendCrossTenantTransferRequest struct {
 // header is required, exactly like the existing single-tenant variant
 // (postTransferHandler) -- both are the same header, the same requirement,
 // reused rather than reinvented for the new branch.
+//
+// Step 05-03 re-verified forged-alias namespace isolation end to end (no
+// production change was required): coordinator.SendTransfer resolves
+// body.CounterpartyAlias through domain.ResolveCounterparty, whose own
+// identity is the composite (tenant_id, alias) (02-02) -- a forged alias
+// registered in one tenant's namespace is structurally absent from every
+// other tenant's lookup, so writeDomainError's counterparty_not_found branch
+// answers a cross-namespace alias exactly like a never-registered one, with
+// no third, distinguishable wire shape. The forged-alias scenario in
+// milestone-05-trace-and-isolate-a-transfer.feature remains blocked purely
+// by a test-infra gap: neither the alias owner nor the forging tenant is
+// provisioned via a `Given tenant "X" has been provisioned` step, so the
+// forging tenant's credential never resolves and the request is refused
+// unidentified_caller at requireTenantKey (router.go) before it ever reaches
+// this handler's ResolveCounterparty call -- escalated to
+// nw-acceptance-designer rather than fixed here.
 func sendCrossTenantTransferHandler(coordinator *app.TransferCoordinator) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		key := r.Header.Get("Idempotency-Key")

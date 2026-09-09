@@ -101,12 +101,16 @@ func RegisterSteps(ctx *godog.ScenarioContext, w *World) {
 			// is irrelevant to that scenario, only that it exists in tnt's OWN
 			// namespace -- a placeholder target keeps the call a real,
 			// RED-scaffold-reaching HTTP round trip rather than a no-op.
+			if err := w.GivenTenantProvisioned(c, TenantName(tenant)); err != nil {
+				return err
+			}
 			return w.RegisterAlias(c, TenantName(tenant), AliasName(alias), TenantName(tenant), AccountName("own-account"))
 		})
 
-	ctx.Given(`^tenant "([^"]*)" has never registered any alias named "([^"]*)"$`, func(_ string, _ string) error {
-		return nil
-	})
+	ctx.Given(`^tenant "([^"]*)" has never registered any alias named "([^"]*)"$`,
+		func(c context.Context, tenant, _ string) error {
+			return w.GivenTenantProvisioned(c, TenantName(tenant))
+		})
 
 	ctx.When(`^tenant "([^"]*)" registers the alias "([^"]*)" for tenant "([^"]*)"'s account "([^"]*)"$`,
 		func(c context.Context, tenant, alias, target, account string) error {

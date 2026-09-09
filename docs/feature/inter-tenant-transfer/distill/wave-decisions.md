@@ -1082,3 +1082,56 @@ alias resolves to nothing outside its own tenant's namespace" —
 `counterparty_not_found` expected, `unidentified_caller` returned) is a
 distinct, pre-existing gap outside this dispatch's scope — not a regression
 introduced here (unaffected step definitions, unrelated refusal path).
+
+## 2026-09-09 — DELIVER back-propagation: final milestone-05 gap closed (last scenario, feature now 41/41)
+
+DELIVER step 05-03 confirmed production code was already correct
+(`ResolveCounterparty`'s `(tenant_id, alias)` identity, built in step 02-02,
+structurally makes a forged/cross-namespace alias lookup resolve to nothing;
+the HTTP handler correctly answers `counterparty_not_found`). The one
+remaining blocked scenario — "A forged counterparty alias resolves to
+nothing outside its own tenant's namespace" — was the SAME test-infra bug
+class as the immediately preceding entry above (05-01/05-02's own
+unprovisioned-third-tenant gap), recurring at a third, different pair of
+Given steps this time.
+
+**Root cause**: neither `tnt_beacon` nor `tnt_carter` was ever provisioned
+before the scenario used their credentials.
+`tenant "X" has registered the alias "Y" in its own namespace`
+(`steps_intertenanttransfer_test.go:97`) called `w.RegisterAlias` directly
+with no prior provisioning; `tenant "X" has never registered any alias named
+"Y"` (line 107) was a pure no-op — identical shape to the already-fixed
+`tenant "X" has no link with "Y" or "Z"` no-op from the prior entry. The
+scenario's `the operator has authorized the pair` step
+(`w.GivenPairAuthorized`) does not provision either tenant itself (confirmed
+again, same as before), so `tnt_carter`'s credential never resolved and the
+`When` step's send failed at `401 unidentified_caller` before ever reaching
+`ResolveCounterparty` — the scenario never exercised the behavior it claimed
+to test.
+
+**Fix** (test-infra only, `steps_intertenanttransfer_test.go`):
+- `tenant "X" has registered the alias "Y" in its own namespace` now calls
+  `w.GivenTenantProvisioned(c, TenantName(tenant))` before the existing
+  `w.RegisterAlias` call.
+- `tenant "X" has never registered any alias named "Y"` now calls
+  `w.GivenTenantProvisioned(c, TenantName(tenant))` — the absence-of-alias
+  precondition itself needs no other action, same reasoning as the prior
+  entry's `has no link with` fix.
+- `the operator has authorized the pair "X" and "Y"` deliberately left
+  unchanged — it is shared by many other, already-passing scenarios across
+  milestone-01/02/walking-skeleton that provision their own tenants
+  explicitly earlier in their own chains; since this scenario's own two
+  alias-related Given steps now provision both tenants first, that shared
+  step works correctly as-is once its two arguments already exist.
+
+No `.feature` Gherkin text changed. No production file touched (already
+correct and committed per DELIVER 05-03).
+
+**Verification**: `go build ./...` clean, `go vet
+./tests/acceptance/intertenanttransfer/...` clean,
+`LD_LIBRARY_PATH=/tmp go test ./tests/acceptance/intertenanttransfer/... -run
+TestMain -count=1` → **41/41 scenarios passing (265/265 steps)**. This closes
+the feature's own DISTILL-side test-infra debt entirely — zero remaining
+gaps of this class (unprovisioned-tenant-before-credential-use) found across
+three separate occurrences (05-02's two fixes, this one) now that all known
+instances are fixed.
