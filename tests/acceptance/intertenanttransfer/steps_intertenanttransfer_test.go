@@ -505,12 +505,22 @@ func RegisterSteps(ctx *godog.ScenarioContext, w *World) {
 			return w.seedSettlingTransfer(c, TenantName(from), TenantName(to))
 		})
 
-	ctx.Given(`^tenant "([^"]*)" has no link with "([^"]*)" or "([^"]*)"$`, func(_, _, _ string) error {
-		return nil // absence of a link is the precondition itself
+	ctx.Given(`^tenant "([^"]*)" has no link with "([^"]*)" or "([^"]*)"$`, func(c context.Context, name, _, _ string) error {
+		// The named tenant still has to exist for a later When step to
+		// authenticate as it -- absence of a LINK is the precondition this
+		// step names, not absence of the tenant itself.
+		return w.GivenTenantProvisioned(c, TenantName(name))
 	})
 
 	ctx.Given(`^tenant "([^"]*)" has an active link with "([^"]*)" but none with "([^"]*)"$`,
 		func(c context.Context, carter, acme, _ string) error {
+			// GivenPairAuthorized (via AuthorizeTenantPair) posts tenant_a/
+			// tenant_b as bare names and never provisions either side -- carter
+			// must exist before the pair can be authorized, mirroring the fix
+			// on the sibling "has no link" step above.
+			if err := w.GivenTenantProvisioned(c, TenantName(carter)); err != nil {
+				return err
+			}
 			return w.GivenPairAuthorized(c, TenantName(carter), TenantName(acme))
 		})
 

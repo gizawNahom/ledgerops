@@ -1035,3 +1035,50 @@ and invariant I11) are candidates for OUT-15 through OUT-19, not registered
 this session pending a decision on whether to hand-write the registry
 entries now or batch them with DELIVER's own completion (no downstream
 feature in this session's scope depends on the registration existing yet).
+
+## 2026-09-09 — DELIVER back-propagation: milestone-05 isolation scenarios' unprovisioned-third-tenant gap closed
+
+DELIVER steps 05-01/05-02 (`requireTransferParty` middleware,
+`transfer_not_found` wire mapping — both already committed, production code
+untouched this session) reported two milestone-05 scenarios blocked by a
+test-infra gap, not a production gap:
+
+- "A third tenant with no link to either party cannot trace the transfer"
+- "A tenant linked to one party but not the other cannot trace the transfer"
+
+Both scenarios' own Given steps named `tnt_carter` without ever provisioning
+it. `tenant "X" has no link with "Y" or "Z"` was a pure no-op (`return nil`);
+the sibling `tenant "X" has an active link with "Y" but none with "Z"` called
+`GivenPairAuthorized`, which — via `AuthorizeTenantPair` — posts
+`tenant_a`/`tenant_b` as bare names to `/tenant-links` and never provisions
+either side (confirmed by reading its own implementation,
+`world.go:477-503`). In both cases the later `When tenant "tnt_carter"
+queries ...` step authenticated as a tenant that never existed, so the
+request failed at `401 unidentified_caller` (the auth layer) instead of ever
+reaching `requireTransferParty`'s own `404 transfer_not_found` refusal (the
+application layer) — the scenario never exercised the behavior it claimed to
+test.
+
+Fix (test-infra only, `steps_intertenanttransfer_test.go`):
+- `tenant "X" has no link with "Y" or "Z"` now provisions `X` via
+  `w.GivenTenantProvisioned` before returning — the comment's own reasoning
+  ("absence of a link is the precondition itself") stands unchanged; only the
+  missing tenant-existence step was added.
+- `tenant "X" has an active link with "Y" but none with "Z"` now provisions
+  `X` the same way, immediately before calling `w.GivenPairAuthorized` — the
+  identical gap on the sibling step, confirmed by inspection rather than
+  assumed.
+
+No `.feature` Gherkin text changed. No production file
+(`internal/adapters/http/router.go`/`handlers.go`) touched — both were
+already correct per DELIVER 05-01/05-02.
+
+Verification: `go build ./...` clean, `go vet
+./tests/acceptance/intertenanttransfer/...` clean,
+`LD_LIBRARY_PATH=/tmp go test ./tests/acceptance/intertenanttransfer/... -run
+TestMain -count=1` → 40/41 scenarios passing (264/265 steps), both target
+scenarios green end-to-end. The one remaining failure ("A forged counterparty
+alias resolves to nothing outside its own tenant's namespace" —
+`counterparty_not_found` expected, `unidentified_caller` returned) is a
+distinct, pre-existing gap outside this dispatch's scope — not a regression
+introduced here (unaffected step definitions, unrelated refusal path).
