@@ -267,21 +267,11 @@ func (tc *TransferCoordinator) recordFailedReversalAttempt(transferID string, le
 	return tc.retry.counts[key]
 }
 
-// testOnlyFaultState is a per-coordinator (not global) registry, so two
-// World instances in the same test binary never share fault state across
-// scenarios (each scenario's own httptest.Server wires a fresh
+// testOnlyFaultState (see its own type doc comment,
+// transfer_coordinator_testonly.go) is a per-coordinator (not global)
+// registry, so two World instances in the same test binary never share fault
+// state across scenarios (each scenario's own httptest.Server wires a fresh
 // TransferCoordinator via NewRouter).
-type testOnlyFaultState struct {
-	mu        sync.Mutex
-	legFaults map[string]int // key: transferID + ":" + leg, remaining fail count
-	// (2026-09-08, DELIVER 03-04 back-propagation): widened from
-	// map[string]bool to map[string]int so InjectLegFaultCount can arm a
-	// SPECIFIC number of consecutive failures ("fails on its first two
-	// attempts"), not just a single one-shot fault -- InjectLegFault's own
-	// one-shot behavior is unchanged, expressed as count=1 below.
-	skipForwardCrash  map[string]bool // key: transferID
-	skipReversalCrash map[string]bool // key: transferID — recorded for 03-02/04's own reversal path to consult
-}
 
 // NewTransferCoordinator wires the saga over an already-constructed Ledger.
 func NewTransferCoordinator(ledger *Ledger) *TransferCoordinator {
@@ -296,98 +286,10 @@ func NewTransferCoordinator(ledger *Ledger) *TransferCoordinator {
 	}
 }
 
-// --- test-only fault-injection seam (step 03-01) ---------------------------
-//
-// Every method below exists for exactly one reason: the acceptance suite
-// needs a named back door to force a specific leg to fail, or to simulate a
-// process crash at one of the two crash windows, or to seed rows a ticker
-// tick can discover — deterministically, without real network faults or
-// real wall-clock waiting. None of these methods is reachable from any
-// production driving port; only tests/acceptance/intertenanttransfer/world.go,
-// through a testonly-build-tagged HTTP adapter
-// (internal/adapters/http/testonly_faults.go), ever calls them.
-
-// InjectLegFault forces the next attemptLeg call for the named transfer's
-// leg to fail with a simulated transient fault, consumed on first use — the
-// following attempt (inline retry or ticker) runs normally. Equivalent to
-// InjectLegFaultCount(transferID, leg, 1).
-func (tc *TransferCoordinator) InjectLegFault(transferID string, leg int) {
-	tc.InjectLegFaultCount(transferID, leg, 1)
-}
-
-// InjectLegFaultCount forces the next `count` consecutive attemptLeg calls
-// for the named transfer's leg to each fail with a simulated transient
-// fault (2026-09-08, DELIVER 03-04 back-propagation) — added for "fails on
-// its first two attempts," which InjectLegFault's fixed one-shot semantics
-// could not express. count <= 0 arms nothing (a no-op), mirroring
-// InjectLegFault's own always-arm-exactly-one contract by construction for
-// count == 1.
-func (tc *TransferCoordinator) InjectLegFaultCount(transferID string, leg, count int) {
-	tc.armFault(transferLegKey(transferID, leg), count)
-}
-
-// InjectReversalFaultCount forces the next `count` consecutive compensating-
-// reversal Post attempts for the named transfer's leg-N reversal (leg 1 or
-// 2) to each fail with a simulated transient fault (step 04-03) — the
-// reversal-side mirror of InjectLegFaultCount above, needed because a
-// reversal Post can itself fail repeatedly and exhaust its own retry
-// budget (Amendment 3). Keyed under the disjoint transferReversalLegKey
-// namespace, so arming a leg-1 reversal fault can never be mistaken for
-// arming a forward leg-1 fault (leg 1 has no forward retry budget of its
-// own to begin with — see this file's own SendTransfer doc comment).
-func (tc *TransferCoordinator) InjectReversalFaultCount(transferID string, leg, count int) {
-	tc.armFault(transferReversalLegKey(transferID, leg), count)
-}
-
-// armFault is the shared arm-a-fault-count mechanism InjectLegFaultCount and
-// InjectReversalFaultCount both reduce to — one map, one locking discipline,
-// keyed by whichever namespace (forward vs. reversal) the caller supplies.
-func (tc *TransferCoordinator) armFault(key string, count int) {
-	if count <= 0 {
-		return
-	}
-	tc.testOnly.mu.Lock()
-	defer tc.testOnly.mu.Unlock()
-	tc.testOnly.legFaults[key] = count
-}
-
-// consumeInjectedLegFault reports whether a fault was armed for this
-// transfer's leg, decrementing the remaining count and clearing the entry
-// once exhausted — a fault only ever stalls the next `count` attempts it
-// meets, never every attempt after it.
-func (tc *TransferCoordinator) consumeInjectedLegFault(transferID string, leg int) bool {
-	return tc.consumeFault(transferLegKey(transferID, leg))
-}
-
-// consumeInjectedReversalFault is consumeInjectedLegFault's own reversal-side
-// mirror (step 04-03) — checked from postLeg1Reversal/postLeg2Reversal, the
-// two Post-issuing functions a reversal attempt's own retry loop calls.
-func (tc *TransferCoordinator) consumeInjectedReversalFault(transferID string, leg int) bool {
-	return tc.consumeFault(transferReversalLegKey(transferID, leg))
-}
-
-// consumeFault is armFault's own consume-side counterpart, shared by both
-// consumeInjectedLegFault and consumeInjectedReversalFault.
-func (tc *TransferCoordinator) consumeFault(key string) bool {
-	tc.testOnly.mu.Lock()
-	defer tc.testOnly.mu.Unlock()
-	remaining := tc.testOnly.legFaults[key]
-	if remaining <= 0 {
-		return false
-	}
-	remaining--
-	if remaining <= 0 {
-		delete(tc.testOnly.legFaults, key)
-	} else {
-		tc.testOnly.legFaults[key] = remaining
-	}
-	return true
-}
-
 // transferLegKey is the shared (transferID, leg) map key format for both
-// the test-only fault registry above and attemptLeg's own failed-attempt
-// counter below -- one composite key shape, not two independently
-// maintained ones.
+// the test-only fault registry (transfer_coordinator_testonly.go) and
+// attemptLeg's own failed-attempt counter above -- one composite key shape,
+// not two independently maintained ones.
 func transferLegKey(transferID string, leg int) string {
 	return fmt.Sprintf("%s:%d", transferID, leg)
 }
@@ -398,64 +300,6 @@ func transferLegKey(transferID string, leg int) string {
 // with a forward-leg one, even for the same transfer_id and leg number.
 func transferReversalLegKey(transferID string, leg int) string {
 	return fmt.Sprintf("%s:reversal:%d", transferID, leg)
-}
-
-// errSimulatedTransientFault is the injected failure attemptLeg's own
-// recordLegOutcome sees — indistinguishable, from that call's own
-// perspective, from a genuine transient Post failure.
-var errSimulatedTransientFault = errors.New("simulated transient fault (test-only fault injection)")
-
-// SimulateCrashBeforeForwardLegAttempt marks a transfer so spawnForwardLegs'
-// own goroutine returns immediately without ever attempting leg 2 —
-// simulating a process crash between Leg 1's commit and the inline
-// goroutine's first Leg 2 attempt. The retry ticker (processDueTransfers)
-// remains the only path that can ever claim the row afterward.
-func (tc *TransferCoordinator) SimulateCrashBeforeForwardLegAttempt(transferID string) {
-	tc.testOnly.mu.Lock()
-	defer tc.testOnly.mu.Unlock()
-	tc.testOnly.skipForwardCrash[transferID] = true
-}
-
-// consumeForwardCrashSimulation reports (and clears) whether this transfer
-// was marked to skip its inline forward attempt entirely.
-func (tc *TransferCoordinator) consumeForwardCrashSimulation(transferID string) bool {
-	tc.testOnly.mu.Lock()
-	defer tc.testOnly.mu.Unlock()
-	if tc.testOnly.skipForwardCrash[transferID] {
-		delete(tc.testOnly.skipForwardCrash, transferID)
-		return true
-	}
-	return false
-}
-
-// consumeReversalCrashSimulation reports (and clears) whether this transfer
-// was marked to skip its inline leg-1-reversal attempt (04-02) -- the
-// compensating-side mirror of consumeForwardCrashSimulation above. Checked
-// ONLY from the inline reversal path (reverseLeg2ThenLeg1, isInlinePath
-// true): the ticker's own resumeLeg1Reversal path below never consults this
-// flag, exactly as attemptLeg's own isInlinePath gate keeps the ticker from
-// ever mistaking a forward-crash flag for its own instruction to stand down.
-func (tc *TransferCoordinator) consumeReversalCrashSimulation(transferID string) bool {
-	tc.testOnly.mu.Lock()
-	defer tc.testOnly.mu.Unlock()
-	if tc.testOnly.skipReversalCrash[transferID] {
-		delete(tc.testOnly.skipReversalCrash, transferID)
-		return true
-	}
-	return false
-}
-
-// SimulateCrashBeforeReversalAttempt marks a transfer so the reversal path
-// (step 03-02/04's own scope — no reversal dispatch exists yet) will skip
-// attempting an earlier leg's reversal on whatever inline path eventually
-// drives it, mirroring SimulateCrashBeforeForwardLegAttempt on the
-// compensating side. Recorded now so the seam's shape is stable before the
-// reversal dispatcher that must consult it exists; consuming it is that
-// dispatcher's own responsibility, not this step's.
-func (tc *TransferCoordinator) SimulateCrashBeforeReversalAttempt(transferID string) {
-	tc.testOnly.mu.Lock()
-	defer tc.testOnly.mu.Unlock()
-	tc.testOnly.skipReversalCrash[transferID] = true
 }
 
 // ProcessDueTransfersOnce single-steps the ticker's own scan-and-dispatch
@@ -902,7 +746,6 @@ func (tc *TransferCoordinator) attemptLeg(ctx context.Context, transferID string
 	if postErr != nil {
 		return tc.handleLegFailure(ctx, transferID, leg, state, postErr, isInlinePath)
 	}
-	fmt.Printf("[DIAG] attemptLeg SUCCEEDED transfer=%s leg=%d\n", transferID, leg)
 	return tc.recordLegSuccess(attemptCtx, transferID, leg)
 }
 
@@ -953,7 +796,6 @@ func backoffForAttempt(failedAttempts int, jitter float64) (time.Duration, bool)
 func (tc *TransferCoordinator) handleLegFailure(ctx context.Context, transferID string, leg int, state ports.TransferState, postErr error, isInlinePath bool) error {
 	failedAttempts := tc.recordFailedAttempt(transferID, leg)
 	delay, ok := backoffForAttempt(failedAttempts, rand.Float64())
-	fmt.Printf("[DIAG] handleLegFailure transfer=%s leg=%d failedAttempts=%d ok=%v delay=%s\n", transferID, leg, failedAttempts, ok, delay)
 
 	if !ok && leg == 2 {
 		if err := tc.reverseLeg1(ctx, transferID, state); err != nil {
@@ -1038,20 +880,36 @@ func (tc *TransferCoordinator) reverseLeg1(ctx context.Context, transferID strin
 func (tc *TransferCoordinator) attemptLeg1Reversal(ctx context.Context, transferID string, state ports.TransferState) error {
 	err := tc.postLeg1Reversal(ctx, transferID, state)
 	if err != nil {
-		failedAttempts := tc.recordFailedReversalAttempt(transferID, 1)
-		delay, ok := backoffForAttempt(failedAttempts, rand.Float64())
-		if !ok {
-			if failErr := tc.markReversalFailed(ctx, transferID, reasonLeg1ReversalRetryBudgetExhausted); failErr != nil {
-				return failErr
-			}
-			return err
-		}
-		tc.scheduleReversalRetry(delay, func(retryCtx context.Context) {
+		return tc.handleReversalFailure(ctx, transferID, 1, err, reasonLeg1ReversalRetryBudgetExhausted, func(retryCtx context.Context) {
 			_ = tc.attemptLeg1Reversal(retryCtx, transferID, state)
 		})
-		return err
 	}
 	return tc.advanceAfterLegOutcome(ctx, transferID, statusReversed, tc.ledger.clock(), reasonRetryBudgetExhausted)
+}
+
+// handleReversalFailure is the shared retry-or-exhausted decision behind a
+// compensating reversal Post's own failure — attemptLeg1Reversal's leg-1
+// case and reverseLeg2ThenLeg1's leg-2 case both reduce to it (step 04-03):
+// record the failed reversal attempt, compute the SAME fixed budget/backoff
+// schedule forward legs use (backoffForAttempt), and either self-reschedule
+// the given retry closure (budget not yet exhausted) or commit the terminal
+// statusReversalFailed write under the caller-supplied, leg-specific reason
+// (budget exhausted). Mirrors handleLegFailure's own retry-or-exhausted
+// shape one section above, generalized to the reversal side; retry is
+// exactly what each caller's own self-rescheduling closure already was
+// before this extraction, so this changes no observable behavior on either
+// leg.
+func (tc *TransferCoordinator) handleReversalFailure(ctx context.Context, transferID string, leg int, postErr error, exhaustedReason string, retry func(retryCtx context.Context)) error {
+	failedAttempts := tc.recordFailedReversalAttempt(transferID, leg)
+	delay, ok := backoffForAttempt(failedAttempts, rand.Float64())
+	if !ok {
+		if failErr := tc.markReversalFailed(ctx, transferID, exhaustedReason); failErr != nil {
+			return failErr
+		}
+		return postErr
+	}
+	tc.scheduleReversalRetry(delay, retry)
+	return postErr
 }
 
 // markReversalFailed commits the terminal statusReversalFailed write, then
@@ -1214,25 +1072,16 @@ func (tc *TransferCoordinator) reverseLeg2ThenLeg1(ctx context.Context, transfer
 	if err != nil {
 		// Step 04-03: leg 2's own compensating reversal can itself fail
 		// repeatedly — retried with the same fixed budget/backoff schedule
-		// every other retry loop in this file uses, via a self-rescheduling
-		// goroutine, exactly like attemptLeg1Reversal's own mirror below.
-		// Amendment 3's own sequencing decision: once leg 2's OWN reversal
-		// exhausts its budget, the coordinator HALTS — leg 1 is never
-		// reversed, never attempted. That halt is what markReversalFailed
-		// below achieves simply by never calling into leg 1's reversal at
-		// all.
-		failedAttempts := tc.recordFailedReversalAttempt(transferID, 2)
-		delay, ok := backoffForAttempt(failedAttempts, rand.Float64())
-		if !ok {
-			if failErr := tc.markReversalFailed(ctx, transferID, reasonLeg2ReversalRetryBudgetExhausted); failErr != nil {
-				return failErr
-			}
-			return err
-		}
-		tc.scheduleReversalRetry(delay, func(retryCtx context.Context) {
+		// every other retry loop in this file uses, via handleReversalFailure's
+		// shared self-rescheduling mechanism (mirrors attemptLeg1Reversal's
+		// own use of it one section above). Amendment 3's own sequencing
+		// decision: once leg 2's OWN reversal exhausts its budget, the
+		// coordinator HALTS — leg 1 is never reversed, never attempted. That
+		// halt is what markReversalFailed (inside handleReversalFailure)
+		// achieves simply by never calling into leg 1's reversal at all.
+		return tc.handleReversalFailure(ctx, transferID, 2, err, reasonLeg2ReversalRetryBudgetExhausted, func(retryCtx context.Context) {
 			_ = tc.reverseLeg2ThenLeg1(retryCtx, transferID, state, isInlinePath)
 		})
-		return err
 	}
 
 	if isInlinePath && tc.consumeReversalCrashSimulation(transferID) {
