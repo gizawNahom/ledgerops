@@ -74,13 +74,13 @@ func TestAttemptLeg_ConcurrentClaimRace_ExactlyOneCallerAttemptsThePost(t *testi
 		t.Fatalf("NewMoney rejected a known currency: %v", err)
 	}
 	state := ports.TransferState{
-		TransferID:           "xfr_claim_race",
-		TenantID:             "tnt_acme",
-		IdempotencyKey:       "idem-claim-race",
-		Status:               "pending",
-		Leg1Status:           "posted",
-		Leg2Status:           "pending",
-		Leg3Status:           "pending",
+		TransferID:     "xfr_claim_race",
+		TenantID:       "tnt_acme",
+		IdempotencyKey: "idem-claim-race",
+		Status:         "pending",
+		Leg1Status:     "posted",
+		Leg2Status:     "pending",
+		Leg3Status:     "pending",
 		// Deliberately a fixed, far-past instant, not time.Now(): ClaimDue
 		// below is evaluated against the coordinator's own injected
 		// fixedClock (2026-08-20, see usecases_test.go), while the fake's
@@ -88,7 +88,7 @@ func TestAttemptLeg_ConcurrentClaimRace_ExactlyOneCallerAttemptsThePost(t *testi
 		// time.Now()-based lease check) is evaluated against the real wall
 		// clock -- a value before both never risks landing "not yet due"
 		// against either.
-		NextAttemptAt: time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC),
+		NextAttemptAt:        time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC),
 		CounterpartyTenantID: "tnt_beacon",
 		TargetAccountID:      "beacon-wallet-ops",
 		Amount:               amount,
