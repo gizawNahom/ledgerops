@@ -119,11 +119,36 @@ them anywhere real.
 | `make race-03` | Concurrent duplicate submissions store one transaction | Docker, Go |
 
 `demo-04` (like the quickstart above) provisions a fixed tenant name, so a
-second run fails with `tenant_already_exists`; run `make down` first. In [CI](.github/workflows/ci.yml), the race checks and the
-append-only and multitenancy acceptance suites gate the build, and the demos
-run from a clean checkout on every push. Timing targets are reported, not
-enforced; [`kpi-contracts.yaml`](docs/product/kpi-contracts.yaml) says which is
-which.
+second run fails with `tenant_already_exists`; run `make down` first. In
+[CI](.github/workflows/ci.yml), the race checks and the append-only and
+multitenancy acceptance suites gate the build, and the demos run from a clean
+checkout on every push. Timing targets are reported, not enforced;
+[`kpi-contracts.yaml`](docs/product/kpi-contracts.yaml) says which is which.
+
+## Performance and known limits
+
+[`tests/load/transfers.js`](tests/load/transfers.js) drives the stack with k6
+in four profiles — `load`, `stress`, `soak` and `capacity` — through the
+manually triggered [Load test](.github/workflows/load-test.yml) workflow; it
+never runs on push. `capacity` holds a flat 300 requests/s against a CPU- and
+memory-pinned stack ([`docker-compose.loadtest.yml`](docker-compose.loadtest.yml)),
+with 80% of traffic aimed at 100 "hot" accounts out of 500, and gates on
+throughput, p95 latency under 500 ms and errors under 1%.
+
+**Hot accounts are the ceiling.** In the last recorded run (2026-09-02),
+throughput (276.5 req/s) and errors (0%) held, but p95 latency reached
+923 ms. CPU, memory and the connection pool were each ruled out; during the
+run, 41–50 PostgreSQL connections sat waiting on row locks. Every transfer
+locks its sender and recipient rows (`SELECT … FOR UPDATE`, the price of the
+no-overdraft guarantee), so concurrent transfers touching the same account
+queue behind each other. Spreading the hot set across more accounts didn't
+relieve it, and reads never take these locks. If your traffic concentrates on
+a few accounts — a single treasury or fee account, say — this is the limit
+you'll meet first. The threshold was deliberately left strict rather than
+loosened to pass; the fix (a shorter critical section, batching writes per
+account, or splitting a hot balance across rows) is not yet built. Details in
+[`docs/feature/ledger-core/feature-delta.md`](docs/feature/ledger-core/feature-delta.md)
+(OPS-12 amendments).
 
 ## Operator console and observability
 
