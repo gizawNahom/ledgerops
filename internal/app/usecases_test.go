@@ -535,9 +535,8 @@ func TestProperty_VerifyBooks_UnscopedSharedAccountIdsAcrossTenantsAreNotDrift(t
 // pins the other half: whichever tenant's treasury is misstated (the legacy
 // tenant or a later one), the platform-wide verdict is NO and lists that one
 // account with the true delta -- no merged namesakes, and no tenant skipped
-// because it is not the legacy one. (Naming the drifted account's TENANT is
-// asserted at the acceptance layer today; once Drift carries TenantID the
-// crafter's step adds the assertion here too -- see the report.)
+// because it is not the legacy one -- attributed to the tenant whose stored
+// balance was misstated, not to a namesake in another tenant.
 func TestProperty_VerifyBooks_UnscopedReportsExactlyTheOneAccountWhoseStoredBalanceDrifted(t *testing.T) {
 	rapid.Check(t, func(rt *rapid.T) {
 		store := newFakeStore()
@@ -560,6 +559,9 @@ func TestProperty_VerifyBooks_UnscopedReportsExactlyTheOneAccountWhoseStoredBala
 		}
 		if got := report.Drifted[0]; got.AccountID != "treasury" || got.Delta.MinorUnits() != -driftMinor {
 			rt.Fatalf("Drifted[0] = %+v, want treasury with delta %d", got, -driftMinor)
+		}
+		if got := report.Drifted[0].TenantID; got != tenants[driftTenant] {
+			rt.Fatalf("Drifted[0].TenantID = %q, want the drifted tenant %q", got, tenants[driftTenant])
 		}
 	})
 }
@@ -587,6 +589,9 @@ func TestVerifyBooks_UnscopedCallChecksEveryTenantNotJustTheLegacyOne(t *testing
 	}
 	if len(report.Drifted) != 1 || report.Drifted[0].AccountID != "treasury" {
 		t.Fatalf("Drifted = %+v, want exactly the beacon tenant's treasury", report.Drifted)
+	}
+	if got := report.Drifted[0].TenantID; got != "tnt_beacon" {
+		t.Fatalf("Drifted[0].TenantID = %q, want %q", got, "tnt_beacon")
 	}
 	if _, scoped := store.lastScope.Resolve(); scoped {
 		t.Fatalf("TrialBalance/ComputedBalances scope was scoped, want Unscoped()")
