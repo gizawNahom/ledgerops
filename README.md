@@ -19,6 +19,7 @@ can prove it did. Go · PostgreSQL 16 · TypeScript operator console.
 - History that can't be rewritten, enforced by database permissions
 - Multiple tenants with isolated data
 - An on-demand check that the books balance, naming any account that drifts
+  ([see it in the console](#operator-console-and-observability))
 
 ```text
 POST /transfers  {"from":"alice-01","to":"bob-01","amount":"500.00"}
@@ -180,10 +181,6 @@ first.
 - **No webhooks or event stream** — integrations have to poll
 - **No OpenAPI spec, client SDKs or versioned releases**, and no published
   container image; you build from source
-- **No platform-wide books check** — without `?tenant_id=`, the check only
-  covers the original demo tenant, and can report false drift when another
-  tenant reuses one of its account names; check each tenant with
-  `?tenant_id=` instead
 - **No tenant key rotation** or tenant offboarding
 - **No TLS in the service itself** — run it behind a TLS-terminating proxy
 - **Not yet run in production**, and not tested with more than one app
@@ -232,6 +229,12 @@ investigation is in the
    commit for busy accounts.
 
 ## Operator console and observability
+
+![Operator console: "Books balance: NO", one drifted account (alice-01, stored 174.26, computed 74.26) and the entry trace behind it](docs/images/console-drift.png)
+
+*Staged for this picture: one stored balance was changed directly in the
+database. The console flags the account and traces the entries that give its
+true balance.*
 
 The console shows the trial-balance verdict, any drifted accounts, and a
 drill-down into each account's entries. Run it with the Vite dev server

@@ -63,9 +63,7 @@ curl -s "$API/health/trial-balance?tenant_id=$TENANT_ID" -H "$OP"
 # {"verdict":"Books balance: YES","imbalance_minor":0,…}
 ```
 
-The books check takes the operator key and a `tenant_id`, and checks that
-tenant's accounts against its entries. Without `tenant_id` it only covers the
-demo stack's original tenant — see
-[Status and limitations](../README.md#status-and-limitations).
+The books check takes the operator key. With `tenant_id` it checks that
+tenant's accounts against its entries; without it, it checks every tenant's.
 
 `make down` stops the stack and deletes its data volume.
