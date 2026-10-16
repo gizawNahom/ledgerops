@@ -994,6 +994,19 @@ func (w *World) AssertRefused(kind RefusalKind) error {
 	return nil
 }
 
+// AssertRefusedNamingAccount is AssertRefused plus the refusal body naming the
+// account the caller asked for -- never a tenant id or any other identifier.
+func (w *World) AssertRefusedNamingAccount(kind RefusalKind, account AccountName) error {
+	if err := w.AssertRefused(kind); err != nil {
+		return err
+	}
+	if w.lastAnswer.NamedAccount != string(account) {
+		return fmt.Errorf("expected the refusal to name the requested account %q, got account_id=%q (raw: %s)",
+			account, w.lastAnswer.NamedAccount, w.lastAnswer.Raw)
+	}
+	return nil
+}
+
 func (w *World) AssertTenantRefused(kind RefusalKind) error {
 	if w.lastTenantAnswer.Refusal != kind {
 		return fmt.Errorf("expected the tenant response to be refused as %q, got refusal=%q status=%d",

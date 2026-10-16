@@ -206,6 +206,10 @@ func RegisterSteps(ctx *godog.ScenarioContext, w *World) {
 		return w.AssertRefused(UnknownAccount)
 	})
 
+	ctx.Then(`^the response is refused as an unknown account "([^"]*)"$`, func(account string) error {
+		return w.AssertRefusedNamingAccount(UnknownAccount, AccountName(account))
+	})
+
 	ctx.Then(`^the transfer is refused$`, func() error {
 		return w.AssertRefusedGeneric()
 	})

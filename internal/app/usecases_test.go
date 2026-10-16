@@ -740,7 +740,7 @@ func TestProvisionTenant_DuplicateNameRefusedWithNoRowWritten(t *testing.T) {
 //   - fakeTransactionRepository.EntriesFor answers from the platform book
 //     (store.entriesWithTenantIn(scope)), filtered to accountID, grouped by
 //     tenant in first-seen order, relative order within a tenant preserved.
-// They do not compile until TracedEntry.TenantID exists; that is the RED.
+// TracedEntry.TenantID carries the owning tenant through to the caller.
 
 // recordPlatformEntry records one entry of `account` for `tenantID` in the
 // platform book, in call order.

@@ -10,8 +10,8 @@
 # "treasury" read "Books balance: NO" (stored -100.00, computed -200.00), and
 # drift in any tenant other than the pre-multitenancy ledger went unseen.
 #
-# Every scenario carries @pending (ADR-025): the crafter removes the tag one
-# scenario at a time. Contract shape follows milestone-03's own read-only
+# ADR-025: scenarios were authored @pending and un-pended one at a time during
+# delivery; none carries @pending now. Contract shape follows milestone-03's own read-only
 # checks (the When is a read; the out-of-band alteration is a Given).
 #
 # The sibling read -- the operator's entries for a shared account name -- is

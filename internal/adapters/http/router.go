@@ -383,9 +383,9 @@ func requireTenantKey(resolve ports.TenantKeyResolver) func(http.Handler) http.H
 
 // requireTenantKeyOrOperatorKey tries the exact OperatorKey comparison
 // first -- cheap, no I/O, byte-identical to requireOperatorKey's own check
-// -- injecting the deliberate Unscoped() marker on a match so the route this
-// guards stays byte-identical to today's admin-caller behavior, not merely
-// similar. On no match it falls back to the same TenantKeyResolver lookup
+// -- injecting the deliberate Unscoped() marker on a match, so the operator
+// keeps platform-wide reach on the route this guards (its entries now also
+// carry tenant_id). On no match it falls back to the same TenantKeyResolver lookup
 // requireTenantKey performs. Refuses 401 unidentified_caller only when both
 // fail.
 func requireTenantKeyOrOperatorKey(operatorKey string, resolve ports.TenantKeyResolver) func(http.Handler) http.Handler {

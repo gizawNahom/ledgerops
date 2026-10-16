@@ -19,8 +19,8 @@
 #   Beacon Marketplace: funds wallet-1 with  40.00               -> treasury trail  -40.00
 # A merged read would run -100.00, -140.00, -165.00: a figure no one holds.
 #
-# Every scenario carries @pending (ADR-025): the crafter removes the tag one
-# scenario at a time. Contract shape follows milestone-02's entries scenarios
+# ADR-025: scenarios were authored @pending and un-pended one at a time during
+# delivery; none carries @pending now. Contract shape follows milestone-02's entries scenarios
 # and milestone-03b: every When here is a read, so reads are pure-function and
 # refusals are unbounded-preservation (nothing may change, nothing may leak).
 
@@ -72,7 +72,15 @@ Feature: The operator's entries read keeps each tenant's namesake account on its
     And tenant "Acme Wallet" holds a funded wallet "wallet-1" with 100.00 drawn from its system account "treasury"
     And tenant "Corner Shop" has been provisioned
     When the operator requests "treasury"'s entries for tenant "Corner Shop" with the platform-admin credential
-    Then the response is refused as an unknown account
+    Then the response is refused as an unknown account "treasury"
+    And no entry is returned
+
+  @fix-unscoped-entries-tenant-merge @real-io @adapter-integration @contract-shape:unbounded-preservation
+  Scenario: Narrowing the read to a tenant that was never provisioned is refused as an unknown account
+    Given tenant "Acme Wallet" has been provisioned
+    And tenant "Acme Wallet" holds a funded wallet "wallet-1" with 100.00 drawn from its system account "treasury"
+    When the operator requests "treasury"'s entries for tenant "Phantom Traders" with the platform-admin credential
+    Then the response is refused as an unknown account "treasury"
     And no entry is returned
 
   @fix-unscoped-entries-tenant-merge @real-io @adapter-integration @contract-shape:pure-function
@@ -103,7 +111,7 @@ Feature: The operator's entries read keeps each tenant's namesake account on its
     And tenant "Beacon Marketplace" has been provisioned
     And tenant "Beacon Marketplace" holds a funded wallet "wallet-1" with 40.00 drawn from its system account "treasury"
     When tenant "Acme Wallet" requests "treasury"'s entries naming tenant "<named tenant>"
-    Then the response is refused as an unknown account
+    Then the response is refused as an unknown account "treasury"
     And no entry is returned
 
     Examples:

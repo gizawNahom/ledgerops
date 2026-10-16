@@ -291,7 +291,7 @@ func getEntriesHandler(ledger *app.Ledger) http.HandlerFunc {
 		// which forwards it unchanged to TransactionRepository.EntriesFor.
 		callerScope, _ := TenantScopeFromContext(r.Context())
 
-		scope, err := entriesScopeFromQuery(callerScope, r.URL.Query().Get("tenant_id"))
+		scope, err := entriesScopeFromQuery(callerScope, accountID, r.URL.Query().Get("tenant_id"))
 		if err != nil {
 			writeDomainError(w, r, err)
 			return
@@ -313,9 +313,11 @@ func getEntriesHandler(ledger *app.Ledger) http.HandlerFunc {
 // The operator (Unscoped) may narrow to any tenant. A tenant key never widens
 // or switches tenant: naming its own id is the same as naming none, and naming
 // any other id (provisioned or not) is refused as an unknown account, exactly
-// as reading another tenant's account already is. It deliberately does not
+// as reading another tenant's account already is. The refusal names the
+// requested accountID from the path, never the tenant id, so it does not echo
+// the caller-supplied tenant id. It deliberately does not
 // reuse trialBalanceScopeFromQuery, which would let a tenant key switch tenant.
-func entriesScopeFromQuery(callerScope ports.TenantScope, namedTenantID string) (ports.TenantScope, error) {
+func entriesScopeFromQuery(callerScope ports.TenantScope, accountID, namedTenantID string) (ports.TenantScope, error) {
 	if namedTenantID == "" {
 		return callerScope, nil
 	}
@@ -326,7 +328,7 @@ func entriesScopeFromQuery(callerScope ports.TenantScope, namedTenantID string) 
 	case callerTenantID == namedTenantID:
 		return callerScope, nil
 	default:
-		return callerScope, domain.NewUnknownAccount(namedTenantID)
+		return callerScope, domain.NewUnknownAccount(accountID)
 	}
 }
 

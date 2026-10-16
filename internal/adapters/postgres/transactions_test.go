@@ -135,9 +135,8 @@ func TestTransactionRepository_EntriesFor_ReturnsOneAccountsHistoryOrdered(t *te
 // tenant, then recorded instant, then sequence) -- never interleaved by
 // instant across tenants. A scoped call narrows to one tenant and names it.
 //
-// Written against the intended port shape (rca.md section 3):
-// EntriesFor returns []ports.TenantEntry{TenantID, Entry}. It does not compile
-// until the port changes -- that compile failure is the RED.
+// Written against the port shape of rca.md section 3: EntriesFor returns
+// []ports.TenantEntry{TenantID, Entry}.
 func TestTransactionRepository_EntriesFor_UnscopedAttributesEachEntryToItsTenantScopedSeesOnlyItsOwn(t *testing.T) {
 	store := migratedStore(t)
 	ctx := context.Background()
