@@ -1,0 +1,102 @@
+{
+  "roadmap": {
+    "project_id": "fix-trial-balance-tenant-collision",
+    "created_at": "2026-10-16T00:00:00Z",
+    "total_steps": 2
+  },
+  "phases": [
+    {
+      "id": "01",
+      "name": "Tenant-qualified platform-wide books verification",
+      "steps": [
+        {
+          "id": "01-01",
+          "name": "Tenant-qualified computed and stored balance comparison",
+          "criteria": [
+            "Unscoped computed balances keep two tenants' same-named accounts as separate figures, not one merged sum",
+            "Unscoped books check enumerates accounts of every tenant, not only the pre-multitenancy tenant",
+            "Correctly funded tenants sharing account ids report balanced with no drift; a misstated balance in any one tenant is reported alone",
+            "Scoped (single-tenant) checks behave exactly as before; all existing tests stay green"
+          ],
+          "test_file": "internal/adapters/postgres/transactions_platform_wide_test.go",
+          "scenario_name": "TestTransactionRepository_ComputedBalances_UnscopedKeepsTwoTenantsSharedAccountIdsApart",
+          "files_to_modify": [
+            "internal/app/ports/ports.go",
+            "internal/adapters/postgres/transactions.go",
+            "internal/adapters/postgres/accounts.go",
+            "internal/app/usecases.go",
+            "internal/app/transfer_coordinator.go",
+            "internal/app/fakes_test.go",
+            "internal/adapters/http/pact_provider_test.go"
+          ],
+          "implementation_notes": "RCA fix direction rca.md §3 steps 1-4, 7-8. Tenant-qualified account identity on the read side; account enumeration takes a tenant scope (unscoped = all tenants, tenant returned per row); legacy-tenant pin removed from VerifyBooks. Drift also gains a tenant field (additive, carried to wire in 01-02). Fakes and pact fake adapt to new port shapes; the scoped fake must still record the tenant it was asked for. Also GREEN: TestVerifyBooks_UnscopedCallChecksEveryTenantNotJustTheLegacyOne, TestProperty_VerifyBooks_UnscopedSharedAccountIdsAcrossTenantsAreNotDrift, TestProperty_VerifyBooks_UnscopedReportsExactlyTheOneAccountWhoseStoredBalanceDrifted. transfer_coordinator.go:540 adapts to the new All signature by passing ScopedToTenant(tenantID); behaviour unchanged. TestProperty_VerifyBooks_TenantScopedCallThreadsTheSameScopeToEveryRead (usecases_test.go:410-434) must stay green; it relies on the scoped fake recording lastAccountsAllTenantID. The Drift TenantID unit assertion (usecases_test.go:539-540) is added by nw-acceptance-designer after 01-01, not by the crafter. Contract shape: pure-function (return-only reads). EntriesFor unscoped out of scope."
+        },
+        {
+          "id": "01-02",
+          "name": "Drift rows name the drifted tenant over HTTP",
+          "criteria": [
+            "Each drift row in the trial-balance response includes the owning tenant's id",
+            "Books balance YES for pre-multitenancy ledger plus a tenant each holding a funded treasury",
+            "Drift in one tenant's treasury is attributed to that tenant, never its same-named namesake",
+            "Drift in one of two ordinary tenants is found and attributed to that tenant alone",
+            "Existing consumer pact still verifies; response change is additive only"
+          ],
+          "test_file": "tests/acceptance/multitenancy/milestone-03b-platform-wide-books-with-shared-account-names.feature",
+          "scenario_name": "Books balance when the pre-multitenancy ledger and a tenant each hold a funded \"treasury\"",
+          "files_to_modify": [
+            "tests/acceptance/multitenancy/milestone-03b-platform-wide-books-with-shared-account-names.feature",
+            "internal/adapters/http/handlers.go",
+            "internal/adapters/http/pact_provider_test.go"
+          ],
+          "implementation_notes": "rca.md §3 step 5. Remove @pending one scenario at a time (tag @fix-trial-balance-tenant-collision): the scenario named above (likely already GREEN after 01-01), \"Drift in a tenant's \"treasury\" is attributed to that tenant, not its namesake in the pre-multitenancy ledger\", \"Drift in one of two ordinary tenants is found and attributed to that tenant alone\". Harness reads drift JSON key tenant_id. The only permitted edit to the feature file is removing @pending; harness files (world.go, steps_multitenancy_test.go, domain_types.go) are already authored and must not be changed. Run: LEDGEROPS_AT_TAGS=\"@fix-trial-balance-tenant-collision\" go test -count=1 ./tests/acceptance/multitenancy. FLAG: pact change is additive; web/console/pacts/console-ledgercore.json is consumer-generated and need not change. Copy libpact_ffi.so to /tmp before testing internal/adapters/http. Run tests in the foreground."
+        }
+      ]
+    }
+  ],
+  "implementation_scope": {
+    "source_directories": [
+      "internal/app",
+      "internal/adapters/postgres",
+      "internal/adapters/http"
+    ],
+    "test_directories": [
+      "internal/app",
+      "internal/adapters/postgres",
+      "internal/adapters/http",
+      "tests/acceptance/multitenancy"
+    ],
+    "excluded": [
+      "EntriesFor unscoped behaviour",
+      "web/console TypeScript"
+    ]
+  },
+  "validation": {
+    "status": "approved",
+    "reviewer": "nw-acceptance-designer-reviewer",
+    "approved_at": "2026-10-16T12:00:00Z"
+  },
+  "reviews": [
+    {
+      "reviewer": "nw-acceptance-designer-reviewer",
+      "date": "2026-10-16",
+      "verdict": "REJECTED",
+      "blocking_issues": [
+        "HIGH: internal/app/transfer_coordinator.go:540 calls Accounts().All(ctx, tenantID); changing All to take a TenantScope breaks compilation unless step 01-01 edits that file"
+      ],
+      "flags": [
+        "MEDIUM: step 01-02 files_to_modify omitted the milestone-03b feature file (@pending removal)",
+        "LOW: step 01-01 notes did not name TestProperty_VerifyBooks_TenantScopedCallThreadsTheSameScopeToEveryRead as must-stay-green",
+        "LOW: step 01-01 notes did not state who adds the Drift TenantID unit assertion"
+      ],
+      "notes": "First attempt."
+    },
+    {
+      "reviewer": "nw-acceptance-designer-reviewer",
+      "date": "2026-10-16",
+      "verdict": "APPROVED",
+      "blocking_issues": [],
+      "flags": [],
+      "notes": "Second attempt. HIGH (transfer_coordinator.go caller), MEDIUM and both LOW findings resolved in the revision."
+    }
+  ]
+}

@@ -2822,6 +2822,12 @@ tenant-scoping behavior (slice 02 for entries, slice 03 for
 verdict/trial-balance) — see § Multitenancy above, Contract-shape table, row
 `TransactionRepository.EntriesFor`/`.TrialBalance`.
 
+*Amendment 2026-10-16 (`fix-trial-balance-tenant-collision`)*: the unscoped
+verification path is no longer legacy-tenant-only. It compares per
+`(tenant_id, account_id)` across every tenant, and each drift row gains an
+additive `tenant_id` field (no-drift responses stay byte-identical). See
+KPI-M4's amendment in `docs/product/kpi-contracts.yaml`.
+
 **Test infrastructure, extended**: `TenantRepository` and `TenantKeyResolver`
 join the "never faked, real PostgreSQL" row above (WS strategy C — isolation
 is a property of the real store's constraint behavior, a fake would model the

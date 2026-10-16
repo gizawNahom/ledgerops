@@ -305,6 +305,19 @@ kpis:
       (feature-delta.md § Wave: DISCUSS / Changed Assumptions). KPI-C1/C2/C3
       remain that feature's own separate self-reported responsibility, not
       duplicated here.
+    amendments:
+      - date: "2026-10-16"
+        approved_by: user
+        feature: fix-trial-balance-tenant-collision
+        text: >
+          Unscoped GET /health/trial-balance and GET /console/verdict drift
+          rows gained one additive field, `tenant_id`, via
+          fix-trial-balance-tenant-collision. On a single-tenant ledger with
+          drift, rows read `"tenant_id":"tnt_legacy_seed"`; the no-drift
+          response stays byte-identical. Reason: an operator must be able to
+          tell which tenant's same-named account drifted. The target above is
+          unchanged for every no-drift response; only the drift-row shape
+          differs, and only by this one field.
     measured:
       date: "2026-09-05"
       result: "the 3 @console-compat scenarios (within the 18) passing, plus the pre-existing tests/acceptance/ledgercore suite restored to a full pass (296.8s) after OPS-13's fix - the regression proof that unscoped OperatorKey calls to all three named endpoints kept working throughout"
