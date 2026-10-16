@@ -172,7 +172,6 @@ first.
 
 **Not yet**
 
-- **No license file** — until one is added, the code can't legally be reused
 - **One currency** — the API accepts USD amounts only
 - **No holds** — no reserve-then-capture or void flow
 - **No transactions with more than two legs** — e.g. paying a seller and a
@@ -217,8 +216,8 @@ investigation is in the
 
 ## Roadmap
 
-1. **Adoptable** — a license, versioned releases with a published container
-   image, an OpenAPI spec, and metadata on transfers.
+1. **Adoptable** — versioned releases with a published container image, an
+   OpenAPI spec, and metadata on transfers.
 2. **Wallet essentials** — holds (reserve, capture, void), transactions with
    more than two legs, and webhooks driven by an outbox so only committed
    postings are announced.
@@ -321,3 +320,7 @@ tests first, then implementation. [`CLAUDE.md`](CLAUDE.md) holds the working
 conventions. `docs/feature/` and `docs/evolution/` hold the design and
 delivery notes from that process; they're working papers, not user
 documentation.
+
+## License
+
+Apache License 2.0. See [`LICENSE`](LICENSE).
