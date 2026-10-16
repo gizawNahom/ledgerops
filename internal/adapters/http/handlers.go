@@ -807,9 +807,10 @@ func trialBalanceScopeFromQuery(r *http.Request) ports.TenantScope {
 	return ports.ScopedToTenant(tenantID)
 }
 
-// driftWire is one drifted account as the operator reads it: named account,
-// both balances, and the delta — never detection alone (KPI-4).
+// driftWire is one drifted account as the operator reads it: owning tenant,
+// named account, both balances, and the delta — never detection alone (KPI-4).
 type driftWire struct {
+	TenantID  string `json:"tenant_id"`
 	AccountID string `json:"account_id"`
 	Stored    string `json:"stored"`
 	Computed  string `json:"computed"`
@@ -848,6 +849,7 @@ func verdictBodyFor(report app.BooksReport) verdictBody {
 	drifted := make([]driftWire, 0, len(report.Drifted))
 	for _, d := range report.Drifted {
 		drifted = append(drifted, driftWire{
+			TenantID:  d.TenantID,
 			AccountID: d.AccountID,
 			Stored:    formatMoney(d.Stored),
 			Computed:  formatMoney(d.Computed),

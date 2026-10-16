@@ -166,7 +166,10 @@ func ParseVerdict(text string) Verdict { return ledgercore.ParseVerdict(text) }
 // reuse line at "has real logic worth not duplicating"; a plain data shape
 // does not meet that bar the way Money's parser does).
 type DriftRow struct {
-	Account  AccountName
+	Account AccountName
+	// TenantID is the tenant the drifted account belongs to, as the platform-wide
+	// listing names it (empty when the response carries no tenant for the row).
+	TenantID string
 	Stored   Money
 	Computed Money
 	Delta    Money

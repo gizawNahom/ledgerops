@@ -33,6 +33,8 @@ package multitenancy
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -168,11 +170,59 @@ func (w *World) serve(ctx context.Context) error {
 		OperatorKey:       w.adminKey,
 		Clock:             time.Now,
 		IDGenerator:       func() string { return uuidLike() },
-		TenantKeyResolver: postgres.NewTenantKeyResolver(w.appDSN),
+		TenantKeyResolver: legacyLedgerResolver(postgres.NewTenantKeyResolver(w.appDSN)),
 	})
 	w.server = httptest.NewServer(handler)
 	w.client = w.server.Client()
 	return nil
+}
+
+// The pre-multitenancy ledger is the sentinel tenant migration 0003 backfills
+// every earlier row to (tnt_legacy_seed). It holds no provisioned credential,
+// so a scenario that needs it to operate through the driving ports presents a
+// fixed key the suite's resolver maps to it -- the same device ledgercore's
+// own world uses (legacySeedTenantResolver) and cmd/api's demo resolver
+// mirrors; the application role cannot insert a credential for it.
+const (
+	legacyLedgerTenantID = "tnt_legacy_seed"
+	legacyLedgerKey      = "test-legacy-ledger-key"
+)
+
+func legacyLedgerResolver(next ports.TenantKeyResolver) ports.TenantKeyResolver {
+	sum := sha256.Sum256([]byte(legacyLedgerKey))
+	legacyHash := hex.EncodeToString(sum[:])
+	return func(ctx context.Context, credentialHash string) (string, bool, error) {
+		if credentialHash == legacyHash {
+			return legacyLedgerTenantID, true, nil
+		}
+		return next(ctx, credentialHash)
+	}
+}
+
+// GivenLegacyLedgerInUse makes the pre-multitenancy ledger addressable under
+// a scenario-facing name, exactly as a provisioned tenant is: later steps that
+// open accounts or move money "for tenant X" then reach tnt_legacy_seed.
+func (w *World) GivenLegacyLedgerInUse(ctx context.Context, name TenantName) error {
+	if err := w.EnsureStarted(ctx); err != nil {
+		return err
+	}
+	w.tenants[name] = tenantRecord{ID: legacyLedgerTenantID, Key: legacyLedgerKey}
+	return nil
+}
+
+// GivenTenantHoldsFundedWallet is the common precondition of the platform-wide
+// books scenarios: the tenant opens a system account and a wallet, and the
+// wallet is funded from the system account -- three driving-port calls, one
+// domain sentence. Reusing the same two account names across tenants is the
+// point (I9: account identity is per tenant).
+func (w *World) GivenTenantHoldsFundedWallet(ctx context.Context, tenant TenantName, wallet AccountName, amount Money, system AccountName) error {
+	if err := w.OpenAccount(ctx, tenant, system, System); err != nil {
+		return err
+	}
+	if err := w.OpenAccount(ctx, tenant, wallet, Wallet); err != nil {
+		return err
+	}
+	return w.FundAccount(ctx, tenant, wallet, amount, system)
 }
 
 // EnsureStarted brings the store and server up if a scenario's first Given
@@ -643,6 +693,18 @@ func (w *World) CorruptStoredBalance(ctx context.Context, account AccountName, b
 	})
 }
 
+// CorruptTenantStoredBalance is CorruptStoredBalance for one NAMED tenant's
+// account. CorruptStoredBalance alone addresses an account by id, and with ids
+// shared between tenants (I9) that rewrites every tenant's namesake; this one
+// qualifies the alteration by tenant so a scenario can misstate exactly one.
+func (w *World) CorruptTenantStoredBalance(ctx context.Context, tenant TenantName, account AccountName, by Money) error {
+	return postgres.AttemptOutOfBandChange(ctx, w.privilegedDSN, "alter_stored_balance", map[string]any{
+		"account_id": string(account),
+		"tenant_id":  w.tenants[tenant].ID,
+		"delta":      int64(by),
+	})
+}
+
 // ActAs selects which credential subsequent calls present, when a scenario
 // needs to change identity mid-flow without naming a specific tenant.
 func (w *World) ActAs(caller Caller) { w.actingAs = caller }
@@ -958,6 +1020,31 @@ func (w *World) AssertDriftNames(account AccountName) error {
 	return fmt.Errorf("expected the drift listing to name %q, got %v (raw: %s)", account, w.lastBooks.Drifted, w.lastBooks.Raw)
 }
 
+// AssertNoDrift states the platform-wide listing of drifted accounts is empty.
+func (w *World) AssertNoDrift() error {
+	if len(w.lastBooks.Drifted) != 0 {
+		return fmt.Errorf("expected no drifted accounts, got %v (raw: %s)", w.lastBooks.Drifted, w.lastBooks.Raw)
+	}
+	return nil
+}
+
+// AssertDriftNamesOnly states the drift listing holds exactly one row, and that
+// row is this tenant's account of this name -- not a namesake of another
+// tenant, and nothing else.
+func (w *World) AssertDriftNamesOnly(account AccountName, tenant TenantName) error {
+	want := w.tenants[tenant].ID
+	if len(w.lastBooks.Drifted) != 1 {
+		return fmt.Errorf("expected the drift listing to name only %q of tenant %q (%s), got %d rows %v (raw: %s)",
+			account, tenant, want, len(w.lastBooks.Drifted), w.lastBooks.Drifted, w.lastBooks.Raw)
+	}
+	row := w.lastBooks.Drifted[0]
+	if row.Account != account || row.TenantID != want {
+		return fmt.Errorf("expected the drift listing to name %q of tenant %q (%s), got %q of tenant %q (raw: %s)",
+			account, tenant, want, row.Account, row.TenantID, w.lastBooks.Raw)
+	}
+	return nil
+}
+
 func (w *World) AssertNoAccountOf(tenant TenantName) error {
 	for account, owner := range w.lastAccountTenant {
 		if owner != tenant {
@@ -1004,7 +1091,8 @@ func decodeBooksReport(status int, raw []byte, tenantScoped bool, tenantID strin
 				continue
 			}
 			account, _ := row["account_id"].(string)
-			report.Drifted = append(report.Drifted, DriftRow{Account: AccountName(account)})
+			tenantID, _ := row["tenant_id"].(string)
+			report.Drifted = append(report.Drifted, DriftRow{Account: AccountName(account), TenantID: tenantID})
 		}
 	}
 	return report

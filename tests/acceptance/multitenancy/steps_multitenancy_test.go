@@ -53,6 +53,20 @@ func RegisterSteps(ctx *godog.ScenarioContext, w *World) {
 			return w.CorruptStoredBalance(c, AccountName(name), ParseMoney(amount))
 		})
 
+	ctx.Given(`^the pre-multitenancy ledger is in use as tenant "([^"]*)"$`, func(c context.Context, name string) error {
+		return w.GivenLegacyLedgerInUse(c, TenantName(name))
+	})
+
+	ctx.Given(`^tenant "([^"]*)" holds a funded wallet "([^"]*)" with (\S+) drawn from its system account "([^"]*)"$`,
+		func(c context.Context, tenant, wallet, amount, system string) error {
+			return w.GivenTenantHoldsFundedWallet(c, TenantName(tenant), AccountName(wallet), ParseMoney(amount), AccountName(system))
+		})
+
+	ctx.Given(`^the stored balance of tenant "([^"]*)"'s "([^"]*)" is altered by (\S+) out of band$`,
+		func(c context.Context, tenant, name, amount string) error {
+			return w.CorruptTenantStoredBalance(c, TenantName(tenant), AccountName(name), ParseMoney(amount))
+		})
+
 	// --- When: provisioning (slice 01) --------------------------------------
 
 	ctx.When(`^the operator provisions (?:a|another) tenant named "([^"]*)"$`, func(c context.Context, name string) error {
@@ -197,6 +211,14 @@ func RegisterSteps(ctx *godog.ScenarioContext, w *World) {
 
 	ctx.Then(`^the response names "([^"]*)" in the drift listing$`, func(account string) error {
 		return w.AssertDriftNames(AccountName(account))
+	})
+
+	ctx.Then(`^no account is listed as drifted$`, func() error {
+		return w.AssertNoDrift()
+	})
+
+	ctx.Then(`^the drift listing names only "([^"]*)" of tenant "([^"]*)"$`, func(account, tenant string) error {
+		return w.AssertDriftNamesOnly(AccountName(account), TenantName(tenant))
 	})
 
 	ctx.Then(`^no account belonging to tenant "([^"]*)" appears in the response$`, func(name string) error {
