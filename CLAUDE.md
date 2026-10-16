@@ -1,6 +1,6 @@
 # ledgerops
 
-Double-entry ledger service. Go 1.23+ · PostgreSQL 16 · TypeScript SPA console.
+Double-entry ledger service. Go 1.25 · PostgreSQL 16 · TypeScript SPA console.
 Modular monolith, ports-and-adapters, pure domain core.
 
 Architecture SSOT: `docs/product/architecture/brief.md`

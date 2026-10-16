@@ -257,6 +257,22 @@ jobs:
         if: always()
         run: echo "::notice title=tenant-isolation-gates::cross-tenant refusal and per-tenant trial-balance leak-freedom asserted by the multitenancy acceptance suite (18/18 scenarios, exit code above)"
 
+  inter-tenant-transfer:
+    needs: [integration]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ env.GO_VERSION_FILE }}
+          cache: true
+      # The inter-tenant-transfer acceptance suite: tenant-pair authorization,
+      # transfers to a named counterparty, retry of a stalled leg, reversal
+      # once the retry budget is exhausted, and per-party trace isolation.
+      # Starts its own PostgreSQL via testcontainers, like the suites above.
+      - name: Run inter-tenant-transfer acceptance suite
+        run: go test ./tests/acceptance/intertenanttransfer/... -v -count=1
+
   console-compat:
     needs: [integration]
     runs-on: ubuntu-latest
