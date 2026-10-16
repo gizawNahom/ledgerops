@@ -91,6 +91,7 @@ describe("apiClient -- consumer-driven Pact contract with the ledger-core backen
           entry_count: like(6),
           elapsed_ms: like(4),
           drifted: eachLike({
+            tenant_id: like("tnt_pact"),
             account_id: "acct-42",
             stored: "5.00",
             computed: "4.50",
@@ -136,6 +137,47 @@ describe("apiClient -- consumer-driven Pact contract with the ledger-core backen
       // Same rationale as above -- apiClient.ts doesn't unwrap the envelope
       // yet; only the request-matching outcome matters here.
       await client.fetchEntries("alice-demo").catch(() => undefined);
+    });
+  });
+
+  // fix-unscoped-entries-tenant-merge: the drift drill-down names the tenant
+  // (?tenant_id=) because two tenants may each hold the same account id.
+  //
+  // PROVIDER STATE the Go provider test (internal/adapters/http/
+  // pact_provider_test.go) must implement:
+  //   "tenant tnt_acme holds account treasury with one entry"
+  // i.e. a tenant whose id is exactly "tnt_acme" holds an account "treasury"
+  // that has one entry; the operator-key read narrowed to that tenant answers
+  // 200 with that entry, each entry naming tenant_id "tnt_acme".
+  it("GET /accounts/{id}/entries?tenant_id= -- returns the named tenant's entries, each naming its tenant", async () => {
+    provider
+      .given("tenant tnt_acme holds account treasury with one entry")
+      .uponReceiving("a request for treasury's entries narrowed to tenant tnt_acme")
+      .withRequest({
+        method: "GET",
+        path: "/accounts/treasury/entries",
+        query: { tenant_id: "tnt_acme" },
+        headers: { Authorization: like("Bearer a-valid-operator-key") },
+      })
+      .willRespondWith({
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+        body: {
+          entries: eachLike({
+            tenant_id: "tnt_acme",
+            amount: like("-12.34"),
+            counterparty: like("bob-demo"),
+            recorded_at: like("2026-08-20T10:00:00Z"),
+            running_balance: like("-12.34"),
+          }),
+        },
+      });
+
+    await provider.executeTest(async (mockServer) => {
+      routeToMockServer(mockServer.url, originalFetch);
+      const client = createApiClient({ keyStorage: createKeyStorage() });
+      // As above: only the request-matching outcome matters for the contract.
+      await client.fetchEntries("treasury", "tnt_acme").catch(() => undefined);
     });
   });
 });

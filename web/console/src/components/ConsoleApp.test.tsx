@@ -20,7 +20,7 @@
 // state from the wrong assumption, which is exactly what this scenario
 // exercises.
 import { describe, it, expect, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ConsoleApp } from "./ConsoleApp";
 import type { KeyStorage } from "../keyStorage";
@@ -49,7 +49,7 @@ function fakeApiClient(): ApiClient {
   };
 }
 
-const driftedAccount: DriftRow = { accountId: "acc-42", stored: 100, computed: 90, delta: -10 };
+const driftedAccount: DriftRow = { tenantId: "tnt_legacy_seed", accountId: "acc-42", stored: 100, computed: 90, delta: -10 };
 
 describe("ConsoleApp -- the console decides what the operator sees first", () => {
   it("shows the key-entry form when no operator key has ever been stored", () => {
@@ -107,7 +107,7 @@ describe("ConsoleApp -- the console decides what the operator sees first", () =>
     const row = await screen.findByText(driftedAccount.accountId);
     await user.click(row);
 
-    expect(client.fetchEntries).toHaveBeenCalledWith(driftedAccount.accountId);
+    expect(client.fetchEntries).toHaveBeenCalledWith(driftedAccount.accountId, driftedAccount.tenantId);
     expect(await screen.findByText(/vendor-x/i)).toBeInTheDocument();
   });
 
@@ -130,5 +130,76 @@ describe("ConsoleApp -- the console decides what the operator sees first", () =>
     render(<ConsoleApp keyStorage={fakeKeyStorage("a-key-the-api-will-reject")} apiClient={rejectingClient} />);
 
     expect(await screen.findByText(/key rejected/i)).toBeInTheDocument();
+  });
+
+  // --- fix-unscoped-entries-tenant-merge: two tenants each hold "treasury" and
+  // both drifted. The drill-down must fetch the selected tenant's entries and
+  // render exactly what the server served -- no client-side filtering, no
+  // client-side recomputation of running balances (US-3). --------------------
+
+  const acmeTreasury: DriftRow = { tenantId: "tnt_acme", accountId: "treasury", stored: -100, computed: -105, delta: -5 };
+  const beaconTreasury: DriftRow = { tenantId: "tnt_beacon", accountId: "treasury", stored: -40, computed: -47, delta: -7 };
+  const acmeTrail = [
+    { amount: -100, counterparty: "vendor-acme-1", recordedAt: "2026-08-01", runningBalance: -100 },
+    { amount: -25, counterparty: "vendor-acme-2", recordedAt: "2026-08-02", runningBalance: -125 },
+  ];
+  const beaconTrail = [{ amount: -40, counterparty: "vendor-beacon", recordedAt: "2026-08-01", runningBalance: -40 }];
+
+  function twoTenantTreasuryClient(fetchEntries: ApiClient["fetchEntries"]): ApiClient {
+    return {
+      fetchVerdict: vi.fn().mockResolvedValue({
+        verdict: "NO",
+        imbalanceMinor: 12,
+        entryCount: 3,
+        elapsedMs: 1,
+        drifted: [acmeTreasury, beaconTreasury],
+      }),
+      fetchEntries,
+    };
+  }
+
+  it("drilling into one tenant's drifted \"treasury\" fetches that tenant's entries and shows them as served", async () => {
+    const user = userEvent.setup();
+    const fetchEntries = vi.fn(async (_accountId: string, tenantId?: string) =>
+      tenantId === "tnt_beacon" ? beaconTrail : acmeTrail
+    );
+    render(<ConsoleApp keyStorage={fakeKeyStorage("a-stored-key")} apiClient={twoTenantTreasuryClient(fetchEntries)} />);
+
+    await user.click(await screen.findByText("tnt_beacon"));
+
+    expect(await screen.findByText(/vendor-beacon/i)).toBeInTheDocument();
+    expect(fetchEntries).toHaveBeenCalledTimes(1);
+    expect(fetchEntries).toHaveBeenCalledWith("treasury", "tnt_beacon");
+    expect(screen.queryByText(/vendor-acme/i)).not.toBeInTheDocument();
+    expect(screen.getAllByText("-40").length).toBeGreaterThan(0);
+    expect(screen.queryByText("-125")).not.toBeInTheDocument();
+  });
+
+  it("moving from one tenant's \"treasury\" to its namesake shows only the namesake's entries, even if the first answer arrives late", async () => {
+    const user = userEvent.setup();
+    let releaseAcme: (rows: typeof acmeTrail) => void = () => undefined;
+    const fetchEntries = vi.fn((_accountId: string, tenantId?: string) =>
+      tenantId === "tnt_acme"
+        ? new Promise<typeof acmeTrail>((resolve) => {
+            releaseAcme = resolve;
+          })
+        : Promise.resolve(beaconTrail)
+    );
+    render(<ConsoleApp keyStorage={fakeKeyStorage("a-stored-key")} apiClient={twoTenantTreasuryClient(fetchEntries)} />);
+
+    await user.click(await screen.findByText("tnt_acme"));
+    await user.click(await screen.findByText("tnt_beacon"));
+    expect(await screen.findByText(/vendor-beacon/i)).toBeInTheDocument();
+
+    await act(async () => {
+      releaseAcme(acmeTrail);
+    });
+
+    expect(screen.getByText(/vendor-beacon/i)).toBeInTheDocument();
+    expect(screen.queryByText(/vendor-acme/i)).not.toBeInTheDocument();
+    expect(fetchEntries.mock.calls).toEqual([
+      ["treasury", "tnt_acme"],
+      ["treasury", "tnt_beacon"],
+    ]);
   });
 });

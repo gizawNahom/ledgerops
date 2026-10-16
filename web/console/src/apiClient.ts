@@ -16,7 +16,7 @@ import type { KeyStorage } from "./keyStorage";
 
 export interface ApiClient {
   fetchVerdict(): Promise<VerdictResponse>;
-  fetchEntries(accountId: string): Promise<EntryRow[]>;
+  fetchEntries(accountId: string, tenantId?: string): Promise<EntryRow[]>;
 }
 
 export interface ApiClientDeps {
@@ -60,8 +60,8 @@ function verdictStatusFromWire(value: unknown): VerdictStatus | undefined {
   return undefined;
 }
 
-// parseDriftRow -- driftWire (handlers.go:302-307) carries a snake_case
-// account_id and decimal amounts serialized as strings. Validates the wire
+// parseDriftRow -- driftWire (handlers.go:302-307) carries the owning
+// tenant_id, a snake_case account_id and decimal amounts serialized as strings. Validates the wire
 // shape, then constructs the domain DriftRow with accountId mapped from
 // account_id and stored/computed/delta converted to Number.
 function parseDriftRow(raw: unknown): DriftRow {
@@ -70,6 +70,7 @@ function parseDriftRow(raw: unknown): DriftRow {
   }
   const candidate = raw as Record<string, unknown>;
   if (
+    typeof candidate.tenant_id !== "string" ||
     typeof candidate.account_id !== "string" ||
     typeof candidate.stored !== "string" ||
     typeof candidate.computed !== "string" ||
@@ -78,6 +79,7 @@ function parseDriftRow(raw: unknown): DriftRow {
     throw new FetchFailedError("malformed drift row");
   }
   return {
+    tenantId: candidate.tenant_id,
     accountId: candidate.account_id,
     stored: Number(candidate.stored),
     computed: Number(candidate.computed),
@@ -199,14 +201,21 @@ async function performGet(keyStorage: KeyStorage, path: string): Promise<unknown
   return response.json();
 }
 
+// entriesPath -- the tenant narrowing rides in the query only when a tenant
+// is named, URL-encoded so the id can never alter the query around it.
+function entriesPath(accountId: string, tenantId: string | undefined): string {
+  const path = `/accounts/${accountId}/entries`;
+  return tenantId === undefined ? path : `${path}?tenant_id=${encodeURIComponent(tenantId)}`;
+}
+
 export function createApiClient(deps: ApiClientDeps): ApiClient {
   return {
     async fetchVerdict(): Promise<VerdictResponse> {
       const body = await performGet(deps.keyStorage, "/console/verdict");
       return parseVerdictWireShape(body);
     },
-    async fetchEntries(accountId: string): Promise<EntryRow[]> {
-      const body = await performGet(deps.keyStorage, `/accounts/${accountId}/entries`);
+    async fetchEntries(accountId: string, tenantId?: string): Promise<EntryRow[]> {
+      const body = await performGet(deps.keyStorage, entriesPath(accountId, tenantId));
       return parseEntriesWireShape(body);
     },
   };

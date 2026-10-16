@@ -5,7 +5,7 @@ import type { DriftRow } from "../testing/domainTypes";
 
 export interface DriftTableProps {
   drifted: DriftRow[];
-  onSelectAccount: (accountId: string) => void;
+  onSelectAccount: (accountId: string, tenantId: string) => void;
 }
 
 function DriftTableRow({
@@ -13,13 +13,14 @@ function DriftTableRow({
   onSelectAccount,
 }: {
   row: DriftRow;
-  onSelectAccount: (accountId: string) => void;
+  onSelectAccount: (accountId: string, tenantId: string) => void;
 }): JSX.Element {
   return (
     <tr
-      onClick={() => onSelectAccount(row.accountId)}
+      onClick={() => onSelectAccount(row.accountId, row.tenantId)}
       className="cursor-pointer transition-colors last:border-b-0 [&:not(:last-child)]:border-b [&:not(:last-child)]:border-line hover:bg-accent-soft"
     >
+      <td className="whitespace-nowrap px-4 py-3 font-mono text-ink">{row.tenantId}</td>
       <td className="whitespace-nowrap px-4 py-3 font-mono text-ink">{row.accountId}</td>
       <td className="whitespace-nowrap px-4 py-3 text-right font-mono tabular-nums text-ink">
         {row.stored}
@@ -50,6 +51,9 @@ export function DriftTable({ drifted, onSelectAccount }: DriftTableProps): JSX.E
         <thead>
           <tr className="border-b border-line bg-surface-sunken">
             <th className="whitespace-nowrap px-4 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wide text-ink-faint">
+              Tenant
+            </th>
+            <th className="whitespace-nowrap px-4 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wide text-ink-faint">
               Account ID
             </th>
             <th className="whitespace-nowrap px-4 py-2.5 text-right text-[11px] font-semibold uppercase tracking-wide text-ink-faint">
@@ -65,7 +69,7 @@ export function DriftTable({ drifted, onSelectAccount }: DriftTableProps): JSX.E
         </thead>
         <tbody>
           {drifted.map((row) => (
-            <DriftTableRow key={row.accountId} row={row} onSelectAccount={onSelectAccount} />
+            <DriftTableRow key={`${row.tenantId}/${row.accountId}`} row={row} onSelectAccount={onSelectAccount} />
           ))}
         </tbody>
       </table>

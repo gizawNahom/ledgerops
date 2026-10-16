@@ -6,13 +6,14 @@
 import type { EntryRow, FetchPhase } from "../testing/domainTypes";
 
 export interface EntryTraceProps {
+  tenantId: string;
   accountId: string;
   phase: FetchPhase;
   entries: EntryRow[] | null;
 }
 
-function entriesFetchUrl(accountId: string): string {
-  return `GET /accounts/${accountId}/entries`;
+function entriesFetchUrl(accountId: string, tenantId: string): string {
+  return `GET /accounts/${accountId}/entries?tenant_id=${encodeURIComponent(tenantId)}`;
 }
 
 function formatAmount(amount: number): string {
@@ -39,7 +40,7 @@ function EntryTraceRow({ entry }: { entry: EntryRow }): JSX.Element {
   );
 }
 
-export function EntryTrace({ accountId, phase, entries }: EntryTraceProps): JSX.Element {
+export function EntryTrace({ tenantId, accountId, phase, entries }: EntryTraceProps): JSX.Element {
   if (phase === "loading") {
     return (
       <div className="flex items-center gap-2.5 rounded-lg border border-line bg-surface-sunken px-4 py-6 text-sm text-ink-muted">
@@ -52,13 +53,16 @@ export function EntryTrace({ accountId, phase, entries }: EntryTraceProps): JSX.
   if (phase === "error" || entries === null) {
     return (
       <p className="m-0 rounded-lg border border-bad-border bg-bad-soft px-4 py-3 text-sm text-bad">
-        Could not load entries. Fallback: {entriesFetchUrl(accountId)}
+        Could not load entries. Fallback: {entriesFetchUrl(accountId, tenantId)}
       </p>
     );
   }
 
   return (
     <div className="overflow-x-auto rounded-lg border border-line">
+      <p className="m-0 px-4 py-2.5 text-xs text-ink-faint">
+        Tenant: <span className="font-mono text-ink">{tenantId}</span>
+      </p>
       <table className="w-full border-collapse text-sm">
         <thead>
           <tr className="border-b border-line bg-surface-sunken">

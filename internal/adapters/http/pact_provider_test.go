@@ -196,6 +196,12 @@ func TestPactProvider_HonorsConsoleContract(t *testing.T) {
 				}
 				return nil, seedAccountWithOneEntry(context.Background(), server.Client(), server.URL, store)
 			},
+			"tenant tnt_acme holds account treasury with one entry": func(setup bool, _ models.ProviderState) (models.ProviderStateResponse, error) {
+				if !setup {
+					return nil, nil
+				}
+				return nil, seedTenantTreasuryWithOneEntry(context.Background(), server.Client(), server.URL, store)
+			},
 			"the books are out of balance with one drifted account": func(setup bool, _ models.ProviderState) (models.ProviderStateResponse, error) {
 				if !setup {
 					return nil, nil
@@ -232,6 +238,33 @@ func seedAccountWithOneEntry(ctx context.Context, client httpDoer, baseURL strin
 		return err
 	}
 	return nil
+}
+
+// seedTenantTreasuryWithOneEntry registers the tenant whose id is exactly
+// "tnt_acme" (the id the consumer pins in ?tenant_id=), then, as that tenant's
+// own key, opens treasury and a funding account and posts one transfer out of
+// treasury -- so the operator-key read narrowed to tnt_acme has one entry to
+// answer with, each naming tenant_id "tnt_acme".
+func seedTenantTreasuryWithOneEntry(ctx context.Context, client httpDoer, baseURL string, store *pactFakeStore) error {
+	const (
+		acmeTenantID   = "tnt_acme"
+		acmeCredential = "pact-tnt-acme-key"
+	)
+	acme, err := domain.NewTenant(acmeTenantID, "pact-seed-tnt-acme", acmeCredential)
+	if err != nil {
+		return err
+	}
+	store.tenants[acme.Name()] = acme
+	if err := callJSONAs(ctx, client, baseURL, "POST", "/accounts", acmeCredential, "",
+		map[string]any{"account_id": "treasury", "type": "system"}); err != nil {
+		return err
+	}
+	if err := callJSONAs(ctx, client, baseURL, "POST", "/accounts", acmeCredential, "",
+		map[string]any{"account_id": "bob-demo", "type": "wallet"}); err != nil {
+		return err
+	}
+	return callJSONAs(ctx, client, baseURL, "POST", "/transfers", acmeCredential, "seed-tnt-acme-treasury-entry",
+		map[string]any{"from": "treasury", "to": "bob-demo", "amount": "12.34"})
 }
 
 // seedOneDriftedAccount opens an account through the real front door, then

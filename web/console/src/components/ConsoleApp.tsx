@@ -21,6 +21,7 @@ export interface ConsoleAppProps {
 // the fetch-in-progress/complete state for its entries. Absent when no
 // account has been selected yet (illegal to render EntryTrace without one).
 type EntryTraceSelection = {
+  tenantId: string;
   accountId: string;
   phase: FetchPhase;
   entries: EntryRow[] | null;
@@ -45,6 +46,17 @@ type ConsoleState =
 
 function initialState(keyStorage: KeyStorage): ConsoleState {
   return keyStorage.get() ? { kind: "checking" } : { kind: "no-key" };
+}
+
+// isSelected -- an entries answer is current only while the very (tenant,
+// account) it was fetched for is still the selection; namesake accounts of
+// other tenants must not receive it.
+function isSelected(state: ConsoleState, tenantId: string, accountId: string): boolean {
+  return (
+    state.kind === "showing-verdict" &&
+    state.selection?.tenantId === tenantId &&
+    state.selection.accountId === accountId
+  );
 }
 
 export function ConsoleApp({ keyStorage, apiClient }: ConsoleAppProps): JSX.Element {
@@ -86,23 +98,23 @@ export function ConsoleApp({ keyStorage, apiClient }: ConsoleAppProps): JSX.Elem
     if (state.kind !== "showing-verdict" || state.selection?.phase !== "loading") {
       return;
     }
-    const { accountId } = state.selection;
+    const { tenantId, accountId } = state.selection;
     let cancelled = false;
     apiClient
-      .fetchEntries(accountId)
+      .fetchEntries(accountId, tenantId)
       .then((entries) => {
         if (cancelled) return;
         setState((current) =>
-          current.kind === "showing-verdict" && current.selection?.accountId === accountId
-            ? { ...current, selection: { accountId, phase: "loaded", entries } }
+          isSelected(current, tenantId, accountId)
+            ? { ...current, selection: { tenantId, accountId, phase: "loaded", entries } }
             : current
         );
       })
       .catch(() => {
         if (cancelled) return;
         setState((current) =>
-          current.kind === "showing-verdict" && current.selection?.accountId === accountId
-            ? { ...current, selection: { accountId, phase: "error", entries: null } }
+          isSelected(current, tenantId, accountId)
+            ? { ...current, selection: { tenantId, accountId, phase: "error", entries: null } }
             : current
         );
       });
@@ -116,10 +128,10 @@ export function ConsoleApp({ keyStorage, apiClient }: ConsoleAppProps): JSX.Elem
     setState({ kind: "checking" });
   }
 
-  function selectAccount(accountId: string): void {
+  function selectAccount(accountId: string, tenantId: string): void {
     setState((current) =>
       current.kind === "showing-verdict"
-        ? { ...current, selection: { accountId, phase: "loading", entries: null } }
+        ? { ...current, selection: { tenantId, accountId, phase: "loading", entries: null } }
         : current
     );
   }
@@ -164,6 +176,7 @@ export function ConsoleApp({ keyStorage, apiClient }: ConsoleAppProps): JSX.Elem
                 Entry trace
               </h2>
               <EntryTrace
+                tenantId={state.selection.tenantId}
                 accountId={state.selection.accountId}
                 phase={state.selection.phase}
                 entries={state.selection.entries}

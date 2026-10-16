@@ -92,7 +92,8 @@
               "account_id": "acct-42",
               "computed": "4.50",
               "delta": "0.50",
-              "stored": "5.00"
+              "stored": "5.00",
+              "tenant_id": "tnt_pact"
             }
           ],
           "elapsed_ms": 4,
@@ -114,6 +115,14 @@
                 }
               ]
             },
+            "$.drifted[*].tenant_id": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
             "$.elapsed_ms": {
               "combine": "AND",
               "matchers": [
@@ -131,6 +140,100 @@
               ]
             },
             "$.imbalance_minor": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            }
+          }
+        },
+        "status": 200
+      }
+    },
+    {
+      "description": "a request for treasury's entries narrowed to tenant tnt_acme",
+      "providerStates": [
+        {
+          "name": "tenant tnt_acme holds account treasury with one entry"
+        }
+      ],
+      "request": {
+        "headers": {
+          "Authorization": "Bearer a-valid-operator-key"
+        },
+        "matchingRules": {
+          "header": {
+            "Authorization": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            }
+          }
+        },
+        "method": "GET",
+        "path": "/accounts/treasury/entries",
+        "query": {
+          "tenant_id": [
+            "tnt_acme"
+          ]
+        }
+      },
+      "response": {
+        "body": {
+          "entries": [
+            {
+              "amount": "-12.34",
+              "counterparty": "bob-demo",
+              "recorded_at": "2026-08-20T10:00:00Z",
+              "running_balance": "-12.34",
+              "tenant_id": "tnt_acme"
+            }
+          ]
+        },
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "matchingRules": {
+          "body": {
+            "$.entries": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type",
+                  "min": 1
+                }
+              ]
+            },
+            "$.entries[*].amount": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.entries[*].counterparty": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.entries[*].recorded_at": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.entries[*].running_balance": {
               "combine": "AND",
               "matchers": [
                 {

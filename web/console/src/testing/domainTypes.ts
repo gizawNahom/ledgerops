@@ -7,7 +7,10 @@
 
 export type VerdictStatus = "YES" | "NO";
 
+// A drifted account is identified by (tenantId, accountId): account ids are
+// only unique within a tenant.
 export interface DriftRow {
+  tenantId: string;
   accountId: string;
   stored: number;
   computed: number;

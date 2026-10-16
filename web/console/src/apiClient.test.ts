@@ -38,7 +38,12 @@ function fakeDriftedRowWireShape() {
   // Verbatim drifted[] row shape from the real backend (confirmed-mismatch
   // table): account_id is snake_case; stored/computed/delta are decimal
   // strings, not numbers.
+  //
+  // `tenant_id` is the owning tenant the server has named on every drift row
+  // since fix-trial-balance-tenant-collision: account ids are only unique
+  // within a tenant, so the row is identified by (tenant_id, account_id).
   return {
+    tenant_id: "tnt_legacy_seed",
     account_id: "acct-42",
     stored: "5.00",
     computed: "4.50",
@@ -124,8 +129,55 @@ describe("apiClient -- the operator's browser asks the API whether the books bal
 
     expect(result.verdict).toBe("NO");
     expect(result.drifted).toEqual([
-      { accountId: "acct-42", stored: 5.0, computed: 4.5, delta: 0.5 },
+      { tenantId: "tnt_legacy_seed", accountId: "acct-42", stored: 5.0, computed: 4.5, delta: 0.5 },
     ]);
+  });
+
+  it("@gap fetchVerdict keeps two drifted rows that share an account id apart by the tenant each names (fix-unscoped-entries-tenant-merge)", async () => {
+    const acmeTreasury = { ...fakeDriftedRowWireShape(), tenant_id: "tnt_acme", account_id: "treasury" };
+    const beaconTreasury = { ...fakeDriftedRowWireShape(), tenant_id: "tnt_beacon", account_id: "treasury" };
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => fakeVerdictWireShape({ verdict: "NO", drifted: [acmeTreasury, beaconTreasury] }),
+    }) as unknown as typeof fetch;
+
+    const client = createApiClient({ keyStorage: createKeyStorage() });
+    const result = await client.fetchVerdict();
+
+    expect(result.drifted.map((row) => [row.tenantId, row.accountId])).toEqual([
+      ["tnt_acme", "treasury"],
+      ["tnt_beacon", "treasury"],
+    ]);
+  });
+
+  it("@gap @property a drifted row that does not name its tenant as a string yields a typed failure, never a row the drill-down cannot qualify (C6a)", async () => {
+    const withoutTenant = (value: unknown) => {
+      const row: Record<string, unknown> = { ...fakeDriftedRowWireShape() };
+      if (value === undefined) {
+        delete row.tenant_id;
+      } else {
+        row.tenant_id = value;
+      }
+      return row;
+    };
+
+    await fc.assert(
+      fc.asyncProperty(
+        fc.oneof(fc.constant(undefined), fc.integer(), fc.boolean(), fc.constant(null)),
+        async (badTenant) => {
+          globalThis.fetch = vi.fn().mockResolvedValue({
+            ok: true,
+            status: 200,
+            json: async () => fakeVerdictWireShape({ verdict: "NO", drifted: [withoutTenant(badTenant)] }),
+          }) as unknown as typeof fetch;
+
+          const client = createApiClient({ keyStorage: createKeyStorage() });
+          await expect(client.fetchVerdict()).rejects.toBeInstanceOf(FetchFailedError);
+        }
+      ),
+      { numRuns: 15 }
+    );
   });
 
   it("fetchEntries(accountId) asks for exactly the clicked account's entries, with the same operator key attached, and no write method is exposed on the client (Core Principle 12 read/write port-splitting)", async () => {
@@ -147,6 +199,45 @@ describe("apiClient -- the operator's browser asks the API whether the books bal
     );
     expect((client as unknown as Record<string, unknown>).postTransfer).toBeUndefined();
     expect((client as unknown as Record<string, unknown>).createAccount).toBeUndefined();
+  });
+
+  it("fetchEntries(accountId, tenantId) asks for exactly that tenant's entries of the account, with the same operator key attached (fix-unscoped-entries-tenant-merge)", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => fakeEntriesWireEnvelope([]),
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const client = createApiClient({ keyStorage: createKeyStorage() });
+    await client.fetchEntries("treasury", "tnt_beacon");
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/accounts/treasury/entries?tenant_id=tnt_beacon",
+      expect.objectContaining({
+        headers: expect.objectContaining({ Authorization: "Bearer a-valid-operator-key" }),
+      })
+    );
+  });
+
+  it("@property fetchEntries URL-encodes whatever tenant id it is handed, so the id can never alter the query it rides in", async () => {
+    await fc.assert(
+      fc.asyncProperty(fc.string({ minLength: 1 }), async (tenantId) => {
+        const fetchMock = vi.fn().mockResolvedValue({
+          ok: true,
+          status: 200,
+          json: async () => fakeEntriesWireEnvelope([]),
+        });
+        globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+        const client = createApiClient({ keyStorage: createKeyStorage() });
+        await client.fetchEntries("treasury", tenantId);
+
+        expect(fetchMock.mock.calls[0][0]).toBe(`/accounts/treasury/entries?tenant_id=${encodeURIComponent(tenantId)}`);
+      }),
+      { numRuns: 30 }
+    );
   });
 
   it("@gap fetchEntries unwraps the {entries: [...]} envelope and translates stringified amount/running_balance into the domain EntryRow shape (confirmed-mismatch table)", async () => {
