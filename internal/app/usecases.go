@@ -31,18 +31,6 @@ import (
 // currently unreachable through any driving port, by design).
 const ledgerCurrency = "USD"
 
-// legacyTenantID is the sentinel every pre-existing row was backfilled to
-// (migration 0003_tenants.up.sql, tnt_legacy_seed). As of step 02-04 the
-// write-path use cases (PostTransfer, CreateAccount, GetBalance) no longer
-// hardcode it — each now takes the caller's real tenant_id, threaded from
-// the HTTP layer's requireTenantKey-resolved scope (router.go/handlers.go).
-// VerifyBooks (step 06-01/03-01) still names the sentinel directly for its
-// accounts-enumeration leg, but only on the Unscoped() path — that is what
-// keeps an unscoped call byte-identical to the pre-multitenancy contract
-// (step 03-01's regression requirement). A ScopedToTenant(id) call
-// enumerates that tenant's own accounts instead.
-const legacyTenantID = "tnt_legacy_seed"
-
 // ErrIdempotencyKeyConflict marks a same-key request whose fingerprint does
 // not match the one the key was first claimed with (DDD-8). This is an
 // application-shell decision, not a domain.ViolationKind member: no rule in
@@ -604,12 +592,10 @@ func runningBalances(entries []domain.Entry) ([]TracedEntry, error) {
 // VerifyBooks answers the operator's one question by full scan (D9): sum every
 // entry, group by account, and compare against the stored balances.
 //
-// scope decides whose books are scanned (step 03-01): Unscoped() reads
-// exactly what it always has — legacyTenantID's own accounts (the
-// pre-multitenancy accounts-enumeration leg is deliberately left unchanged
-// here; see the comment on legacyTenantID) plus a platform-wide
-// TrialBalance/ComputedBalances sum, byte-identical to the pre-feature
-// contract. ScopedToTenant(id) instead narrows every leg — the accounts
+// scope decides whose books are scanned (step 03-01): Unscoped() is the
+// platform-wide aggregate -- every tenant's accounts and entries, compared per
+// (tenant, account) so two tenants sharing an account id are never merged.
+// ScopedToTenant(id) instead narrows every leg — the accounts
 // enumerated, the trial balance, and the computed balances — to that one
 // tenant, and is refused tenant_not_found up front, before any of the three
 // reads run, when id was never provisioned: TrialBalance/ComputedBalances
@@ -633,7 +619,6 @@ func (l *Ledger) VerifyBooks(ctx context.Context, scope ports.TenantScope) (Book
 
 	report, err := withUnitOfWork(ctx, l.store, "verifying the books",
 		func(uow ports.UnitOfWork) (BooksReport, error) {
-			accountsTenantID := legacyTenantID
 			if tenantID, scoped := scope.Resolve(); scoped {
 				// Existence check FIRST (DDD-25): a name that was never
 				// provisioned is refused before TrialBalance or
@@ -642,10 +627,9 @@ func (l *Ledger) VerifyBooks(ctx context.Context, scope ports.TenantScope) (Book
 				if _, err := uow.Tenants().ByID(ctx, tenantID); err != nil {
 					return BooksReport{}, err
 				}
-				accountsTenantID = tenantID
 			}
 
-			accounts, err := uow.Accounts().All(ctx, accountsTenantID)
+			accounts, err := uow.Accounts().All(ctx, scope)
 			if err != nil {
 				return BooksReport{}, fmt.Errorf("reading every account: %w", err)
 			}
@@ -692,12 +676,12 @@ func zeroMoney(currency string) (domain.Money, error) {
 // sum to (I3), and report only the ones that disagree. An account with no
 // entries at all computes to zero in its own currency, not to a missing map
 // entry — a wallet that has never moved still has a defined computed balance.
-func driftedAccounts(accounts []domain.Account, computed map[string]domain.Money) ([]Drift, error) {
+func driftedAccounts(accounts []domain.Account, computed map[ports.AccountKey]domain.Money) ([]Drift, error) {
 	var drifted []Drift
 	for _, account := range accounts {
 		stored := account.Balance()
 
-		balance, found := computed[account.ID()]
+		balance, found := computed[ports.AccountKey{TenantID: account.TenantID(), AccountID: account.ID()}]
 		if !found {
 			zero, err := zeroMoney(stored.Currency())
 			if err != nil {
@@ -715,6 +699,7 @@ func driftedAccounts(accounts []domain.Account, computed map[string]domain.Money
 			return nil, err
 		}
 		drifted = append(drifted, Drift{
+			TenantID:  account.TenantID(),
 			AccountID: account.ID(),
 			Stored:    stored,
 			Computed:  balance,
@@ -760,8 +745,9 @@ type BooksReport struct {
 	Drifted       []Drift
 }
 
-// Drift is one account whose stored balance disagrees with its entries (I3).
+// Drift is one account, named by its tenant and id, whose stored balance disagrees with its entries (I3).
 type Drift struct {
+	TenantID  string
 	AccountID string
 	Stored    domain.Money
 	Computed  domain.Money

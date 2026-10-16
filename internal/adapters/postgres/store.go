@@ -380,6 +380,24 @@ func alterStoredBalanceOutOfBand(ctx context.Context, conn *pgx.Conn, args map[s
 	if accountID == "" {
 		return fmt.Errorf("alter_stored_balance requires an account_id")
 	}
+	// tenant_id is optional. Account identity is (tenant_id, id) since
+	// migration 0003, so when two tenants hold the same id an unqualified
+	// alteration rewrites BOTH rows; a caller that means one tenant's account
+	// names it. Omitting it keeps the original id-only behaviour every
+	// single-tenant caller relies on.
+	if tenantID, qualified := args["tenant_id"].(string); qualified && tenantID != "" {
+		tag, err := conn.Exec(ctx,
+			`UPDATE accounts SET balance_minor = balance_minor + $1 WHERE id = $2 AND tenant_id = $3`,
+			delta, accountID, tenantID)
+		if err != nil {
+			return fmt.Errorf("altering a stored balance: %w", err)
+		}
+		if tag.RowsAffected() != 1 {
+			return fmt.Errorf("altering a stored balance: %d rows matched account %q of tenant %q, want exactly 1",
+				tag.RowsAffected(), accountID, tenantID)
+		}
+		return nil
+	}
 	if _, err := conn.Exec(ctx,
 		`UPDATE accounts SET balance_minor = balance_minor + $1 WHERE id = $2`,
 		delta, accountID); err != nil {

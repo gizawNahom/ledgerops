@@ -115,11 +115,15 @@ type AccountRepository interface {
 	ApplyDeltas(ctx context.Context, tenantID string, deltas []domain.BalanceDelta) error
 	Create(ctx context.Context, tenantID string, account domain.Account) error
 	Get(ctx context.Context, tenantID string, accountID string) (domain.Account, error)
-	// All enumerates every account the given tenant has ever opened, in a
-	// deterministic order. VerifyBooks (D9) is the one caller: its full-scan
-	// verdict needs every stored balance to compare against ComputedBalances,
-	// not just the ones a caller happens to ask about.
-	All(ctx context.Context, tenantID string) ([]domain.Account, error)
+	// All enumerates every account the scope reaches, in a deterministic
+	// order: one tenant's own accounts when scoped, every tenant's when
+	// Unscoped() (ordered by tenant, then id). Each returned account carries
+	// its own tenant (Account.TenantID), so a platform-wide caller can tell
+	// two tenants' same-named accounts apart. VerifyBooks (D9) and the
+	// transfer coordinator are the callers: a full-scan verdict needs every
+	// stored balance to compare against ComputedBalances, not just the ones a
+	// caller happens to ask about.
+	All(ctx context.Context, scope TenantScope) ([]domain.Account, error)
 
 	// ExistsAnyTenant reports whether an account with this id exists under
 	// ANY tenant. This is deliberately the one account-identity read in this
@@ -132,6 +136,14 @@ type AccountRepository interface {
 	// owns it or what it contains -- narrower than a read, not an unscoped
 	// version of Get.
 	ExistsAnyTenant(ctx context.Context, accountID string) (bool, error)
+}
+
+// AccountKey is an account's tenant-qualified identity (I9: account identity
+// is (tenant_id, id), so a bare account id is ambiguous on any platform-wide
+// read). It is comparable, so it keys maps directly.
+type AccountKey struct {
+	TenantID  string
+	AccountID string
 }
 
 // TransactionRepository writes the transaction and its entries. It offers no
@@ -149,7 +161,9 @@ type TransactionRepository interface {
 	Get(ctx context.Context, tenantID string, transactionID string) (domain.Posting, error)
 	EntriesFor(ctx context.Context, scope TenantScope, accountID string) ([]domain.Entry, error)
 	TrialBalance(ctx context.Context, scope TenantScope) (domain.Money, int, error)
-	ComputedBalances(ctx context.Context, scope TenantScope) (map[string]domain.Money, error)
+	// ComputedBalances keys each figure by (tenant, account): two tenants'
+	// same-named accounts stay separate figures even when Unscoped().
+	ComputedBalances(ctx context.Context, scope TenantScope) (map[AccountKey]domain.Money, error)
 }
 
 // IdempotencyStore records the key, the request fingerprint, and the resulting

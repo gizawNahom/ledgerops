@@ -416,7 +416,7 @@ func (r pactFakeAccountRepository) ExistsAnyTenant(ctx context.Context, accountI
 	return ok, nil
 }
 
-func (r pactFakeAccountRepository) All(ctx context.Context, tenantID string) ([]domain.Account, error) {
+func (r pactFakeAccountRepository) All(ctx context.Context, scope ports.TenantScope) ([]domain.Account, error) {
 	ids := make([]string, 0, len(r.store.accounts))
 	for id := range r.store.accounts {
 		ids = append(ids, id)
@@ -474,20 +474,21 @@ func (r pactFakeTransactionRepository) TrialBalance(ctx context.Context, scope p
 	return total, len(r.store.entries), nil
 }
 
-func (r pactFakeTransactionRepository) ComputedBalances(ctx context.Context, scope ports.TenantScope) (map[string]domain.Money, error) {
-	sums := map[string]int64{}
-	currencies := map[string]string{}
+func (r pactFakeTransactionRepository) ComputedBalances(ctx context.Context, scope ports.TenantScope) (map[ports.AccountKey]domain.Money, error) {
+	sums := map[ports.AccountKey]int64{}
+	currencies := map[ports.AccountKey]string{}
 	for _, entry := range r.store.entries {
-		sums[entry.AccountID()] += entry.Amount().MinorUnits()
-		currencies[entry.AccountID()] = entry.Amount().Currency()
+		key := ports.AccountKey{TenantID: r.store.accounts[entry.AccountID()].TenantID(), AccountID: entry.AccountID()}
+		sums[key] += entry.Amount().MinorUnits()
+		currencies[key] = entry.Amount().Currency()
 	}
-	balances := make(map[string]domain.Money, len(sums))
-	for accountID, sum := range sums {
-		balance, err := domain.NewMoney(sum, currencies[accountID])
+	balances := make(map[ports.AccountKey]domain.Money, len(sums))
+	for key, sum := range sums {
+		balance, err := domain.NewMoney(sum, currencies[key])
 		if err != nil {
 			return nil, err
 		}
-		balances[accountID] = balance
+		balances[key] = balance
 	}
 	return balances, nil
 }

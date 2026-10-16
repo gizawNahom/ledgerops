@@ -169,11 +169,12 @@ func (r transactionRepository) TrialBalance(ctx context.Context, scope ports.Ten
 }
 
 // ComputedBalances derives every account's balance from its entries, grouped
-// by account, for the operator's verdict to compare against stored balances
+// by (tenant, account) -- I9 lets two tenants share an account id, so a bare
+// id would merge them -- for the operator's verdict to compare against stored balances
 // (I3). scope narrows the derivation to one tenant, or leaves it
 // platform-wide when Unscoped() — same contract-shape rationale as
 // TrialBalance.
-func (r transactionRepository) ComputedBalances(ctx context.Context, scope ports.TenantScope) (map[string]domain.Money, error) {
+func (r transactionRepository) ComputedBalances(ctx context.Context, scope ports.TenantScope) (map[ports.AccountKey]domain.Money, error) {
 	tenantID, scoped := scope.Resolve()
 	var (
 		rows pgx.Rows
@@ -181,28 +182,28 @@ func (r transactionRepository) ComputedBalances(ctx context.Context, scope ports
 	)
 	if scoped {
 		rows, err = r.tx.Query(ctx,
-			`SELECT account_id, currency, SUM(amount_minor) FROM entries WHERE tenant_id = $1 GROUP BY account_id, currency`, tenantID)
+			`SELECT tenant_id, account_id, currency, SUM(amount_minor) FROM entries WHERE tenant_id = $1 GROUP BY tenant_id, account_id, currency`, tenantID)
 	} else {
 		rows, err = r.tx.Query(ctx,
-			`SELECT account_id, currency, SUM(amount_minor) FROM entries GROUP BY account_id, currency`)
+			`SELECT tenant_id, account_id, currency, SUM(amount_minor) FROM entries GROUP BY tenant_id, account_id, currency`)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("computing balances from entries: %w", err)
 	}
 	defer rows.Close()
 
-	balances := make(map[string]domain.Money)
+	balances := make(map[ports.AccountKey]domain.Money)
 	for rows.Next() {
-		var accountID, currency string
+		var rowTenantID, accountID, currency string
 		var sumMinor int64
-		if err := rows.Scan(&accountID, &currency, &sumMinor); err != nil {
+		if err := rows.Scan(&rowTenantID, &accountID, &currency, &sumMinor); err != nil {
 			return nil, fmt.Errorf("reading a computed-balance row: %w", err)
 		}
 		balance, err := domain.NewMoney(sumMinor, currency)
 		if err != nil {
 			return nil, err
 		}
-		balances[accountID] = balance
+		balances[ports.AccountKey{TenantID: rowTenantID, AccountID: accountID}] = balance
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("computing balances from entries: %w", err)

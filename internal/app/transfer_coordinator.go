@@ -537,7 +537,7 @@ func (tc *TransferCoordinator) linkSnapshotFor(ctx context.Context, uow ports.Un
 func (tc *TransferCoordinator) walletAccountID(ctx context.Context, tenantID string) (string, error) {
 	return withUnitOfWork(ctx, tc.ledger.store, fmt.Sprintf("locating tenant %q's wallet account", tenantID),
 		func(uow ports.UnitOfWork) (string, error) {
-			accounts, err := uow.Accounts().All(ctx, tenantID)
+			accounts, err := uow.Accounts().All(ctx, ports.ScopedToTenant(tenantID))
 			if err != nil {
 				return "", fmt.Errorf("locating tenant %q's wallet account: %w", tenantID, err)
 			}

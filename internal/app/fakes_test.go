@@ -77,6 +77,76 @@ type fakeStore struct {
 	// in-memory fake has no such blocking to borrow, so the race test sets
 	// this barrier explicitly instead.
 	claimBarrier *sync.WaitGroup
+
+	// platformAccounts and platformEntries are the multi-tenant book that
+	// fix-trial-balance-tenant-collision's regression tests seed: accounts
+	// and entries that carry the tenant they belong to, with ids free to
+	// collide ACROSS tenants (I9, migration 0003). While both are empty the
+	// single-tenant maps above are authoritative and every existing test is
+	// unaffected; once either is populated, All / TrialBalance /
+	// ComputedBalances answer from this book instead, mirroring what the
+	// real postgres adapter does with a tenant_id column (All filters by
+	// tenant; TrialBalance / ComputedBalances narrow by scope).
+	//
+	// ADJUST WHEN THE PORT CHANGES (DELIVER, RCA fix direction): the branches
+	// below deliberately mirror the real adapter's CURRENT shape -- All
+	// takes one tenant id, ComputedBalances returns a map keyed by bare
+	// account id (merging tenants). The crafter's port change to a
+	// tenant-qualified key / scope-taking All must be mirrored in those
+	// branches (unscoped All returns every tenant's accounts; unscoped
+	// ComputedBalances keys by (tenant, account)). The tests that seed this
+	// book use only app.Ledger.VerifyBooks and this struct's seed fields, so
+	// they compile unchanged across the port change.
+	platformAccounts []domain.Account
+	platformEntries  []platformEntry
+}
+
+// platformEntry is one recorded entry plus the tenant it belongs to --
+// domain.Entry itself carries no tenant (the postgres adapter stamps
+// entries.tenant_id at Append time from Append's tenantID argument).
+type platformEntry struct {
+	tenantID string
+	entry    domain.Entry
+}
+
+func (s *fakeStore) hasPlatformBook() bool {
+	return len(s.platformAccounts) > 0 || len(s.platformEntries) > 0
+}
+
+// platformEntriesIn returns the entries a scope reaches: one tenant's own when
+// scoped, every tenant's when Unscoped().
+func (s *fakeStore) platformEntriesIn(scope ports.TenantScope) []domain.Entry {
+	tenantID, scoped := scope.Resolve()
+	var entries []domain.Entry
+	for _, recorded := range s.platformEntries {
+		if scoped && recorded.tenantID != tenantID {
+			continue
+		}
+		entries = append(entries, recorded.entry)
+	}
+	return entries
+}
+
+// entriesWithTenantIn pairs every entry a scope reaches with its tenant: the
+// platform book records it, the single-tenant book derives it from the
+// entry's own account.
+func (s *fakeStore) entriesWithTenantIn(scope ports.TenantScope) []platformEntry {
+	if !s.hasPlatformBook() {
+		recorded := make([]platformEntry, 0, len(s.entries))
+		for _, entry := range s.entries {
+			recorded = append(recorded, platformEntry{tenantID: s.accounts[entry.AccountID()].TenantID(), entry: entry})
+		}
+		return recorded
+	}
+	tenantID, scoped := scope.Resolve()
+	var recorded []platformEntry
+	for _, candidate := range s.platformEntries {
+		if scoped && candidate.tenantID != tenantID {
+			continue
+		}
+		recorded = append(recorded, candidate)
+	}
+	return recorded
 }
 
 func newFakeStore(accounts ...domain.Account) *fakeStore {
@@ -210,8 +280,27 @@ func (r fakeAccountRepository) Get(ctx context.Context, tenantID string, account
 // ISOLATION itself is proven for real against PostgreSQL (WS strategy C,
 // docs/feature/multitenancy/feature-delta.md): a fake enforcing scoping here
 // would model the very behaviour that suite exists to check.
-func (r fakeAccountRepository) All(ctx context.Context, tenantID string) ([]domain.Account, error) {
-	r.store.lastAccountsAllTenantID = tenantID
+func (r fakeAccountRepository) All(ctx context.Context, scope ports.TenantScope) ([]domain.Account, error) {
+	tenantID, scoped := scope.Resolve()
+	if scoped {
+		r.store.lastAccountsAllTenantID = tenantID
+	}
+	if r.store.hasPlatformBook() {
+		var reached []domain.Account
+		for _, account := range r.store.platformAccounts {
+			if scoped && account.TenantID() != tenantID {
+				continue
+			}
+			reached = append(reached, account)
+		}
+		sort.Slice(reached, func(i, j int) bool {
+			if reached[i].TenantID() != reached[j].TenantID() {
+				return reached[i].TenantID() < reached[j].TenantID()
+			}
+			return reached[i].ID() < reached[j].ID()
+		})
+		return reached, nil
+	}
 	ids := make([]string, 0, len(r.store.accounts))
 	for id := range r.store.accounts {
 		ids = append(ids, id)
@@ -273,7 +362,11 @@ func (r fakeTransactionRepository) TrialBalance(ctx context.Context, scope ports
 	r.store.lastScope = scope
 	currency := "USD"
 	var sumMinor int64
-	for _, entry := range r.store.entries {
+	entriesInScope := r.store.entries
+	if r.store.hasPlatformBook() {
+		entriesInScope = r.store.platformEntriesIn(scope)
+	}
+	for _, entry := range entriesInScope {
 		sumMinor += entry.Amount().MinorUnits()
 		currency = entry.Amount().Currency()
 	}
@@ -281,27 +374,29 @@ func (r fakeTransactionRepository) TrialBalance(ctx context.Context, scope ports
 	if err != nil {
 		return domain.Money{}, 0, err
 	}
-	return total, len(r.store.entries), nil
+	return total, len(entriesInScope), nil
 }
 
 // ComputedBalances derives every account's balance from its entries, grouped
-// by account — the other half of VerifyBooks' I3 comparison.
-func (r fakeTransactionRepository) ComputedBalances(ctx context.Context, scope ports.TenantScope) (map[string]domain.Money, error) {
+// by (tenant, account) — the other half of VerifyBooks' I3 comparison. In the
+// single-tenant book an entry's tenant is its account's own.
+func (r fakeTransactionRepository) ComputedBalances(ctx context.Context, scope ports.TenantScope) (map[ports.AccountKey]domain.Money, error) {
 	r.store.scanAttempted = true
 	r.store.lastScope = scope
-	sums := map[string]int64{}
-	currencies := map[string]string{}
-	for _, entry := range r.store.entries {
-		sums[entry.AccountID()] += entry.Amount().MinorUnits()
-		currencies[entry.AccountID()] = entry.Amount().Currency()
+	sums := map[ports.AccountKey]int64{}
+	currencies := map[ports.AccountKey]string{}
+	for _, recorded := range r.store.entriesWithTenantIn(scope) {
+		key := ports.AccountKey{TenantID: recorded.tenantID, AccountID: recorded.entry.AccountID()}
+		sums[key] += recorded.entry.Amount().MinorUnits()
+		currencies[key] = recorded.entry.Amount().Currency()
 	}
-	balances := make(map[string]domain.Money, len(sums))
-	for accountID, sum := range sums {
-		balance, err := domain.NewMoney(sum, currencies[accountID])
+	balances := make(map[ports.AccountKey]domain.Money, len(sums))
+	for key, sum := range sums {
+		balance, err := domain.NewMoney(sum, currencies[key])
 		if err != nil {
 			return nil, err
 		}
-		balances[accountID] = balance
+		balances[key] = balance
 	}
 	return balances, nil
 }

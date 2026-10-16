@@ -434,21 +434,159 @@ func TestProperty_VerifyBooks_TenantScopedCallThreadsTheSameScopeToEveryRead(t *
 	})
 }
 
-// TestVerifyBooks_UnscopedCallStaysPlatformWide is the regression assertion
-// step 03-01's implementation_notes requires (DoD item 3a): an Unscoped()
-// call still reads legacyTenantID's own accounts and an unscoped
-// TrialBalance/ComputedBalances scope, exactly as it did before this step —
-// adding the tenant-scoped branch must not perturb the pre-existing path.
-func TestVerifyBooks_UnscopedCallStaysPlatformWide(t *testing.T) {
+// seedFundedTenantBook records, for one tenant, the book a correctly funded
+// tenant has: a system account "treasury" and a wallet "wallet-1", the single
+// posting that moved fundedMinor from the first to the second, and the two
+// entries that posting wrote. Both ids are the SAME for every tenant seeded
+// into one store -- I9 (migration 0003) makes that legal, and the platform-wide
+// check is exactly where it bites. treasuryStoredOffMinor misstates the
+// treasury's STORED balance relative to its entries (0 = the books agree),
+// which is the only way drift enters this fixture.
+func seedFundedTenantBook(t interface {
+	Helper()
+	Fatalf(string, ...any)
+}, store *fakeStore, tenantID string, fundedMinor, treasuryStoredOffMinor int64) {
+	t.Helper()
+	funded, err := domain.NewMoney(fundedMinor, "USD")
+	if err != nil {
+		t.Fatalf("NewMoney: %v", err)
+	}
+	treasuryStored, err := domain.NewMoney(-fundedMinor+treasuryStoredOffMinor, "USD")
+	if err != nil {
+		t.Fatalf("NewMoney: %v", err)
+	}
+	treasury, err := domain.NewAccount(tenantID, "treasury", domain.System, treasuryStored)
+	if err != nil {
+		t.Fatalf("NewAccount(treasury): %v", err)
+	}
+	wallet, err := domain.NewAccount(tenantID, "wallet-1", domain.Wallet, funded)
+	if err != nil {
+		t.Fatalf("NewAccount(wallet-1): %v", err)
+	}
+	txnID := "txn-fund-" + tenantID
+	out, err := domain.NewEntry(txnID, "treasury", "wallet-1", funded.Negate(), fixedClock(), 0)
+	if err != nil {
+		t.Fatalf("NewEntry: %v", err)
+	}
+	in, err := domain.NewEntry(txnID, "wallet-1", "treasury", funded, fixedClock(), 1)
+	if err != nil {
+		t.Fatalf("NewEntry: %v", err)
+	}
+	store.platformAccounts = append(store.platformAccounts, treasury, wallet)
+	store.platformEntries = append(store.platformEntries,
+		platformEntry{tenantID: tenantID, entry: out},
+		platformEntry{tenantID: tenantID, entry: in})
+}
+
+// drawTenantCount draws how many tenants OTHER than the legacy one a book has.
+func drawTenantCount(rt *rapid.T) int { return rapid.IntRange(0, 3).Draw(rt, "extraTenants") }
+
+// seedFundedTenants seeds the legacy tenant plus extra further tenants, every
+// one holding a "treasury" and a "wallet-1" funded by its own amount, and
+// returns their ids in seeding order (legacy first). The legacy tenant is
+// always present because the reported defect arises when it shares an id with
+// another tenant; 0 further tenants is the single-tenant case, which must
+// stay exactly as it was.
+func seedFundedTenants(rt *rapid.T, store *fakeStore, extra, driftTenant int, driftMinor int64) []string {
+	tenants := []string{testTenantID}
+	for i := 0; i < extra; i++ {
+		tenants = append(tenants, fmt.Sprintf("tnt_colliding_%d", i))
+	}
+	for i, tenantID := range tenants {
+		funded := rapid.Int64Range(1, 1_000_000).Draw(rt, "funded-"+tenantID)
+		off := int64(0)
+		if i == driftTenant {
+			off = driftMinor
+		}
+		seedFundedTenantBook(rt, store, tenantID, funded, off)
+	}
+	return tenants
+}
+
+// TestProperty_VerifyBooks_UnscopedSharedAccountIdsAcrossTenantsAreNotDrift is
+// the regression property for fix-trial-balance-tenant-collision: however many
+// tenants hold a correctly funded account under the SAME id (the legacy tenant
+// among them), the platform-wide verdict is Balanced with nothing drifted.
+// Before the fix the computed side merged every tenant's entries under the
+// bare id while the stored side saw only the legacy tenant -- two correctly
+// funded tenants read as drifted, e.g. stored -100.00 against computed -200.00.
+// Zero further tenants is the single-tenant case, unchanged by the fix.
+func TestProperty_VerifyBooks_UnscopedSharedAccountIdsAcrossTenantsAreNotDrift(t *testing.T) {
+	rapid.Check(t, func(rt *rapid.T) {
+		store := newFakeStore()
+		tenants := seedFundedTenants(rt, store, drawTenantCount(rt), -1, 0)
+		ledger := app.NewLedger(store, fixedClock, sequentialIDs())
+
+		report, err := ledger.VerifyBooks(context.Background(), ports.Unscoped())
+		if err != nil {
+			rt.Fatalf("unexpected error verifying the books: %v", err)
+		}
+		if !report.Balanced || len(report.Drifted) != 0 {
+			rt.Fatalf("%d correctly funded tenant(s) sharing account ids: Balanced = %v, Drifted = %+v; want Balanced with no drift",
+				len(tenants), report.Balanced, report.Drifted)
+		}
+		if want := 2 * len(tenants); report.EntryCount != want {
+			rt.Fatalf("EntryCount = %d, want %d (every tenant's entries counted once)", report.EntryCount, want)
+		}
+	})
+}
+
+// TestProperty_VerifyBooks_UnscopedReportsExactlyTheOneAccountWhoseStoredBalanceDrifted
+// pins the other half: whichever tenant's treasury is misstated (the legacy
+// tenant or a later one), the platform-wide verdict is NO and lists that one
+// account with the true delta -- no merged namesakes, and no tenant skipped
+// because it is not the legacy one. (Naming the drifted account's TENANT is
+// asserted at the acceptance layer today; once Drift carries TenantID the
+// crafter's step adds the assertion here too -- see the report.)
+func TestProperty_VerifyBooks_UnscopedReportsExactlyTheOneAccountWhoseStoredBalanceDrifted(t *testing.T) {
+	rapid.Check(t, func(rt *rapid.T) {
+		store := newFakeStore()
+		extra := drawTenantCount(rt)
+		driftTenant := rapid.IntRange(0, extra).Draw(rt, "driftTenant")
+		driftMinor := rapid.SampledFrom([]int64{-1, 1}).Draw(rt, "driftSign") *
+			rapid.Int64Range(1, 1_000_000).Draw(rt, "driftMagnitude")
+		tenants := seedFundedTenants(rt, store, extra, driftTenant, driftMinor)
+		ledger := app.NewLedger(store, fixedClock, sequentialIDs())
+
+		report, err := ledger.VerifyBooks(context.Background(), ports.Unscoped())
+		if err != nil {
+			rt.Fatalf("unexpected error verifying the books: %v", err)
+		}
+		if report.Balanced {
+			rt.Fatalf("Balanced = true with tenant %q's treasury misstated by %d minor units; want NO", tenants[driftTenant], driftMinor)
+		}
+		if len(report.Drifted) != 1 {
+			rt.Fatalf("Drifted = %+v, want exactly one row (tenant %q's treasury)", report.Drifted, tenants[driftTenant])
+		}
+		if got := report.Drifted[0]; got.AccountID != "treasury" || got.Delta.MinorUnits() != -driftMinor {
+			rt.Fatalf("Drifted[0] = %+v, want treasury with delta %d", got, -driftMinor)
+		}
+	})
+}
+
+// TestVerifyBooks_UnscopedCallChecksEveryTenantNotJustTheLegacyOne replaces
+// TestVerifyBooks_UnscopedCallStaysPlatformWide, which pinned the legacy-only
+// accounts enumeration (Accounts().All called with legacyTenantID) that the
+// platform-wide check no longer has: Unscoped() is the platform-wide aggregate
+// (multitenancy DESIGN, Domain Model), so a misstated balance in a tenant that
+// is NOT the legacy one must be found. Asserted behaviourally -- the verdict
+// and the scope every scan read received -- rather than by which tenant id a
+// spy last saw, so it holds whatever shape the reads take.
+func TestVerifyBooks_UnscopedCallChecksEveryTenantNotJustTheLegacyOne(t *testing.T) {
 	store := newFakeStore()
+	seedFundedTenantBook(t, store, "tnt_beacon", 10_000, 500)
 	ledger := app.NewLedger(store, fixedClock, sequentialIDs())
 
-	if _, err := ledger.VerifyBooks(context.Background(), ports.Unscoped()); err != nil {
+	report, err := ledger.VerifyBooks(context.Background(), ports.Unscoped())
+	if err != nil {
 		t.Fatalf("unexpected error on an unscoped call: %v", err)
 	}
 
-	if store.lastAccountsAllTenantID != testTenantID {
-		t.Fatalf("Accounts().All tenantID = %q, want legacyTenantID %q", store.lastAccountsAllTenantID, testTenantID)
+	if report.Balanced {
+		t.Fatalf("Balanced = true; a non-legacy tenant's misstated treasury must make the platform-wide verdict NO")
+	}
+	if len(report.Drifted) != 1 || report.Drifted[0].AccountID != "treasury" {
+		t.Fatalf("Drifted = %+v, want exactly the beacon tenant's treasury", report.Drifted)
 	}
 	if _, scoped := store.lastScope.Resolve(); scoped {
 		t.Fatalf("TrialBalance/ComputedBalances scope was scoped, want Unscoped()")

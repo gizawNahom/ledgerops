@@ -130,13 +130,23 @@ func (r accountRepository) ExistsAnyTenant(ctx context.Context, accountID string
 	return true, nil
 }
 
-// All enumerates every account belonging to the given tenant, ordered by id,
-// without locking any of them — VerifyBooks' full scan is a read-only
-// comparison against ComputedBalances, not a write path, so it takes no row
-// locks (D9).
-func (r accountRepository) All(ctx context.Context, tenantID string) ([]domain.Account, error) {
-	rows, err := r.tx.Query(ctx,
-		`SELECT id, kind, balance_minor, currency FROM accounts WHERE tenant_id = $1 ORDER BY id`, tenantID)
+// All enumerates the accounts a scope reaches without locking any of them --
+// VerifyBooks' full scan is a read-only comparison against ComputedBalances,
+// not a write path, so it takes no row locks (D9). Scoped: one tenant's own
+// accounts, ordered by id. Unscoped(): every tenant's, ordered by tenant then
+// id, each carrying the tenant it belongs to.
+func (r accountRepository) All(ctx context.Context, scope ports.TenantScope) ([]domain.Account, error) {
+	var (
+		rows pgx.Rows
+		err  error
+	)
+	if tenantID, scoped := scope.Resolve(); scoped {
+		rows, err = r.tx.Query(ctx,
+			`SELECT tenant_id, id, kind, balance_minor, currency FROM accounts WHERE tenant_id = $1 ORDER BY id`, tenantID)
+	} else {
+		rows, err = r.tx.Query(ctx,
+			`SELECT tenant_id, id, kind, balance_minor, currency FROM accounts ORDER BY tenant_id, id`)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("reading every account: %w", err)
 	}
@@ -144,7 +154,7 @@ func (r accountRepository) All(ctx context.Context, tenantID string) ([]domain.A
 
 	var accounts []domain.Account
 	for rows.Next() {
-		account, err := scanAccount(rows, tenantID)
+		account, err := scanTenantAccount(rows)
 		if err != nil {
 			return nil, fmt.Errorf("reading every account: %w", err)
 		}
@@ -156,8 +166,21 @@ func (r accountRepository) All(ctx context.Context, tenantID string) ([]domain.A
 	return accounts, nil
 }
 
+// scanTenantAccount reconstructs one domain.Account from a row that selects
+// its own tenant_id as the first column, for reads that span tenants.
+func scanTenantAccount(row pgx.Row) (domain.Account, error) {
+	var (
+		tenantID, id, kind, currency string
+		balanceMinor                 int64
+	)
+	if err := row.Scan(&tenantID, &id, &kind, &balanceMinor, &currency); err != nil {
+		return domain.Account{}, err
+	}
+	return buildAccount(tenantID, id, kind, currency, balanceMinor)
+}
+
 // scanAccount reconstructs one domain.Account from a row already scoped to
-// tenantID by its caller's own WHERE clause — the column itself is not
+// tenantID by its caller's own WHERE clause -- the column itself is not
 // re-selected, since the caller already knows which tenant it asked for.
 func scanAccount(row pgx.Row, tenantID string) (domain.Account, error) {
 	var (
@@ -167,6 +190,10 @@ func scanAccount(row pgx.Row, tenantID string) (domain.Account, error) {
 	if err := row.Scan(&id, &kind, &balanceMinor, &currency); err != nil {
 		return domain.Account{}, err
 	}
+	return buildAccount(tenantID, id, kind, currency, balanceMinor)
+}
+
+func buildAccount(tenantID, id, kind, currency string, balanceMinor int64) (domain.Account, error) {
 	balance, err := domain.NewMoney(balanceMinor, currency)
 	if err != nil {
 		return domain.Account{}, fmt.Errorf("stored balance for %q carries an unrecognised currency %q: %w", id, currency, err)
