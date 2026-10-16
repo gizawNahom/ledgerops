@@ -760,7 +760,7 @@ func writeRefusal(w http.ResponseWriter, r *http.Request, status int, kind strin
 //
 // As of step 03-01, a `?tenant_id=` query parameter narrows the scan to that
 // one tenant's own books (trialBalanceScopeFromQuery); its absence keeps the
-// call platform-wide, byte-identical to the pre-multitenancy contract. Both
+// call platform-wide, across every tenant's books. Both
 // routes read the same query parameter — GET /console/verdict never sends
 // one today, so this is dormant there, not a behavior change for the
 // console (step 03-02's job is making the console send it deliberately, if

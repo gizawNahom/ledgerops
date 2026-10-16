@@ -593,11 +593,10 @@ func runningBalances(entries []domain.Entry) ([]TracedEntry, error) {
 // entry, group by account, and compare against the stored balances.
 //
 // scope decides whose books are scanned (step 03-01): Unscoped() is the
-// platform-wide aggregate -- every tenant's accounts and entries, compared per
+// platform-wide aggregate — every tenant's accounts and entries, compared per
 // (tenant, account) so two tenants sharing an account id are never merged.
-// ScopedToTenant(id) instead narrows every leg — the accounts
-// enumerated, the trial balance, and the computed balances — to that one
-// tenant, and is refused tenant_not_found up front, before any of the three
+// ScopedToTenant(id) instead narrows every leg — the accounts enumerated, the
+// trial balance, and the computed balances — to that one tenant, and is refused tenant_not_found up front, before any of the three
 // reads run, when id was never provisioned: TrialBalance/ComputedBalances
 // alone cannot distinguish "unprovisioned tenant" from "provisioned tenant
 // with nothing posted yet", so the existence check has to happen here,
@@ -745,7 +744,8 @@ type BooksReport struct {
 	Drifted       []Drift
 }
 
-// Drift is one account, named by its tenant and id, whose stored balance disagrees with its entries (I3).
+// Drift is one account, named by its tenant and id, whose stored balance
+// disagrees with its entries (I3).
 type Drift struct {
 	TenantID  string
 	AccountID string

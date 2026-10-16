@@ -130,7 +130,7 @@ func (r accountRepository) ExistsAnyTenant(ctx context.Context, accountID string
 	return true, nil
 }
 
-// All enumerates the accounts a scope reaches without locking any of them --
+// All enumerates the accounts a scope reaches without locking any of them —
 // VerifyBooks' full scan is a read-only comparison against ComputedBalances,
 // not a write path, so it takes no row locks (D9). Scoped: one tenant's own
 // accounts, ordered by id. Unscoped(): every tenant's, ordered by tenant then
@@ -180,7 +180,7 @@ func scanTenantAccount(row pgx.Row) (domain.Account, error) {
 }
 
 // scanAccount reconstructs one domain.Account from a row already scoped to
-// tenantID by its caller's own WHERE clause -- the column itself is not
+// tenantID by its caller's own WHERE clause — the column itself is not
 // re-selected, since the caller already knows which tenant it asked for.
 func scanAccount(row pgx.Row, tenantID string) (domain.Account, error) {
 	var (

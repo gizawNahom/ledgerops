@@ -169,9 +169,9 @@ func (r transactionRepository) TrialBalance(ctx context.Context, scope ports.Ten
 }
 
 // ComputedBalances derives every account's balance from its entries, grouped
-// by (tenant, account) -- I9 lets two tenants share an account id, so a bare
-// id would merge them -- for the operator's verdict to compare against stored balances
-// (I3). scope narrows the derivation to one tenant, or leaves it
+// by (tenant, account) — I9 lets two tenants share an account id, so a bare
+// id would merge them — for the operator's verdict to compare against stored
+// balances (I3). scope narrows the derivation to one tenant, or leaves it
 // platform-wide when Unscoped() — same contract-shape rationale as
 // TrialBalance.
 func (r transactionRepository) ComputedBalances(ctx context.Context, scope ports.TenantScope) (map[ports.AccountKey]domain.Money, error) {
