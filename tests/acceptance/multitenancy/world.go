@@ -93,6 +93,13 @@ type World struct {
 	lastBooks  BooksReport
 	priorBooks BooksReport
 
+	// transferSeq numbers the transfers a scenario posts, so every one gets its
+	// own idempotency key.
+	transferSeq int
+
+	// lastEntries is the decoded answer of the most recent entries read.
+	lastEntries EntriesReport
+
 	// lastRefusal is the SSOT every "Then the response is refused as X" step
 	// reads from, regardless of which driving port produced the refusal
 	// (provisioning, account, transfer, or verdict). Set to "" on any
@@ -582,7 +589,12 @@ func (w *World) Transfer(ctx context.Context, tenant TenantName, from, to Accoun
 	}
 	w.priorAnswer = w.lastAnswer
 	body := map[string]any{"from": string(from), "to": string(to), "amount": amount.String()}
-	answer, err := w.callAsWithKey(ctx, AsTenant(tenant), http.MethodPost, "/transfers", body, "mt-"+string(tenant)+"-"+string(from)+"-"+string(to))
+	// Each call is its own posting: a repeated (tenant, from, to) with a new
+	// amount must not be read by the ledger as a replay of the first, so the
+	// idempotency key carries the call's ordinal.
+	w.transferSeq++
+	answer, err := w.callAsWithKey(ctx, AsTenant(tenant), http.MethodPost, "/transfers", body,
+		fmt.Sprintf("mt-%s-%s-%s-%d", tenant, from, to, w.transferSeq))
 	w.lastAnswer = answer
 	w.lastRefusal = answer.Refusal
 	w.lastStatus = answer.Status
@@ -619,19 +631,45 @@ func (w *World) RequestAccount(ctx context.Context, as Caller, name AccountName)
 	return err
 }
 
-// RequestEntries reads an account's entries — dual-mode per slice 02's own
+// RequestEntries reads an account's entries -- dual-mode per slice 02's own
 // scope: tenant-scoped for a tenant_key caller, unscoped for the admin
 // credential (console compatibility).
 func (w *World) RequestEntries(ctx context.Context, as Caller, name AccountName) error {
+	return w.requestEntriesAt(ctx, as, name, "")
+}
+
+// RequestEntriesNaming reads an account's entries naming a tenant in the
+// query (?tenant_id=): the operator narrowing the read to one tenant, or a
+// tenant's own credential naming itself or another tenant. An unprovisioned
+// name is sent as itself, which the server cannot recognise either way.
+func (w *World) RequestEntriesNaming(ctx context.Context, as Caller, name AccountName, named TenantName) error {
+	return w.requestEntriesAt(ctx, as, name, "?tenant_id="+url.QueryEscape(w.tenantIDOf(named)))
+}
+
+func (w *World) requestEntriesAt(ctx context.Context, as Caller, name AccountName, query string) error {
 	if err := w.EnsureStarted(ctx); err != nil {
 		return err
 	}
 	w.priorAnswer = w.lastAnswer
-	answer, err := w.callAs(ctx, as, http.MethodGet, "/accounts/"+url.PathEscape(string(name))+"/entries", nil)
+	status, raw, err := w.rawCall(ctx, as, http.MethodGet, "/accounts/"+url.PathEscape(string(name))+"/entries"+query, nil)
+	if err != nil {
+		return err
+	}
+	answer := decodeAnswer(status, raw)
 	w.lastAnswer = answer
+	w.lastEntries = decodeEntries(status, raw)
 	w.lastRefusal = answer.Refusal
 	w.lastStatus = answer.Status
-	return err
+	return nil
+}
+
+// tenantIDOf resolves a scenario-facing tenant name to the id the system
+// issued; a name nobody provisioned stands for itself.
+func (w *World) tenantIDOf(name TenantName) string {
+	if record, known := w.tenants[name]; known {
+		return record.ID
+	}
+	return string(name)
 }
 
 // --- driving-port calls: verify one tenant's books (slice 03) --------------
@@ -1070,6 +1108,147 @@ func (w *World) AssertBooksSucceeded() error {
 func (w *World) AssertEntriesSucceeded() error {
 	if !w.lastAnswer.Accepted {
 		return fmt.Errorf("expected the entries call to succeed, got status %d (raw: %s)", w.lastAnswer.Status, w.lastAnswer.Raw)
+	}
+	return nil
+}
+
+func decodeEntries(status int, raw []byte) EntriesReport {
+	report := EntriesReport{Status: status, Raw: string(raw)}
+	var payload map[string]any
+	_ = json.Unmarshal(raw, &payload)
+	if kind, ok := payload["error"].(string); ok {
+		report.Refusal = RefusalKind(kind)
+	}
+	entries, _ := payload["entries"].([]any)
+	for _, e := range entries {
+		wire, ok := e.(map[string]any)
+		if !ok {
+			continue
+		}
+		row := EntryRow{}
+		row.TenantID, _ = wire["tenant_id"].(string)
+		counterparty, _ := wire["counterparty"].(string)
+		row.Counterparty = AccountName(counterparty)
+		if amount, ok := wire["amount"].(string); ok {
+			row.Amount = ParseMoney(amount)
+		}
+		if running, ok := wire["running_balance"].(string); ok {
+			row.RunningBalance = ParseMoney(running)
+		}
+		for field := range wire {
+			row.Fields = append(row.Fields, field)
+		}
+		sort.Strings(row.Fields)
+		report.Rows = append(report.Rows, row)
+	}
+	return report
+}
+
+// --- Then assertions: the entries read ---------------------------------------
+
+// rowsOf returns the rows that name the tenant, in the order they were read.
+func (w *World) rowsOf(tenant TenantName) []EntryRow {
+	id := w.tenantIDOf(tenant)
+	var rows []EntryRow
+	for _, row := range w.lastEntries.Rows {
+		if row.TenantID == id {
+			rows = append(rows, row)
+		}
+	}
+	return rows
+}
+
+// AssertEntriesNamingTenant states exactly want of the entries read name the tenant.
+func (w *World) AssertEntriesNamingTenant(tenant TenantName, want int) error {
+	if got := len(w.rowsOf(tenant)); got != want {
+		return fmt.Errorf("expected tenant %q (%s) to be named on %d entries, got %d (status %d, raw: %s)",
+			tenant, w.tenantIDOf(tenant), want, got, w.lastEntries.Status, w.lastEntries.Raw)
+	}
+	return nil
+}
+
+// AssertEntriesGroupedByTenant states each tenant's entries form one
+// uninterrupted run: once the read has moved on from a tenant it never returns
+// to it. The order of the tenants themselves is not part of the contract.
+func (w *World) AssertEntriesGroupedByTenant() error {
+	if len(w.lastEntries.Rows) == 0 {
+		return fmt.Errorf("expected entries to be listed, got none (status %d, raw: %s)", w.lastEntries.Status, w.lastEntries.Raw)
+	}
+	finished := map[string]bool{}
+	current := ""
+	for _, row := range w.lastEntries.Rows {
+		if row.TenantID == current {
+			continue
+		}
+		if finished[row.TenantID] {
+			return fmt.Errorf("expected each tenant's entries to be listed together, but tenant %q reappears after another tenant's entries (raw: %s)",
+				row.TenantID, w.lastEntries.Raw)
+		}
+		finished[current] = true
+		current = row.TenantID
+	}
+	return nil
+}
+
+// AssertOnlyTenantEntries states the read succeeded, returned something, and
+// every entry it returned names this tenant.
+func (w *World) AssertOnlyTenantEntries(tenant TenantName) error {
+	id := w.tenantIDOf(tenant)
+	if len(w.lastEntries.Rows) == 0 {
+		return fmt.Errorf("expected tenant %q's entries, got none (status %d, refusal %q, raw: %s)",
+			tenant, w.lastEntries.Status, w.lastEntries.Refusal, w.lastEntries.Raw)
+	}
+	for _, row := range w.lastEntries.Rows {
+		if row.TenantID != id {
+			return fmt.Errorf("expected only tenant %q (%s) entries, got an entry naming %q (raw: %s)",
+				tenant, id, row.TenantID, w.lastEntries.Raw)
+		}
+	}
+	return nil
+}
+
+// AssertRunningBalances states the tenant's entries, in the order read, settle
+// to exactly this trail of running balances.
+func (w *World) AssertRunningBalances(tenant TenantName, want []Money) error {
+	rows := w.rowsOf(tenant)
+	got := make([]Money, 0, len(rows))
+	for _, row := range rows {
+		got = append(got, row.RunningBalance)
+	}
+	if len(got) != len(want) {
+		return fmt.Errorf("expected tenant %q's running balances %v, got %v (raw: %s)", tenant, want, got, w.lastEntries.Raw)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			return fmt.Errorf("expected tenant %q's running balances %v, got %v (raw: %s)", tenant, want, got, w.lastEntries.Raw)
+		}
+	}
+	return nil
+}
+
+// AssertNoEntriesReturned states the read handed back no entry at all.
+func (w *World) AssertNoEntriesReturned() error {
+	if len(w.lastEntries.Rows) != 0 {
+		return fmt.Errorf("expected no entry to be returned, got %d (raw: %s)", len(w.lastEntries.Rows), w.lastEntries.Raw)
+	}
+	return nil
+}
+
+// entryFieldsToday is the wire shape of one entry before this fix.
+var entryFieldsToday = []string{"amount", "counterparty", "recorded_at", "running_balance", "transaction_id"}
+
+// AssertEntryShapeGrewByTheTenantOnly states every entry carries today's
+// fields plus the tenant it belongs to, and nothing else.
+func (w *World) AssertEntryShapeGrewByTheTenantOnly() error {
+	want := append(append([]string{}, entryFieldsToday...), "tenant_id")
+	sort.Strings(want)
+	if len(w.lastEntries.Rows) == 0 {
+		return fmt.Errorf("expected entries to inspect, got none (status %d, raw: %s)", w.lastEntries.Status, w.lastEntries.Raw)
+	}
+	for _, row := range w.lastEntries.Rows {
+		if strings.Join(row.Fields, ",") != strings.Join(want, ",") {
+			return fmt.Errorf("expected each entry to carry exactly %v, got %v", want, row.Fields)
+		}
 	}
 	return nil
 }

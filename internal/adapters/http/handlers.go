@@ -289,7 +289,13 @@ func getEntriesHandler(ledger *app.Ledger) http.HandlerFunc {
 		// injected -- ScopedToTenant for a tenant_key caller, Unscoped() for the
 		// platform OperatorKey -- and is passed straight through to GetEntries,
 		// which forwards it unchanged to TransactionRepository.EntriesFor.
-		scope, _ := TenantScopeFromContext(r.Context())
+		callerScope, _ := TenantScopeFromContext(r.Context())
+
+		scope, err := entriesScopeFromQuery(callerScope, r.URL.Query().Get("tenant_id"))
+		if err != nil {
+			writeDomainError(w, r, err)
+			return
+		}
 
 		traced, err := ledger.GetEntries(r.Context(), scope, accountID)
 		if err != nil {
@@ -303,10 +309,32 @@ func getEntriesHandler(ledger *app.Ledger) http.HandlerFunc {
 	}
 }
 
+// entriesScopeFromQuery narrows the caller's scope by an optional ?tenant_id=.
+// The operator (Unscoped) may narrow to any tenant. A tenant key never widens
+// or switches tenant: naming its own id is the same as naming none, and naming
+// any other id (provisioned or not) is refused as an unknown account, exactly
+// as reading another tenant's account already is. It deliberately does not
+// reuse trialBalanceScopeFromQuery, which would let a tenant key switch tenant.
+func entriesScopeFromQuery(callerScope ports.TenantScope, namedTenantID string) (ports.TenantScope, error) {
+	if namedTenantID == "" {
+		return callerScope, nil
+	}
+	callerTenantID, scoped := callerScope.Resolve()
+	switch {
+	case !scoped:
+		return ports.ScopedToTenant(namedTenantID), nil
+	case callerTenantID == namedTenantID:
+		return callerScope, nil
+	default:
+		return callerScope, domain.NewUnknownAccount(namedTenantID)
+	}
+}
+
 func entriesToWire(traced []app.TracedEntry) []map[string]any {
 	wire := make([]map[string]any, 0, len(traced))
 	for _, row := range traced {
 		wire = append(wire, map[string]any{
+			"tenant_id":       row.TenantID,
 			"transaction_id":  row.Entry.TransactionID(),
 			"counterparty":    row.Entry.Counterparty(),
 			"amount":          formatMoney(row.Entry.Amount()),

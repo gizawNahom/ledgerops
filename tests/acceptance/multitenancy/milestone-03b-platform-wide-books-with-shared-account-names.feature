@@ -14,7 +14,8 @@
 # scenario at a time. Contract shape follows milestone-03's own read-only
 # checks (the When is a read; the out-of-band alteration is a Given).
 #
-# Out of scope by decision: the unscoped entries read for a shared account name.
+# The sibling read -- the operator's entries for a shared account name -- is
+# covered by milestone-03c (fix-unscoped-entries-tenant-merge).
 
 @slice-03 @us-3 @driving_port @env-two-tenant @regression @fix-trial-balance-tenant-collision
 Feature: The operator's platform-wide books check weighs each tenant's accounts on their own

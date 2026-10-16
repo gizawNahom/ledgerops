@@ -119,6 +119,21 @@ func RegisterSteps(ctx *godog.ScenarioContext, w *World) {
 			return w.RequestEntries(c, PlatformAdmin(), AccountName(account))
 		})
 
+	ctx.When(`^the operator requests "([^"]*)"'s entries for tenant "([^"]*)" with the platform-admin credential$`,
+		func(c context.Context, account, tenant string) error {
+			return w.RequestEntriesNaming(c, PlatformAdmin(), AccountName(account), TenantName(tenant))
+		})
+
+	ctx.When(`^tenant "([^"]*)" requests its own entries for "([^"]*)"$`,
+		func(c context.Context, tenant, account string) error {
+			return w.RequestEntries(c, AsTenant(TenantName(tenant)), AccountName(account))
+		})
+
+	ctx.When(`^tenant "([^"]*)" requests "([^"]*)"'s entries naming tenant "([^"]*)"$`,
+		func(c context.Context, tenant, account, named string) error {
+			return w.RequestEntriesNaming(c, AsTenant(TenantName(tenant)), AccountName(account), TenantName(named))
+		})
+
 	ctx.When(`^tenant "([^"]*)" moves (\S+) from "([^"]*)" to "([^"]*)"$`,
 		func(c context.Context, tenant, amount, from, to string) error {
 			return w.Transfer(c, TenantName(tenant), AccountName(from), AccountName(to), ParseMoney(amount))
@@ -197,6 +212,32 @@ func RegisterSteps(ctx *godog.ScenarioContext, w *World) {
 
 	ctx.Then(`^the response succeeds, unchanged in shape from today's single-tenant entries contract$`, func() error {
 		return w.AssertEntriesSucceeded()
+	})
+
+	// --- Then: the entries read (fix-unscoped-entries-tenant-merge) ------------
+
+	ctx.Then(`^tenant "([^"]*)" is named on (\d+) entr(?:y|ies)$`, func(tenant string, count int) error {
+		return w.AssertEntriesNamingTenant(TenantName(tenant), count)
+	})
+
+	ctx.Then(`^the entries of each tenant are listed together$`, func() error {
+		return w.AssertEntriesGroupedByTenant()
+	})
+
+	ctx.Then(`^only tenant "([^"]*)"'s entries are returned$`, func(tenant string) error {
+		return w.AssertOnlyTenantEntries(TenantName(tenant))
+	})
+
+	ctx.Then(`^tenant "([^"]*)"'s entries run to balances? (.+)$`, func(tenant, trail string) error {
+		return w.AssertRunningBalances(TenantName(tenant), ParseBalanceTrail(trail))
+	})
+
+	ctx.Then(`^no entry is returned$`, func() error {
+		return w.AssertNoEntriesReturned()
+	})
+
+	ctx.Then(`^each entry carries today's fields plus the tenant it belongs to$`, func() error {
+		return w.AssertEntryShapeGrewByTheTenantOnly()
 	})
 
 	// --- Then: verify one tenant's books --------------------------------------

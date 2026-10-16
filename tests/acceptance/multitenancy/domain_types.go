@@ -185,3 +185,34 @@ type BooksReport struct {
 	Refusal      RefusalKind
 	Raw          string
 }
+
+// EntryRow is one line of an account's entries as the read returns it: the
+// tenant it belongs to, the figure it moved, and the running balance the
+// account settled to. Fields lists the wire field names the row carried, so a
+// scenario can pin that the shape grew by exactly the tenant and nothing else.
+type EntryRow struct {
+	TenantID       string
+	Counterparty   AccountName
+	Amount         Money
+	RunningBalance Money
+	Fields         []string
+}
+
+// EntriesReport is the answer to "show me this account's entries".
+type EntriesReport struct {
+	Status  int
+	Rows    []EntryRow
+	Refusal RefusalKind
+	Raw     string
+}
+
+// ParseBalanceTrail coerces the Gherkin phrasing of a running-balance trail
+// ("-100.00 then -125.00") into the figures it lists, in order.
+func ParseBalanceTrail(text string) []Money {
+	parts := strings.Split(text, " then ")
+	trail := make([]Money, 0, len(parts))
+	for _, part := range parts {
+		trail = append(trail, ParseMoney(part))
+	}
+	return trail
+}
