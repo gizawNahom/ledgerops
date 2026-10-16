@@ -318,6 +318,18 @@ kpis:
           tell which tenant's same-named account drifted. The target above is
           unchanged for every no-drift response; only the drift-row shape
           differs, and only by this one field.
+      - date: "2026-10-16"
+        approved_by: user
+        feature: fix-unscoped-entries-tenant-merge
+        text: >
+          Unscoped OperatorKey GET /accounts/{id}/entries rows gained one
+          additive field, `tenant_id`, and are grouped by tenant with a
+          per-tenant running_balance, via fix-unscoped-entries-tenant-merge.
+          On a single-tenant ledger, rows read `"tenant_id":"tnt_legacy_seed"`;
+          the response otherwise keeps its fields and status. An optional,
+          operator-only `?tenant_id=` narrows the read. Reason: an operator
+          must be able to tell whose entries they are reading. The target
+          above is unchanged.
     measured:
       date: "2026-09-05"
       result: "the 3 @console-compat scenarios (within the 18) passing, plus the pre-existing tests/acceptance/ledgercore suite restored to a full pass (296.8s) after OPS-13's fix - the regression proof that unscoped OperatorKey calls to all three named endpoints kept working throughout"

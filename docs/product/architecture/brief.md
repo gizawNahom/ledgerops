@@ -2803,7 +2803,7 @@ replacement:
 |---|---|---|---|
 | `POST /tenants` | HTTP | 01 | `OperatorKey` only |
 | `POST /accounts`, `POST /transfers`, `GET /accounts/{id}` | HTTP | 02 | `tenant_key` only — **confirmed by DDD-23** (resolved 2026-09-03): `OperatorKey` is never accepted here; `demo-01`/`02`/`03`/`chaos-01`'s continued use of `OperatorKey` is handled by seeding a second, `tenant_key`-shaped demo credential (DEVOPS/DELIVER task), not by this port accepting `OperatorKey` |
-| `GET /accounts/{id}/entries` | HTTP — dual-mode | 02 | `tenant_key` (scoped) or `OperatorKey` (unscoped, must be byte-identical to today) |
+| `GET /accounts/{id}/entries` | HTTP — dual-mode | 02 | `tenant_key` (scoped) or `OperatorKey` (unscoped, must be byte-identical to today; *2026-10-16: now with an additive `tenant_id` per row, see the amendment below*) |
 | `GET /health/trial-balance?tenant_id=` | HTTP — optional query param | 03 | `OperatorKey` only |
 
 New refusal-taxonomy members reachable through these ports: `tenant_already_exists`
@@ -2827,6 +2827,16 @@ verification path is no longer legacy-tenant-only. It compares per
 `(tenant_id, account_id)` across every tenant, and each drift row gains an
 additive `tenant_id` field (no-drift responses stay byte-identical). See
 KPI-M4's amendment in `docs/product/kpi-contracts.yaml`.
+
+*Amendment 2026-10-16 (`fix-unscoped-entries-tenant-merge`)*: the unscoped
+`OperatorKey` read of `GET /accounts/{id}/entries` no longer merges tenants
+that share an account id. Each row gains an additive `tenant_id` field (emitted
+for every caller), rows are grouped by tenant, and `running_balance` restarts
+per tenant. Status and the other fields are unchanged. The operator may narrow
+with an optional `?tenant_id=`; a tenant key naming a different tenant is
+refused with `account_not_found`. The port is `ports.TenantEntry`;
+`domain.Entry` is untouched (ADR-007). See KPI-M4's amendment in
+`docs/product/kpi-contracts.yaml`.
 
 **Test infrastructure, extended**: `TenantRepository` and `TenantKeyResolver`
 join the "never faked, real PostgreSQL" row above (WS strategy C — isolation

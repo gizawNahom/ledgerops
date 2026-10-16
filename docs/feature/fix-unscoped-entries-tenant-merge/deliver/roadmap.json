@@ -1,0 +1,132 @@
+{
+  "roadmap": {
+    "project_id": "fix-unscoped-entries-tenant-merge",
+    "created_at": "2026-10-16T00:00:00Z",
+    "total_steps": 3
+  },
+  "phases": [
+    {
+      "id": "01",
+      "name": "Tenant-qualified entries read: server and console",
+      "steps": [
+        {
+          "id": "01-01",
+          "name": "Entries read carries the owning tenant with per-tenant running balances",
+          "criteria": [
+            "Unscoped entries read returns each entry paired with its owning tenant, grouped by tenant",
+            "Tenant-scoped entries read returns only that tenant's entries, each naming that tenant",
+            "Running balance restarts for each tenant when account ids collide",
+            "Single-tenant running balances are numerically unchanged; all existing tests stay green"
+          ],
+          "test_file": "internal/adapters/postgres/transactions_test.go",
+          "scenario_name": "TestTransactionRepository_EntriesFor_UnscopedAttributesEachEntryToItsTenantScopedSeesOnlyItsOwn",
+          "files_to_modify": [
+            "internal/app/ports/ports.go",
+            "internal/adapters/postgres/transactions.go",
+            "internal/app/usecases.go",
+            "internal/app/fakes_test.go",
+            "internal/adapters/http/pact_provider_test.go"
+          ],
+          "implementation_notes": "rca.md §3 steps 1-3. Tenant-qualified entry type on the EntriesFor port (domain.Entry untouched, ADR-007); postgres selects tenant_id in both branches, unscoped order tenant_id, recorded_at, sequence; TracedEntry gains TenantID; runningBalances resets sum and currency per tenant. Also GREEN: TestGetEntries_UnscopedNamesEachEntrysTenantAndRestartsTheRunningBalance, TestGetEntries_ScopedNamesItsOwnTenantAndNeverFoldsAnother, TestProperty_GetEntries_RunningBalancesAreIndependentPerTenantWhenAccountIdsCollide. App fake (fakes_test.go ~345): EntriesFor returns the tenant-qualified type from store.entriesWithTenantIn(scope) filtered to accountID, honours scope, groups by tenant in first-seen order, keeps each tenant's own order. Pact provider fake (pact_provider_test.go ~453): same return type, honours scope, derives tenant from accounts[entry.AccountID()].TenantID(). Only callers of EntriesFor are usecases.go and the two fakes (grep-verified); handlers.go uses TracedEntry so keep it compiling (entriesToWire unchanged here). Both fakes are existing test-support files whose signature must change; do not weaken authored tests. Foreground tests only: go test -count=1. Copy libpact_ffi.so to /tmp before testing internal/adapters/http. Contract shape: pure-function (read-only; no mutation)."
+        },
+        {
+          "id": "01-02",
+          "name": "Entries HTTP response names each tenant; operator narrows by tenant",
+          "criteria": [
+            "Every entry in the response includes tenant_id for all callers",
+            "Operator read with tenant_id returns only that tenant's entries with correct running balances",
+            "Operator narrowing to a tenant lacking the account is refused as account_not_found",
+            "Tenant key naming another or unprovisioned tenant is refused as account_not_found; naming its own id behaves as naming none",
+            "Single-tenant ledger reads as before apart from the additive tenant_id"
+          ],
+          "test_file": "tests/acceptance/multitenancy/milestone-03c-operator-entries-with-shared-account-names.feature",
+          "scenario_name": "The unscoped read names the tenant behind every entry and lists each tenant's entries together",
+          "files_to_modify": [
+            "tests/acceptance/multitenancy/milestone-03c-operator-entries-with-shared-account-names.feature",
+            "tests/acceptance/multitenancy/milestone-03b-platform-wide-books-with-shared-account-names.feature",
+            "internal/adapters/http/handlers.go"
+          ],
+          "implementation_notes": "rca.md §3 step 4. entriesToWire emits tenant_id for all callers. @sizing-review-needed (8 scenarios, kept as one step; informational). getEntriesHandler scope rule (03c scenarios 5-7), explicit: (a) context scope Unscoped (operator) and ?tenant_id=T: use ScopedToTenant(T); (b) context scope ScopedToTenant(A) and ?tenant_id equals A: behave as if absent; (c) context scope ScopedToTenant(A) and ?tenant_id any other value, including an unprovisioned id: refuse with account_not_found, return no rows. trialBalanceScopeFromQuery (handlers.go:802-808) must NOT be called on the entries path: it unconditionally turns any ?tenant_id= into ScopedToTenant(id), which would let a tenant key switch tenants. Test files authored by the acceptance designer must not be weakened. If the milestone-02 @console-compat scenario or any byte-identical or CI-gated scenario goes red, STOP and escalate to the orchestrator; do not amend or weaken it in-step. The milestone-03b feature-file change is comment-only (lines 17-18 reworded), already authored; commit it with this step. Un-pend one scenario at a time (tag @pending removed; keep @fix-unscoped-entries-tenant-merge): 1 unscoped names tenant; 2 running balance restarts; 3 Outline narrowing; 4 narrowing to tenant lacking account; 5 tenant reads own; 6 tenant names itself; 7 Outline tenant cannot read another; 8 single-tenant ledger. Only permitted feature-file edit is removing @pending; harness files (world.go, steps_multitenancy_test.go, domain_types.go) are already authored and must not change. Run: LEDGEROPS_AT_TAGS=\"@fix-unscoped-entries-tenant-merge\" go test -count=1 -v ./tests/acceptance/multitenancy (expect 8 scenarios, 10 runs). Then run milestone-02 console-compat and brief CI-gated byte-identical scenarios. Pact provider verification may not yet cover the new interaction (added in 01-03). Foreground tests only; copy libpact_ffi.so to /tmp before testing internal/adapters/http. Contract shape: pure-function (read-only); unbounded-preservation scenarios assert refusal leaves data unchanged."
+        },
+        {
+          "id": "01-03",
+          "name": "Console drill-down is tenant-qualified; consumer pact and provider state cover it",
+          "criteria": [
+            "Drift rows carry tenant id; a drift row without one is a fetch failure",
+            "Verdict table shows a Tenant column and keeps two tenants' same-named drifting accounts as separate rows",
+            "Selecting a row fetches that tenant's entries for the account; entry trace shows the tenant",
+            "Entries fetch without a tenant sends no tenant query; with one it is URL-encoded",
+            "Provider verifies the regenerated consumer pact, including the tenant-narrowed entries interaction"
+          ],
+          "test_file": "web/console/src/components/ConsoleApp.test.tsx",
+          "scenario_name": "two drifted treasury rows from different tenants (ConsoleApp, DriftTable, EntryTrace, apiClient and apiClient.pact tests: 15 tests currently failing, at 13 locations listed in notes)",
+          "files_to_modify": [
+            "web/console/src/testing/domainTypes.ts",
+            "web/console/src/apiClient.ts",
+            "web/console/src/components/DriftTable.tsx",
+            "web/console/src/components/ConsoleApp.tsx",
+            "web/console/src/components/EntryTrace.tsx",
+            "web/console/pacts/console-ledgercore.json",
+            "internal/adapters/http/pact_provider_test.go"
+          ],
+          "implementation_notes": "rca.md §3 step 5. parseDriftRow maps tenant_id to tenantId (required); fetchEntries(accountId, tenantId?) appends URL-encoded ?tenant_id= only when present; DriftTable adds Tenant column, keys by tenant+account, calls onSelectAccount(accountId, tenantId); ConsoleApp selection and staleness checks compare both; EntryTrace takes tenantId prop, shows it, fallback URL ends ?tenant_id=<id>. No client-side filtering. Test files authored by the acceptance designer must not be weakened. The 15 failing vitest tests (13 locations; some Outline/property locations expand to more than one case): apiClient.test.ts:136, 154, 204, 224; DriftTable.test.tsx:49, 67, 75, 87; EntryTrace.test.tsx:67, 79; ConsoleApp.test.tsx:161, 178; apiClient.pact.test.ts:152. Pact provider (pact_provider_test.go): add state \"tenant tnt_acme holds account treasury with one entry\" — insert domain.Tenant tnt_acme into store.tenants; as that tenant's key open treasury plus a funding account and post one transfer (pattern: seedAccountWithOneEntry). Interaction GET /accounts/treasury/entries?tenant_id=tnt_acme with operator key expects tenant_id on each entry; existing verdict interaction expects tenant_id on drift rows (handler already emits). web/console/pacts/console-ledgercore.json is regenerated by running vitest and must be committed. Run vitest in web/console (all 52 green), then go test -count=1 ./internal/adapters/http after copying libpact_ffi.so to /tmp. Foreground only. Deploy-order risk: server before console. Contract shape: pure-function (read-only client and provider reads)."
+        }
+      ]
+    }
+  ],
+  "implementation_scope": {
+    "source_directories": [
+      "internal/app",
+      "internal/adapters/postgres",
+      "internal/adapters/http",
+      "web/console/src"
+    ],
+    "test_directories": [
+      "internal/app",
+      "internal/adapters/postgres",
+      "internal/adapters/http",
+      "tests/acceptance/multitenancy",
+      "web/console/src"
+    ],
+    "excluded": [
+      "Follow-ups (b), (c) and (e) from docs/evolution/2026-10-16-fix-trial-balance-tenant-collision.md",
+      "KPI contract and architecture brief amendments (handled at finalize)",
+      "Changes to harness files world.go, steps_multitenancy_test.go, domain_types.go"
+    ]
+  },
+  "validation": {
+    "status": "approved",
+    "reviewer": "nw-acceptance-designer-reviewer",
+    "approved_at": "2026-10-16T12:00:00Z"
+  },
+  "reviews": [
+    {
+      "reviewer": "nw-acceptance-designer-reviewer",
+      "date": "2026-10-16",
+      "verdict": "REJECTED",
+      "blocking_issues": [
+        "SECURITY: step 01-02 said to reuse trialBalanceScopeFromQuery, which turns any ?tenant_id= into ScopedToTenant(id) and would let a tenant key switch tenants; explicit scope rule required, helper must not be called on entries path",
+        "Step 01-02 and 01-03 notes lacked the do-not-weaken-authored-tests instruction"
+      ],
+      "flags": [
+        "01-02 has 8 scenarios: tag @sizing-review-needed (informational)",
+        "01-02: stop and escalate if milestone-02 @console-compat or any byte-identical/CI-gated scenario goes red",
+        "01-03: enumerate the 15 failing vitest tests",
+        "01-02: add milestone-03b feature file (comment-only change at lines 17-18) to files_to_modify"
+      ],
+      "notes": "First attempt."
+    },
+    {
+      "reviewer": "nw-acceptance-designer-reviewer",
+      "date": "2026-10-16",
+      "verdict": "APPROVED",
+      "blocking_issues": [],
+      "flags": [
+        "(a) 01-03 count wording: 15 tests vs 13 listed locations; clarified as tests vs locations",
+        "(b) 01-02 notes: STOP-and-escalate is the only instruction for a red byte-identical or console-compat scenario; amendment wording removed",
+        "(c) 01-02 scenario_name names one scenario; the remaining seven are mapped in the notes"
+      ],
+      "notes": "Second attempt. Security and do-not-weaken blockers resolved."
+    }
+  ]
+}
