@@ -596,11 +596,12 @@ func runningBalances(entries []domain.Entry) ([]TracedEntry, error) {
 // platform-wide aggregate — every tenant's accounts and entries, compared per
 // (tenant, account) so two tenants sharing an account id are never merged.
 // ScopedToTenant(id) instead narrows every leg — the accounts enumerated, the
-// trial balance, and the computed balances — to that one tenant, and is refused tenant_not_found up front, before any of the three
-// reads run, when id was never provisioned: TrialBalance/ComputedBalances
-// alone cannot distinguish "unprovisioned tenant" from "provisioned tenant
-// with nothing posted yet", so the existence check has to happen here,
-// ahead of them, by naming.
+// trial balance, and the computed balances — to that one tenant, and is
+// refused tenant_not_found up front, before any of the three reads run, when
+// id was never provisioned: TrialBalance/ComputedBalances alone cannot
+// distinguish "unprovisioned tenant" from "provisioned tenant with nothing
+// posted yet", so the existence check has to happen here, ahead of them, by
+// naming.
 //
 // driftedAccounts (the pure comparison below) only ever sees what this
 // function handed it — a tenant-scoped call's accounts and computed
@@ -733,9 +734,9 @@ type Result struct {
 }
 
 // BooksReport is the operator's verdict. Drifted is empty on a healthy ledger,
-// and every row names the account with its stored balance, its computed
-// balance, and the delta — detection alone would pass a check and still fail
-// the operator (KPI-4).
+// and every row names the owning tenant and the account, with its stored
+// balance, its computed balance, and the delta — detection alone would pass a
+// check and still fail the operator (KPI-4).
 type BooksReport struct {
 	Balanced      bool
 	TrialBalance  domain.Money
