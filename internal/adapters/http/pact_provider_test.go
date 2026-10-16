@@ -450,12 +450,18 @@ func (r pactFakeTransactionRepository) Get(ctx context.Context, tenantID string,
 	return posting, nil
 }
 
-func (r pactFakeTransactionRepository) EntriesFor(ctx context.Context, scope ports.TenantScope, accountID string) ([]domain.Entry, error) {
-	var entries []domain.Entry
+func (r pactFakeTransactionRepository) EntriesFor(ctx context.Context, scope ports.TenantScope, accountID string) ([]ports.TenantEntry, error) {
+	scopedTenant, scoped := scope.Resolve()
+	var entries []ports.TenantEntry
 	for _, entry := range r.store.entries {
-		if entry.AccountID() == accountID {
-			entries = append(entries, entry)
+		if entry.AccountID() != accountID {
+			continue
 		}
+		tenantID := r.store.accounts[entry.AccountID()].TenantID()
+		if scoped && tenantID != scopedTenant {
+			continue
+		}
+		entries = append(entries, ports.TenantEntry{TenantID: tenantID, Entry: entry})
 	}
 	return entries, nil
 }

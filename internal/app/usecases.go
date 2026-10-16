@@ -512,7 +512,11 @@ func (l *Ledger) GetBalance(ctx context.Context, tenantID string, accountID stri
 // then sequence). Entry.Amount() is already signed from the traced account's
 // own perspective (fromDelta negative, toDelta positive), so running balance
 // is a plain fold — no new sign logic belongs here.
+//
+// TenantID names the tenant that owns the entry: account ids collide across
+// tenants (I9), so the running balance restarts for each tenant.
 type TracedEntry struct {
+	TenantID       string
 	Entry          domain.Entry
 	RunningBalance domain.Money
 }
@@ -542,7 +546,7 @@ type TracedEntry struct {
 // did before multitenancy (ADR-008, DDD-17).
 func (l *Ledger) GetEntries(ctx context.Context, scope ports.TenantScope, accountID string) ([]TracedEntry, error) {
 	entries, err := withUnitOfWork(ctx, l.store, fmt.Sprintf("reading entries for %q", accountID),
-		func(uow ports.UnitOfWork) ([]domain.Entry, error) {
+		func(uow ports.UnitOfWork) ([]ports.TenantEntry, error) {
 			if tenantID, scoped := scope.Resolve(); scoped {
 				if _, err := uow.Accounts().Get(ctx, tenantID, accountID); err != nil {
 					return nil, err
@@ -565,26 +569,32 @@ func (l *Ledger) GetEntries(ctx context.Context, scope ports.TenantScope, accoun
 }
 
 // runningBalances is the pure fold at the heart of GetEntries: row i's
-// running balance is the sum of Amount() over rows 0..i, in the order the
-// entries already arrive. An empty history folds to an empty trace, never an
-// error.
-func runningBalances(entries []domain.Entry) ([]TracedEntry, error) {
-	if len(entries) == 0 {
-		return []TracedEntry{}, nil
-	}
-
-	running, err := zeroMoney(entries[0].Amount().Currency())
-	if err != nil {
-		return nil, err
-	}
-
+// running balance is the sum of Amount() over that tenant's rows up to i, in
+// the order the entries already arrive. The sum and its currency restart
+// whenever the tenant changes, so tenants sharing an account id are never
+// merged (EntriesFor groups rows by tenant). An empty history folds to an
+// empty trace, never an error.
+func runningBalances(entries []ports.TenantEntry) ([]TracedEntry, error) {
 	traced := make([]TracedEntry, 0, len(entries))
-	for _, entry := range entries {
-		running, err = running.Add(entry.Amount())
+	var (
+		currentTenant string
+		running       domain.Money
+	)
+	for i, row := range entries {
+		if i == 0 || row.TenantID != currentTenant {
+			var err error
+			running, err = zeroMoney(row.Entry.Amount().Currency())
+			if err != nil {
+				return nil, err
+			}
+			currentTenant = row.TenantID
+		}
+		var err error
+		running, err = running.Add(row.Entry.Amount())
 		if err != nil {
 			return nil, err
 		}
-		traced = append(traced, TracedEntry{Entry: entry, RunningBalance: running})
+		traced = append(traced, TracedEntry{TenantID: row.TenantID, Entry: row.Entry, RunningBalance: running})
 	}
 	return traced, nil
 }

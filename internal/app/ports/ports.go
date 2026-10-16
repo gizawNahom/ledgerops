@@ -146,6 +146,15 @@ type AccountKey struct {
 	AccountID string
 }
 
+// TenantEntry is an entry paired with the tenant that owns it. Tenant is a
+// persistence attribute, so it is attached at the port and never added to
+// domain.Entry (ADR-007): an account id alone is ambiguous on a platform-wide
+// read (I9), and so is the entry that carries one.
+type TenantEntry struct {
+	TenantID string
+	Entry    domain.Entry
+}
+
 // TransactionRepository writes the transaction and its entries. It offers no
 // update and no delete, and the store refuses both anyway (D7 / OPS-10) — the
 // absence here is a reminder, not the enforcement.
@@ -159,7 +168,9 @@ type AccountKey struct {
 type TransactionRepository interface {
 	Append(ctx context.Context, tenantID string, posting domain.Posting) error
 	Get(ctx context.Context, tenantID string, transactionID string) (domain.Posting, error)
-	EntriesFor(ctx context.Context, scope TenantScope, accountID string) ([]domain.Entry, error)
+	// EntriesFor names each entry's owning tenant. Unscoped() rows are grouped
+	// by tenant, each tenant's own history in recorded order.
+	EntriesFor(ctx context.Context, scope TenantScope, accountID string) ([]TenantEntry, error)
 	TrialBalance(ctx context.Context, scope TenantScope) (domain.Money, int, error)
 	// ComputedBalances keys each figure by (tenant, account): two tenants'
 	// same-named accounts stay separate figures even when Unscoped().

@@ -723,3 +723,217 @@ func TestProvisionTenant_DuplicateNameRefusedWithNoRowWritten(t *testing.T) {
 	// to Unchanged() — no row was written on the refusal path.
 	statedelta.AssertStateDelta(t, before, after, provisioningUniverse, map[string]statedelta.Predicate{})
 }
+
+// --- GetEntries: tenant attribution and per-tenant running balances ----------
+//
+// fix-unscoped-entries-tenant-merge (docs/feature/fix-unscoped-entries-tenant-merge/rca.md).
+// Two tenants may each hold an account under the SAME id (I9), so the
+// operator's unscoped read reaches both tenants' entries for that id. Each
+// traced row must name the tenant it belongs to, and the running balance must
+// fold per tenant: a tenant's trail reflects only that tenant's own entries.
+//
+// These tests are written against the intended shape (rca.md section 3):
+//   - app.TracedEntry gains a TenantID field;
+//   - ports.TransactionRepository.EntriesFor returns tenant-qualified rows,
+//     grouped by tenant when unscoped (the real adapter orders by tenant_id,
+//     then recorded_at, then sequence), and narrows to one tenant when scoped;
+//   - fakeTransactionRepository.EntriesFor answers from the platform book
+//     (store.entriesWithTenantIn(scope)), filtered to accountID, grouped by
+//     tenant in first-seen order, relative order within a tenant preserved.
+// They do not compile until TracedEntry.TenantID exists; that is the RED.
+
+// recordPlatformEntry records one entry of `account` for `tenantID` in the
+// platform book, in call order.
+func recordPlatformEntry(t interface {
+	Helper()
+	Fatalf(string, ...any)
+}, store *fakeStore, tenantID, transactionID, account string, minor int64, sequence int64) {
+	t.Helper()
+	amount, err := domain.NewMoney(minor, "USD")
+	if err != nil {
+		t.Fatalf("NewMoney: %v", err)
+	}
+	entry, err := domain.NewEntry(transactionID, account, "counterparty", amount, fixedClock(), sequence)
+	if err != nil {
+		t.Fatalf("NewEntry: %v", err)
+	}
+	store.platformEntries = append(store.platformEntries, platformEntry{tenantID: tenantID, entry: entry})
+}
+
+// storeHoldingAccount is a fake store in which `account` exists, so the
+// courtesy existence check GetEntries runs (scoped or unscoped) passes and the
+// entries themselves are what the test is about.
+func storeHoldingAccount(t interface {
+	Helper()
+	Fatalf(string, ...any)
+}, account string) *fakeStore {
+	t.Helper()
+	zero, err := domain.NewMoney(0, "USD")
+	if err != nil {
+		t.Fatalf("NewMoney: %v", err)
+	}
+	held, err := domain.NewAccount(testTenantID, account, domain.System, zero)
+	if err != nil {
+		t.Fatalf("NewAccount: %v", err)
+	}
+	return newFakeStore(held)
+}
+
+// TestGetEntries_UnscopedNamesEachEntrysTenantAndRestartsTheRunningBalance is
+// the concrete example the acceptance scenarios mirror: tenant A's treasury
+// moves -100.00 then -25.00, tenant B's moves -40.00, recorded A, B, A.
+func TestGetEntries_UnscopedNamesEachEntrysTenantAndRestartsTheRunningBalance(t *testing.T) {
+	const tenantA, tenantB = "tnt_acme", "tnt_beacon"
+	store := storeHoldingAccount(t, "treasury")
+	recordPlatformEntry(t, store, tenantA, "txn-a1", "treasury", -10_000, 0)
+	recordPlatformEntry(t, store, tenantB, "txn-b1", "treasury", -4_000, 0)
+	recordPlatformEntry(t, store, tenantA, "txn-a2", "treasury", -2_500, 0)
+	ledger := app.NewLedger(store, fixedClock, sequentialIDs())
+
+	traced, err := ledger.GetEntries(context.Background(), ports.Unscoped(), "treasury")
+	if err != nil {
+		t.Fatalf("unexpected error on the operator's unscoped read: %v", err)
+	}
+
+	type row struct {
+		tenant  string
+		txn     string
+		balance int64
+	}
+	var got []row
+	for _, entry := range traced {
+		got = append(got, row{entry.TenantID, entry.Entry.TransactionID(), entry.RunningBalance.MinorUnits()})
+	}
+	want := []row{
+		{tenantA, "txn-a1", -10_000},
+		{tenantA, "txn-a2", -12_500},
+		{tenantB, "txn-b1", -4_000},
+	}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("unscoped trace = %+v, want %+v (each row names its tenant, tenants grouped, running balance restarting per tenant)", got, want)
+	}
+}
+
+// TestGetEntries_ScopedNamesItsOwnTenantAndNeverFoldsAnother covers the
+// tenant-key and operator-narrowed paths: a scoped read names the one tenant on
+// every row and its running balance reflects that tenant's entries alone.
+func TestGetEntries_ScopedNamesItsOwnTenantAndNeverFoldsAnother(t *testing.T) {
+	const tenantA, tenantB = "tnt_acme", "tnt_beacon"
+	store := storeHoldingAccount(t, "treasury")
+	recordPlatformEntry(t, store, tenantA, "txn-a1", "treasury", -10_000, 0)
+	recordPlatformEntry(t, store, tenantB, "txn-b1", "treasury", -4_000, 0)
+	recordPlatformEntry(t, store, tenantA, "txn-a2", "treasury", -2_500, 0)
+	ledger := app.NewLedger(store, fixedClock, sequentialIDs())
+
+	traced, err := ledger.GetEntries(context.Background(), ports.ScopedToTenant(tenantB), "treasury")
+	if err != nil {
+		t.Fatalf("unexpected error on a scoped read: %v", err)
+	}
+	if len(traced) != 1 {
+		t.Fatalf("scoped to %s: got %d rows %+v, want exactly that tenant's one entry", tenantB, len(traced), traced)
+	}
+	if traced[0].TenantID != tenantB || traced[0].RunningBalance.MinorUnits() != -4_000 {
+		t.Fatalf("scoped to %s: row = (%q, %d), want (%q, -4000)", tenantB, traced[0].TenantID, traced[0].RunningBalance.MinorUnits(), tenantB)
+	}
+}
+
+// TestProperty_GetEntries_RunningBalancesAreIndependentPerTenantWhenAccountIdsCollide
+// states the invariant for any number of tenants (one is the single-tenant
+// case, which must stay numerically as it was) holding the same account id,
+// with their entries recorded in any interleaving:
+//   - every row names the tenant it belongs to, and each tenant's rows are
+//     listed together;
+//   - a tenant's running balance is the plain cumulative sum of that tenant's
+//     own amounts -- nothing another tenant recorded enters it;
+//   - therefore the unscoped trace restricted to one tenant is identical to
+//     reading as that tenant alone (metamorphic oracle: the scoped path).
+func TestProperty_GetEntries_RunningBalancesAreIndependentPerTenantWhenAccountIdsCollide(t *testing.T) {
+	rapid.Check(t, func(rt *rapid.T) {
+		tenantCount := rapid.IntRange(1, 3).Draw(rt, "tenantCount")
+		tenants := make([]string, tenantCount)
+		amounts := map[string][]int64{}
+		var slots []string
+		for i := range tenants {
+			tenants[i] = fmt.Sprintf("tnt_colliding_%d", i)
+			n := rapid.IntRange(1, 5).Draw(rt, fmt.Sprintf("entryCount-%d", i))
+			amounts[tenants[i]] = rapid.SliceOfN(rapid.Int64Range(-1_000_000, 1_000_000), n, n).Draw(rt, fmt.Sprintf("amounts-%d", i))
+			for k := 0; k < n; k++ {
+				slots = append(slots, tenants[i])
+			}
+		}
+		// Record the entries in an arbitrary interleaving across tenants
+		// (Fisher-Yates over drawn indexes); each tenant's own order is the
+		// order its amounts were drawn in.
+		for i := len(slots) - 1; i > 0; i-- {
+			j := rapid.IntRange(0, i).Draw(rt, fmt.Sprintf("swap-%d", i))
+			slots[i], slots[j] = slots[j], slots[i]
+		}
+
+		store := storeHoldingAccount(rt, "treasury")
+		next := map[string]int{}
+		for seq, tenantID := range slots {
+			k := next[tenantID]
+			next[tenantID]++
+			recordPlatformEntry(rt, store, tenantID, fmt.Sprintf("txn-%s-%d", tenantID, k), "treasury", amounts[tenantID][k], int64(seq))
+		}
+		ledger := app.NewLedger(store, fixedClock, sequentialIDs())
+
+		traced, err := ledger.GetEntries(context.Background(), ports.Unscoped(), "treasury")
+		if err != nil {
+			rt.Fatalf("unexpected error on the unscoped read: %v", err)
+		}
+		if len(traced) != len(slots) {
+			rt.Fatalf("got %d rows, want %d (every tenant's entries, once)", len(traced), len(slots))
+		}
+
+		// Each tenant's rows are listed together.
+		finished := map[string]bool{}
+		current := ""
+		for _, row := range traced {
+			if row.TenantID == current {
+				continue
+			}
+			if finished[row.TenantID] {
+				rt.Fatalf("tenant %q reappears after another tenant's rows: not grouped by tenant", row.TenantID)
+			}
+			finished[current] = true
+			current = row.TenantID
+		}
+
+		for _, tenantID := range tenants {
+			var rows []app.TracedEntry
+			for _, row := range traced {
+				if row.TenantID == tenantID {
+					rows = append(rows, row)
+				}
+			}
+			if len(rows) != len(amounts[tenantID]) {
+				rt.Fatalf("tenant %q: %d rows name it, want %d", tenantID, len(rows), len(amounts[tenantID]))
+			}
+			var cumulative int64
+			for i, row := range rows {
+				cumulative += amounts[tenantID][i]
+				if row.Entry.Amount().MinorUnits() != amounts[tenantID][i] || row.RunningBalance.MinorUnits() != cumulative {
+					rt.Fatalf("tenant %q row %d: amount %d running %d, want amount %d running %d (only this tenant's own entries may enter its balance)",
+						tenantID, i, row.Entry.Amount().MinorUnits(), row.RunningBalance.MinorUnits(), amounts[tenantID][i], cumulative)
+				}
+			}
+
+			alone, err := ledger.GetEntries(context.Background(), ports.ScopedToTenant(tenantID), "treasury")
+			if err != nil {
+				rt.Fatalf("tenant %q: unexpected error on its own scoped read: %v", tenantID, err)
+			}
+			if len(alone) != len(rows) {
+				rt.Fatalf("tenant %q: scoped read has %d rows, unscoped trace restricted to it has %d", tenantID, len(alone), len(rows))
+			}
+			for i := range alone {
+				if alone[i].TenantID != tenantID || alone[i].RunningBalance != rows[i].RunningBalance ||
+					alone[i].Entry.TransactionID() != rows[i].Entry.TransactionID() {
+					rt.Fatalf("tenant %q row %d: scoped (%q, %d, %s) differs from unscoped (%q, %d, %s)", tenantID, i,
+						alone[i].TenantID, alone[i].RunningBalance.MinorUnits(), alone[i].Entry.TransactionID(),
+						rows[i].TenantID, rows[i].RunningBalance.MinorUnits(), rows[i].Entry.TransactionID())
+				}
+			}
+		}
+	})
+}

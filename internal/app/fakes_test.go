@@ -342,12 +342,24 @@ func (r fakeTransactionRepository) Get(ctx context.Context, tenantID string, tra
 	return posting, nil
 }
 
-func (r fakeTransactionRepository) EntriesFor(ctx context.Context, scope ports.TenantScope, accountID string) ([]domain.Entry, error) {
-	var entries []domain.Entry
-	for _, entry := range r.store.entries {
-		if entry.AccountID() == accountID {
-			entries = append(entries, entry)
+// EntriesFor honours scope, names each entry's tenant, and groups rows by
+// tenant in first-seen order, each tenant keeping its own recorded order --
+// the contract the real adapter answers with.
+func (r fakeTransactionRepository) EntriesFor(ctx context.Context, scope ports.TenantScope, accountID string) ([]ports.TenantEntry, error) {
+	var tenantOrder []string
+	byTenant := map[string][]ports.TenantEntry{}
+	for _, recorded := range r.store.entriesWithTenantIn(scope) {
+		if recorded.entry.AccountID() != accountID {
+			continue
 		}
+		if _, seen := byTenant[recorded.tenantID]; !seen {
+			tenantOrder = append(tenantOrder, recorded.tenantID)
+		}
+		byTenant[recorded.tenantID] = append(byTenant[recorded.tenantID], ports.TenantEntry{TenantID: recorded.tenantID, Entry: recorded.entry})
+	}
+	var entries []ports.TenantEntry
+	for _, tenantID := range tenantOrder {
+		entries = append(entries, byTenant[tenantID]...)
 	}
 	return entries, nil
 }

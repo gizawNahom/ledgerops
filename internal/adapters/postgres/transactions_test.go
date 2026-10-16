@@ -118,21 +118,27 @@ func TestTransactionRepository_EntriesFor_ReturnsOneAccountsHistoryOrdered(t *te
 	if len(entries) != 2 {
 		t.Fatalf("got %d entries, want 2", len(entries))
 	}
-	if !entries[0].RecordedAt().Before(entries[1].RecordedAt()) {
+	if !entries[0].Entry.RecordedAt().Before(entries[1].Entry.RecordedAt()) {
 		t.Fatalf("entries not ordered by recorded_at: %+v", entries)
 	}
-	if entries[0].Amount().MinorUnits() != -100 || entries[1].Amount().MinorUnits() != -50 {
+	if entries[0].Entry.Amount().MinorUnits() != -100 || entries[1].Entry.Amount().MinorUnits() != -50 {
 		t.Fatalf("unexpected amounts: %+v", entries)
 	}
 }
 
-// TestTransactionRepository_EntriesFor_UnscopedSeesEveryTenantScopedSeesOnlyItsOwn
-// covers the pure-function/return-only contract shape (brief.md § Multitenancy
-// Contract-shape table): a scoped call narrows to one tenant's own entries; an
-// unscoped call (ports.Unscoped()) stays platform-wide, byte-identical in
-// shape to the pre-multitenancy contract every existing OperatorKey/console
-// call path depends on.
-func TestTransactionRepository_EntriesFor_UnscopedSeesEveryTenantScopedSeesOnlyItsOwn(t *testing.T) {
+// TestTransactionRepository_EntriesFor_UnscopedAttributesEachEntryToItsTenantScopedSeesOnlyItsOwn
+// replaces the pin that asserted the cross-tenant merge as the contract
+// (fix-unscoped-entries-tenant-merge). Two tenants hold an account under the
+// SAME id (I9). An unscoped call (ports.Unscoped()) still reaches every
+// tenant's entries, but each one is returned as a ports.TenantEntry naming the
+// tenant it belongs to, and the rows are tenant-contiguous (ordered by
+// tenant, then recorded instant, then sequence) -- never interleaved by
+// instant across tenants. A scoped call narrows to one tenant and names it.
+//
+// Written against the intended port shape (rca.md section 3):
+// EntriesFor returns []ports.TenantEntry{TenantID, Entry}. It does not compile
+// until the port changes -- that compile failure is the RED.
+func TestTransactionRepository_EntriesFor_UnscopedAttributesEachEntryToItsTenantScopedSeesOnlyItsOwn(t *testing.T) {
 	store := migratedStore(t)
 	ctx := context.Background()
 
@@ -146,9 +152,9 @@ func TestTransactionRepository_EntriesFor_UnscopedSeesEveryTenantScopedSeesOnlyI
 	setup := beginUOW(t, store)
 	seedAccountForTenant(t, ctx, setup, tenantA, "wallet-scoped", domain.Wallet, 1000)
 	seedAccountForTenant(t, ctx, setup, tenantA, "system-scoped-a", domain.System, 0)
-	// tenantB opens an account under the SAME id ("wallet-scoped") — I9's
-	// rescoping is what makes this legal — so the unscoped query below has a
-	// genuine collision to prove it does not narrow by tenant.
+	// tenantB opens an account under the SAME id ("wallet-scoped") -- I9's
+	// rescoping is what makes this legal -- so the unscoped query below has a
+	// genuine collision to attribute.
 	seedAccountForTenant(t, ctx, setup, tenantB, "wallet-scoped", domain.System, 0)
 	seedAccountForTenant(t, ctx, setup, tenantB, "system-scoped-b", domain.System, 0)
 	if err := setup.Commit(ctx); err != nil {
@@ -157,23 +163,33 @@ func TestTransactionRepository_EntriesFor_UnscopedSeesEveryTenantScopedSeesOnlyI
 
 	recordedAt := time.Date(2026, 8, 20, 9, 0, 0, 0, time.UTC)
 
+	// Recorded order across tenants is A, B, A: an unscoped read ordered by
+	// instant alone would interleave them; tenant-contiguous order is A, A, B.
 	writeUOW := beginUOW(t, store)
 	if err := writeUOW.Transactions().Append(ctx, tenantA,
-		newPosting(t, "txn-entries-a", "wallet-scoped", "system-scoped-a", 100, recordedAt)); err != nil {
-		t.Fatalf("Append tenantA: %v", err)
+		newPosting(t, "txn-entries-a1", "wallet-scoped", "system-scoped-a", 100, recordedAt)); err != nil {
+		t.Fatalf("Append tenantA first: %v", err)
 	}
 	if err := writeUOW.Transactions().Append(ctx, tenantB,
-		newPosting(t, "txn-entries-b", "system-scoped-b", "wallet-scoped", 25, recordedAt.Add(time.Minute))); err != nil {
+		newPosting(t, "txn-entries-b1", "system-scoped-b", "wallet-scoped", 25, recordedAt.Add(time.Minute))); err != nil {
 		t.Fatalf("Append tenantB: %v", err)
+	}
+	if err := writeUOW.Transactions().Append(ctx, tenantA,
+		newPosting(t, "txn-entries-a2", "wallet-scoped", "system-scoped-a", 10, recordedAt.Add(2*time.Minute))); err != nil {
+		t.Fatalf("Append tenantA second: %v", err)
 	}
 	if err := writeUOW.Commit(ctx); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
 
 	readUOW := beginUOW(t, store)
-	scoped, err := readUOW.Transactions().EntriesFor(ctx, ports.ScopedToTenant(tenantA), "wallet-scoped")
+	scopedA, err := readUOW.Transactions().EntriesFor(ctx, ports.ScopedToTenant(tenantA), "wallet-scoped")
 	if err != nil {
-		t.Fatalf("EntriesFor(ScopedToTenant): %v", err)
+		t.Fatalf("EntriesFor(ScopedToTenant A): %v", err)
+	}
+	scopedB, err := readUOW.Transactions().EntriesFor(ctx, ports.ScopedToTenant(tenantB), "wallet-scoped")
+	if err != nil {
+		t.Fatalf("EntriesFor(ScopedToTenant B): %v", err)
 	}
 	unscoped, err := readUOW.Transactions().EntriesFor(ctx, ports.Unscoped(), "wallet-scoped")
 	_ = readUOW.Rollback(ctx)
@@ -181,15 +197,47 @@ func TestTransactionRepository_EntriesFor_UnscopedSeesEveryTenantScopedSeesOnlyI
 		t.Fatalf("EntriesFor(Unscoped): %v", err)
 	}
 
-	if len(scoped) != 1 {
-		t.Fatalf("scoped EntriesFor for tenantA's own account: got %d entries, want 1 (tenantB's entry on the same account id must not appear): %+v", len(scoped), scoped)
+	describe := func(rows []ports.TenantEntry) []string {
+		out := make([]string, 0, len(rows))
+		for _, row := range rows {
+			out = append(out, row.TenantID+"/"+row.Entry.TransactionID())
+		}
+		return out
 	}
-	if scoped[0].TransactionID() != "txn-entries-a" {
-		t.Fatalf("scoped EntriesFor returned transaction %q, want txn-entries-a", scoped[0].TransactionID())
+
+	wantScopedA := []string{tenantA + "/txn-entries-a1", tenantA + "/txn-entries-a2"}
+	if got := describe(scopedA); !equalStrings(got, wantScopedA) {
+		t.Fatalf("scoped to tenantA: got %v, want %v (tenantB's entry on the same account id must not appear, and every row names tenantA)", got, wantScopedA)
 	}
-	if len(unscoped) != 2 {
-		t.Fatalf("unscoped EntriesFor: got %d entries, want 2 (both tenants' entries against the colliding account id — the pre-existing unscoped contract): %+v", len(unscoped), unscoped)
+	wantScopedB := []string{tenantB + "/txn-entries-b1"}
+	if got := describe(scopedB); !equalStrings(got, wantScopedB) {
+		t.Fatalf("scoped to tenantB: got %v, want %v", got, wantScopedB)
 	}
+
+	// Per-tenant attribution, tenant-contiguous: both of A's entries, then B's.
+	wantUnscoped := []string{tenantA + "/txn-entries-a1", tenantA + "/txn-entries-a2", tenantB + "/txn-entries-b1"}
+	if got := describe(unscoped); !equalStrings(got, wantUnscoped) {
+		t.Fatalf("unscoped: got %v, want %v (each entry attributed to its own tenant, tenants not interleaved)", got, wantUnscoped)
+	}
+	distinct := map[string]bool{}
+	for _, row := range unscoped {
+		distinct[row.TenantID] = true
+	}
+	if len(distinct) != 2 {
+		t.Fatalf("unscoped read names %d distinct tenant ids, want 2: %v", len(distinct), describe(unscoped))
+	}
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func seedAccountForTenant(t *testing.T, ctx context.Context, uow ports.UnitOfWork, tenantID, id string, kind domain.AccountKind, startMinor int64) {

@@ -93,7 +93,7 @@ func (r transactionRepository) entriesForTransaction(ctx context.Context, tenant
 // existing OperatorKey/console call path, which must return byte-identical
 // results to before this step — brief.md § Multitenancy Contract-shape
 // table: this is the pure-function, return-only contract shape).
-func (r transactionRepository) EntriesFor(ctx context.Context, scope ports.TenantScope, accountID string) ([]domain.Entry, error) {
+func (r transactionRepository) EntriesFor(ctx context.Context, scope ports.TenantScope, accountID string) ([]ports.TenantEntry, error) {
 	tenantID, scoped := scope.Resolve()
 	var (
 		rows pgx.Rows
@@ -101,12 +101,12 @@ func (r transactionRepository) EntriesFor(ctx context.Context, scope ports.Tenan
 	)
 	if scoped {
 		rows, err = r.tx.Query(ctx,
-			`SELECT transaction_id, counterparty_id, amount_minor, currency, recorded_at, sequence
-			 FROM entries WHERE tenant_id = $1 AND account_id = $2 ORDER BY recorded_at, sequence`, tenantID, accountID)
+			`SELECT tenant_id, transaction_id, counterparty_id, amount_minor, currency, recorded_at, sequence
+			 FROM entries WHERE tenant_id = $1 AND account_id = $2 ORDER BY tenant_id, recorded_at, sequence`, tenantID, accountID)
 	} else {
 		rows, err = r.tx.Query(ctx,
-			`SELECT transaction_id, counterparty_id, amount_minor, currency, recorded_at, sequence
-			 FROM entries WHERE account_id = $1 ORDER BY recorded_at, sequence`, accountID)
+			`SELECT tenant_id, transaction_id, counterparty_id, amount_minor, currency, recorded_at, sequence
+			 FROM entries WHERE account_id = $1 ORDER BY tenant_id, recorded_at, sequence`, accountID)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("reading entries for account %q: %w", accountID, err)
@@ -247,22 +247,22 @@ func scanEntries(rows pgx.Rows, transactionID string) ([]domain.Entry, error) {
 	return entries, nil
 }
 
-func scanAccountEntries(rows pgx.Rows, accountID string) ([]domain.Entry, error) {
-	var entries []domain.Entry
+func scanAccountEntries(rows pgx.Rows, accountID string) ([]ports.TenantEntry, error) {
+	var entries []ports.TenantEntry
 	for rows.Next() {
 		var (
-			transactionID, counterparty, currency string
-			amountMinor, sequence                 int64
-			recordedAt                            time.Time
+			tenantID, transactionID, counterparty, currency string
+			amountMinor, sequence                           int64
+			recordedAt                                      time.Time
 		)
-		if err := rows.Scan(&transactionID, &counterparty, &amountMinor, &currency, &recordedAt, &sequence); err != nil {
+		if err := rows.Scan(&tenantID, &transactionID, &counterparty, &amountMinor, &currency, &recordedAt, &sequence); err != nil {
 			return nil, fmt.Errorf("reading an entry for account %q: %w", accountID, err)
 		}
 		entry, err := entryFromRow(transactionID, accountID, counterparty, currency, amountMinor, sequence, recordedAt)
 		if err != nil {
 			return nil, err
 		}
-		entries = append(entries, entry)
+		entries = append(entries, ports.TenantEntry{TenantID: tenantID, Entry: entry})
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("reading entries for account %q: %w", accountID, err)
