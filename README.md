@@ -5,46 +5,90 @@
 A double-entry ledger service that moves value between accounts correctly, and
 can prove it did. Go · PostgreSQL 16 · TypeScript operator console.
 
-> **Status:** a working, well-tested demo stack — not a production-hardened
-> service. There is no hosted environment, and the product direction has not
-> been validated with real users.
+> **Status:** the core is complete and covered by property-based, race and
+> crash tests, but it isn't production-ready yet. See
+> [Status and limitations](#status-and-limitations) and the
+> [Roadmap](#roadmap).
+
+**At a glance**
+
+- An HTTP API your services call to open accounts, move value and read
+  balances
+- No overdrafts, even under concurrent requests; safe retries with
+  idempotency keys
+- History that can't be rewritten, enforced by database permissions
+- Multiple tenants with isolated data
+- An on-demand check that the books balance, naming any account that drifts
+
+```text
+POST /transfers  {"from":"alice-01","to":"bob-01","amount":"500.00"}
+→ 422 {"account_id":"alice-01","available":"50.00","error":"insufficient_funds","requested":"500.00"}
+
+GET /health/trial-balance
+→ 200 {"verdict":"Books balance: YES","imbalance_minor":0,"entry_count":4,…}
+```
 
 ## Why
 
 Most teams that need balances start with a `balance` column and two `UPDATE`
 statements. That works until it doesn't, and when it fails it fails silently:
 value is created or destroyed, and nobody can reconstruct what happened.
-ledgerops is the primitive you reach for before that happens — for digital
-wallets, marketplaces, credits and loyalty points. Value is generic: the
-ledger doesn't care what a unit represents, only that units are conserved.
-
-More in [`docs/product/vision.md`](docs/product/vision.md).
+ledgerops does the bookkeeping part correctly from day one — for digital
+wallets, marketplaces, credits and loyalty points. The ledger doesn't care
+what a unit represents, only that units are conserved. More in
+[`docs/product/vision.md`](docs/product/vision.md).
 
 ## What it guarantees
 
 - **Conservation** — every transaction's legs sum to zero, in integer minor
-  units, decided by a pure domain core. `GET /health/trial-balance` proves the
-  books balance on demand. ([ADR-001](docs/product/architecture/adr-001-signed-int64-minor-units.md), [ADR-007](docs/product/architecture/adr-007-functional-domain-core.md))
+  units, decided by a pure domain core. `GET /health/trial-balance` checks
+  the whole ledger on demand.
 - **No overdrafts, even under concurrency** — sufficient funds is checked
-  under row locks taken in a deterministic order. ([ADR-002](docs/product/architecture/adr-002-row-locks-for-sufficient-funds.md))
+  under row locks taken in a fixed order, so concurrent transfers can't both
+  spend the same money.
 - **History can't be rewritten** — the service's database role has `UPDATE`
   and `DELETE` on entries revoked, and a trigger refuses them as a second
-  layer. ([ADR-004](docs/product/architecture/adr-004-append-only-entries.md))
+  layer.
 - **Safe retries** — resubmitting with the same `Idempotency-Key` returns the
-  original transaction instead of posting twice. ([ADR-005](docs/product/architecture/adr-005-idempotency-replay.md))
+  original transaction instead of posting twice.
 - **Tenant isolation** — each tenant's key sees only its own accounts and
-  entries. ([ADR-011](docs/product/architecture/adr-011-tenant-partition-not-context.md), [ADR-012](docs/product/architecture/adr-012-tenant-credential-mechanism.md), [ADR-013](docs/product/architecture/adr-013-multitenancy-migration-shape.md))
-- **Cross-tenant transfers need both sides** — an operator-authorized tenant
-  link plus a registered counterparty alias, and only the two parties (or the
-  operator) can read the transfer. ([ADR-014](docs/product/architecture/adr-014-tenant-link-and-counterparty-alias.md), [ADR-015](docs/product/architecture/adr-015-transfer-coordinator-persistence-and-execution.md), [ADR-016](docs/product/architecture/adr-016-dual-party-transfer-authorization.md))
+  entries.
+- **Cross-tenant transfers need both sides** — an operator-authorized link
+  between the two tenants plus a registered counterparty, and only the two
+  parties (or the operator) can read the transfer.
 
-## What it is not
+The reasoning behind each is in the
+[architecture decision records](docs/product/architecture/).
 
-- **Not an accounting package** — no chart-of-accounts templates, tax
-  reporting or invoicing.
-- **Not a payments processor** — it records movement; it never touches real
-  payment rails.
-- **Not a hosted service** — you run it yourself.
+## When to choose ledgerops (and when not to)
+
+Choose ledgerops if you already run PostgreSQL, want the ledger as a separate
+service your applications call over HTTP, and care most about being able to
+show — to yourself, an auditor or a regulator — that the books balance and
+that history hasn't been rewritten.
+
+It is **not** an accounting package (no chart-of-accounts templates, tax
+reporting or invoicing), **not** a payments processor (it records movement and
+never touches real payment rails), and **not** a hosted service (you run it
+yourself).
+
+Other open-source ledgers make different trade-offs, and one of them may suit
+you better:
+
+| If you need… | Consider | Why |
+|---|---|---|
+| Very high throughput | [TigerBeetle](https://github.com/tigerbeetle/tigerbeetle) | A purpose-built financial transactions database with very high throughput; it's a database rather than a service, so you add the API layer |
+| Ledger writes in the same database transaction as your application's data | [pgledger](https://github.com/pgr0ss/pgledger) | A ledger made of SQL functions inside your own PostgreSQL, with no separate service |
+| Programmable transaction logic and a full fintech platform | [Formance Ledger](https://github.com/formancehq/ledger) | Its own scripting language (Numscript), and runs as a replicated cluster |
+| Holds, multi-currency, reconciliation and a hosted option today | [Blnk](https://github.com/blnkfinance/blnk) | The closest in shape to ledgerops (a Go + PostgreSQL service), with a wider feature set today |
+
+_Based on each project's public documentation as of October 2026; check their
+current state._
+
+What ledgerops emphasises: a built-in trial-balance verdict with per-account
+drift detection, append-only history enforced by database permissions rather
+than convention, an operator console for checking the books, and tests that
+exercise those guarantees under races and crashes.
 
 ## Quickstart
 
@@ -52,55 +96,35 @@ More in [`docs/product/vision.md`](docs/product/vision.md).
 only needed for development (see [Development](#development)).
 
 ```bash
-make up          # builds and starts postgres, migrations, the API on :8080
-make demo-01     # posts a transfer end to end — CI runs this on every push
+make up          # builds and starts the stack: PostgreSQL, migrations, the API on :8080, Prometheus and Grafana
+make demo-01     # opens alice-01 and bob-01, funds alice-01 with 100.00, moves 50.00 to bob-01
 ```
 
-Or do it by hand. The demo stack ships with an operator key; provisioning a
-tenant returns that tenant's own key:
+Then try the guarantees with the demo tenant's key:
 
 ```bash
 API=http://localhost:8080
+TENANT="Authorization: Bearer demo-tenant-key"
 OP="Authorization: Bearer demo-operator-key"
 
-# 1. Provision a tenant (operator key) and keep its tenant_key
-TENANT="Authorization: Bearer $(curl -s -X POST $API/tenants -H "$OP" \
-  -H 'Content-Type: application/json' -d '{"name":"acme"}' \
-  | grep -o '"tenant_key":"[^"]*"' | cut -d'"' -f4)"
+# Retry demo-01's transfer with the same key: 200, same transaction_id, nothing posted twice
+curl -s -X POST $API/transfers -H "$TENANT" -H 'Idempotency-Key: demo-01-transfer' \
+  -H 'Content-Type: application/json' -d '{"from":"alice-01","to":"bob-01","amount":"50.00"}'
 
-# 2. Open accounts (tenant key). There is no "mint" endpoint: value enters
-#    through a system account, which may go negative.
-for acct in '"treasury","type":"system"' '"alice","type":"wallet"' '"bob","type":"wallet"'; do
-  curl -s -X POST $API/accounts -H "$TENANT" \
-    -H 'Content-Type: application/json' -d "{\"account_id\":$acct}"; echo
-done
-
-# 3. Fund alice, then move 30.00 to bob
-curl -s -X POST $API/transfers -H "$TENANT" -H 'Idempotency-Key: fund-alice' \
-  -H 'Content-Type: application/json' -d '{"from":"treasury","to":"alice","amount":"100.00"}'
-curl -s -X POST $API/transfers -H "$TENANT" -H 'Idempotency-Key: alice-pays-bob' \
-  -H 'Content-Type: application/json' -d '{"from":"alice","to":"bob","amount":"30.00"}'
-# → 201 {"legs":[{"account":"alice","amount":"-30.00"},{"account":"bob","amount":"30.00"}],"transaction_id":"txn_…"}
-```
-
-Then try the guarantees:
-
-```bash
-# Retry with the same key: 200, same transaction_id, nothing posted twice
-curl -s -X POST $API/transfers -H "$TENANT" -H 'Idempotency-Key: alice-pays-bob' \
-  -H 'Content-Type: application/json' -d '{"from":"alice","to":"bob","amount":"30.00"}'
-
-# Overdraw: 422 {"account_id":"alice","available":"70.00","error":"insufficient_funds","requested":"500.00"}
+# Overdraw: 422 {"account_id":"alice-01","available":"50.00","error":"insufficient_funds","requested":"500.00"}
 curl -s -X POST $API/transfers -H "$TENANT" -H 'Idempotency-Key: alice-overdraws' \
-  -H 'Content-Type: application/json' -d '{"from":"alice","to":"bob","amount":"500.00"}'
+  -H 'Content-Type: application/json' -d '{"from":"alice-01","to":"bob-01","amount":"500.00"}'
 
-# Balance and the entries behind it, with running balances
-curl -s $API/accounts/alice -H "$TENANT"          # {"account_id":"alice","balance":"70.00","type":"wallet"}
-curl -s $API/accounts/alice/entries -H "$TENANT"
+# Balance, and the entries behind it with running balances
+curl -s $API/accounts/alice-01 -H "$TENANT"          # {"account_id":"alice-01","balance":"50.00","type":"wallet"}
+curl -s $API/accounts/alice-01/entries -H "$TENANT"
 
-# Prove the books balance (operator key)
-curl -s $API/health/trial-balance -H "$OP"        # {"verdict":"Books balance: YES","imbalance_minor":0,…}
+# Check the books balance (operator key)
+curl -s $API/health/trial-balance -H "$OP"           # {"verdict":"Books balance: YES","imbalance_minor":0,…}
 ```
+
+To start from nothing instead — provision your own tenant, open accounts and
+fund them — follow [`docs/quickstart.md`](docs/quickstart.md).
 
 `make down` stops the stack **and deletes its data volume**. The keys and
 database passwords in `docker-compose.yml` are local demo values — don't reuse
@@ -118,37 +142,94 @@ them anywhere real.
 | `make race-02` | No balance goes negative under concurrent spenders | Docker, Go |
 | `make race-03` | Concurrent duplicate submissions store one transaction | Docker, Go |
 
-`demo-04` (like the quickstart above) provisions a fixed tenant name, so a
-second run fails with `tenant_already_exists`; run `make down` first. In
-[CI](.github/workflows/ci.yml), the race checks and the append-only and
-multitenancy acceptance suites gate the build, and the demos run from a clean
-checkout on every push. Timing targets are reported, not enforced;
-[`kpi-contracts.yaml`](docs/product/kpi-contracts.yaml) says which is which.
+Beyond these, property-based tests
+([`rapid`](https://github.com/flyingmutant/rapid)) check the domain and
+use-case rules — conservation, refusals that change nothing, retries that
+post once — against randomly generated transfers; CI runs them at 1,000
+cases each.
 
-## Performance and known limits
+In [CI](.github/workflows/ci.yml), the race checks, the property tests and the
+append-only and multitenancy acceptance suites fail the CI run if a guarantee
+breaks, and the demos run from a clean checkout on every push. Timing targets
+are reported rather than enforced; [`kpi-contracts.yaml`](docs/product/kpi-contracts.yaml)
+lists each target and how it's checked. `demo-04` provisions a fixed tenant
+name, so a second run fails with `tenant_already_exists`; run `make down`
+first.
 
-[`tests/load/transfers.js`](tests/load/transfers.js) drives the stack with k6
-in four profiles — `load`, `stress`, `soak` and `capacity` — through the
-manually triggered [Load test](.github/workflows/load-test.yml) workflow; it
-never runs on push. `capacity` holds a flat 300 requests/s against a CPU- and
-memory-pinned stack ([`docker-compose.loadtest.yml`](docker-compose.loadtest.yml)),
-with 80% of traffic aimed at 100 "hot" accounts out of 500, and gates on
-throughput, p95 latency under 500 ms and errors under 1%.
+## Status and limitations
 
-**Hot accounts are the ceiling.** In the last recorded run (2026-09-02),
-throughput (276.5 req/s) and errors (0%) held, but p95 latency reached
-923 ms. CPU, memory and the connection pool were each ruled out; during the
-run, 41–50 PostgreSQL connections sat waiting on row locks. Every transfer
-locks its sender and recipient rows (`SELECT … FOR UPDATE`, the price of the
-no-overdraft guarantee), so concurrent transfers touching the same account
-queue behind each other. Spreading the hot set across more accounts didn't
-relieve it, and reads never take these locks. If your traffic concentrates on
-a few accounts — a single treasury or fee account, say — this is the limit
-you'll meet first. The threshold was deliberately left strict rather than
-loosened to pass; the fix (a shorter critical section, batching writes per
-account, or splitting a hot balance across rows) is not yet built. Details in
-[`docs/feature/ledger-core/feature-delta.md`](docs/feature/ledger-core/feature-delta.md)
-(OPS-12 amendments).
+**Supported today**
+
+- Accounts (`wallet` and `system`) and two-leg transfers between them, with
+  overdraft protection, idempotent retries and append-only history
+- Multiple tenants with isolated data and their own API keys, plus
+  dual-authorized transfers between tenants
+- On-demand proof that the books balance, with per-account drift detection
+- Prometheus metrics, structured JSON request logs, and an operator console
+- Expand-only database migrations, so rolling back the service never needs a
+  schema rollback
+
+**Not yet**
+
+- **No license file** — until one is added, the code can't legally be reused
+- **One currency** — the API accepts USD amounts only
+- **No holds** — no reserve-then-capture or void flow
+- **No transactions with more than two legs** — e.g. paying a seller and a
+  platform fee atomically takes two transfers today
+- **No metadata on transfers** — no field for your own order or reference ids
+- **No webhooks or event stream** — integrations have to poll
+- **No OpenAPI spec, client SDKs or versioned releases**, and no published
+  container image; you build from source
+- **No platform-wide books check** — without `?tenant_id=`, the check only
+  covers the original demo tenant, and can report false drift when another
+  tenant reuses one of its account names; check each tenant with
+  `?tenant_id=` instead
+- **No tenant key rotation** or tenant offboarding
+- **No TLS in the service itself** — run it behind a TLS-terminating proxy
+- **Not yet run in production**, and not tested with more than one app
+  instance
+- **Hot-account write contention** — see below
+
+## Performance
+
+**In short:** tested at about 276 requests/s on a small, resource-capped
+stack with no errors. Concurrent transfers on the same account queue behind
+each other, so a single very busy account — a treasury or fee account, say —
+is the first limit you'll hit.
+
+The detail: [`tests/load/transfers.js`](tests/load/transfers.js) drives the
+stack with k6 in four profiles — `load`, `stress`, `soak` and `capacity` —
+through the manually triggered [Load test](.github/workflows/load-test.yml)
+workflow; it never runs on push. `capacity` holds a flat 300 requests/s
+against a CPU- and memory-capped stack
+([`docker-compose.loadtest.yml`](docker-compose.loadtest.yml)), with 80% of
+traffic aimed at 100 "hot" accounts out of 500, and passes only if
+throughput, p95 latency (under 500 ms) and errors (under 1%) all hold.
+
+In the last recorded run (2026-09-02), throughput (276.5 req/s) and errors
+(0%) held, but p95 latency reached 923 ms. CPU, memory and the connection
+pool were each ruled out; during the run, 41–50 PostgreSQL connections sat
+waiting on row locks. Every transfer locks its sender and recipient rows
+(`SELECT … FOR UPDATE`, the price of the no-overdraft guarantee), so
+concurrent transfers touching the same account queue behind each other.
+Spreading the hot traffic across more accounts didn't relieve it, and reads
+never take these locks. The latency threshold was kept strict rather than
+loosened to pass; the fixes are on the [Roadmap](#roadmap). The full
+investigation is in the
+[load-test notes](docs/feature/ledger-core/feature-delta.md).
+
+## Roadmap
+
+1. **Adoptable** — a license, versioned releases with a published container
+   image, an OpenAPI spec, and metadata on transfers.
+2. **Wallet essentials** — holds (reserve, capture, void), transactions with
+   more than two legs, and webhooks driven by an outbox so only committed
+   postings are announced.
+3. **Tamper evidence** — hash-chained entries, signed checkpoints, and a
+   standalone `ledgerops verify` command an auditor can run against a copy of
+   the database without trusting the running service.
+4. **Performance** — shorter lock hold times on the write path, then group
+   commit for busy accounts.
 
 ## Operator console and observability
 
@@ -160,7 +241,7 @@ against the running stack:
 cd web/console && npm ci && npm run dev   # open the URL it prints, paste demo-operator-key
 ```
 
-The compose stack also starts Prometheus on `:9090` and Grafana on `:3000`.
+The stack also runs Prometheus on `:9090` and Grafana on `:3000`.
 `GET /metrics` is unauthenticated by design, so scrapers don't need a key.
 
 ## API
@@ -175,7 +256,7 @@ The compose stack also starts Prometheus on `:9090` and Grafana on `:3000`.
 | `POST /counterparties` | tenant |
 | `GET /accounts/{id}/entries` | tenant, or operator (all tenants) |
 | `GET /transfers/{transfer_id}` | either party's tenant key, or operator |
-| `GET /metrics`, `GET /console/*` | none |
+| `GET /metrics`, console static assets | none |
 
 Credentials are `Authorization: Bearer <key>`. The operator key is never
 accepted on tenant routes; a wrong or missing key gets
@@ -200,9 +281,9 @@ A modular monolith with ports and adapters: a pure functional domain core
 decides, and the shell around it performs the effects. The service never
 connects as the migration role, so it can't disable the append-only trigger.
 Migrations are expand-only, so rolling back code never needs a schema
-rollback. The full design is in
-[`docs/product/architecture/brief.md`](docs/product/architecture/brief.md) and
-the [ADRs](docs/product/architecture/).
+rollback. The full design is in the
+[architecture brief](docs/product/architecture/brief.md) and the
+[decision records](docs/product/architecture/).
 
 ## Development
 
@@ -224,21 +305,16 @@ go test ./internal/domain/... ./internal/app/... -race
 go test ./internal/adapters/postgres/... -race
 go test ./tests/acceptance/... -count=1
 cd web/console && npm run lint && npm test
+# internal/adapters/http also needs the native libpact_ffi library — see the console job in ci.yml
 ```
-
-The `internal/adapters/http` tests verify the console's Pact contract and need
-the native `libpact_ffi` library; see the `console` job in
-[`ci.yml`](.github/workflows/ci.yml) for the install step.
 
 When contributing, keep `internal/domain` pure — effects belong in
 `internal/adapters` — and run `gofmt`, since CI rejects unformatted files.
 
 ## How it was built
 
-ledgerops was built with the nWave methodology, by AI agents working in Claude Code through discuss, design,
-distill (acceptance tests first) and deliver waves. [`CLAUDE.md`](CLAUDE.md)
-holds the working conventions. The `docs/feature/` and `docs/evolution/`
-directories are the waves' working papers and retrospectives, not user
-documentation; the user-facing docs are this README, the
-[vision](docs/product/vision.md), the
-[architecture brief](docs/product/architecture/brief.md) and the ADRs.
+Built with Claude Code agents, following the nWave methodology: acceptance
+tests first, then implementation. [`CLAUDE.md`](CLAUDE.md) holds the working
+conventions. `docs/feature/` and `docs/evolution/` hold the design and
+delivery notes from that process; they're working papers, not user
+documentation.
