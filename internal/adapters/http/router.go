@@ -207,10 +207,11 @@ func NewRouter(deps Deps) http.Handler {
 	})
 
 	// GET /accounts/{id}/entries stays dual-mode (step 02-04): a tenant_key
-	// caller sees only their own tenant's entries, and the existing
-	// unscoped OperatorKey call -- the console's own credential -- keeps
-	// working byte-identical to today (console-compatibility hard
-	// constraint). requireTenantKeyOrOperatorKey tries the OperatorKey
+	// caller sees only their own tenant's entries, and the OperatorKey call
+	// -- the console's own credential -- reads every tenant's entries, each
+	// row tagged with its tenant_id, grouped by tenant, with a running
+	// balance per tenant; the operator may narrow with ?tenant_id=.
+	// requireTenantKeyOrOperatorKey tries the OperatorKey
 	// comparison first, injecting Unscoped() on a match, and falls back to
 	// the tenant resolver otherwise.
 	router.Group(func(entries chi.Router) {

@@ -61,8 +61,8 @@ function verdictStatusFromWire(value: unknown): VerdictStatus | undefined {
 }
 
 // parseDriftRow -- driftWire (handlers.go:302-307) carries the owning
-// tenant_id, a snake_case account_id and decimal amounts serialized as strings. Validates the wire
-// shape, then constructs the domain DriftRow with accountId mapped from
+// tenant_id, a snake_case account_id and decimal amounts serialized as
+// strings. Validates the wire shape, then constructs the domain DriftRow with accountId mapped from
 // account_id and stored/computed/delta converted to Number.
 function parseDriftRow(raw: unknown): DriftRow {
   if (typeof raw !== "object" || raw === null) {

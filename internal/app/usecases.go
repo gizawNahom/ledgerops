@@ -532,12 +532,14 @@ type TracedEntry struct {
 // POST /transfers and GET /accounts/{id} (ADR-008, DDD-17).
 //
 // scope arrives from GET /accounts/{id}/entries' dual-mode gate
-// (requireTenantKeyOrOperatorKey, step 02-04): a tenant-key caller gets
-// ScopedToTenant(their own tenant), an OperatorKey caller gets Unscoped().
-// scope is passed straight through to EntriesFor — no translation — which is
-// what keeps the unscoped path byte-identical to the pre-multitenancy query
-// (step 02-02's own EntriesFor implementation already carries the unscoped
-// SQL shape). The account-existence courtesy check runs either way: scoped
+// (requireTenantKeyOrOperatorKey, step 02-04), optionally narrowed by the
+// operator's ?tenant_id=: a tenant-key caller gets ScopedToTenant(their own
+// tenant), an OperatorKey caller gets Unscoped() or the tenant they named.
+// scope is passed straight through to EntriesFor — no translation. An
+// Unscoped() read returns every tenant's rows tagged with their owning
+// tenant and grouped by tenant, so two tenants sharing an account id are
+// never merged, and each tenant carries its own running balance. The
+// account-existence courtesy check runs either way: scoped
 // via AccountRepository.Get (single-tenant read, as ports.go requires),
 // unscoped via AccountRepository.ExistsAnyTenant — the one deliberately
 // tenant-agnostic existence read (step 02-04), needed because an Unscoped()
@@ -579,17 +581,17 @@ func runningBalances(entries []ports.TenantEntry) ([]TracedEntry, error) {
 	var (
 		currentTenant string
 		running       domain.Money
+		err           error
 	)
 	for i, row := range entries {
-		if i == 0 || row.TenantID != currentTenant {
-			var err error
+		startsNewTenant := i == 0 || row.TenantID != currentTenant
+		if startsNewTenant {
 			running, err = zeroMoney(row.Entry.Amount().Currency())
 			if err != nil {
 				return nil, err
 			}
 			currentTenant = row.TenantID
 		}
-		var err error
 		running, err = running.Add(row.Entry.Amount())
 		if err != nil {
 			return nil, err

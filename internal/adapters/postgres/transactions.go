@@ -89,10 +89,12 @@ func (r transactionRepository) entriesForTransaction(ctx context.Context, tenant
 // deterministic order (US-5).
 //
 // scope decides whether the query is narrowed to one tenant's own entries
-// (tenant_key callers, new) or left unscoped across every tenant (the
-// existing OperatorKey/console call path, which must return byte-identical
-// results to before this step — brief.md § Multitenancy Contract-shape
-// table: this is the pure-function, return-only contract shape).
+// (tenant_key callers, or an operator naming ?tenant_id=) or left unscoped
+// across every tenant (the OperatorKey/console call path). Every row names
+// its owning tenant, and rows are ordered by tenant first so each tenant's
+// history is contiguous, in recorded order (brief.md § Multitenancy
+// Contract-shape table: this is the pure-function, return-only contract
+// shape).
 func (r transactionRepository) EntriesFor(ctx context.Context, scope ports.TenantScope, accountID string) ([]ports.TenantEntry, error) {
 	tenantID, scoped := scope.Resolve()
 	var (
