@@ -38,7 +38,7 @@ verified against a real database.
 - [ ] Anonymous pullability is checked on the pushed digest before any version tag is promoted; the first run is expected to fail this step until the owner makes the package public (OQ-7), then a re-run passes
 
 ## Dependencies
-Slices 01 and 02. Owner action: make the GHCR package public (OQ-7).
+Slices 01a and 02. Owner action: make the GHCR package public (OQ-7).
 
 ## Production data
 Real tag push on the real repository (`v0.1.0-rc.1`), real GHCR, real Postgres

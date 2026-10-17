@@ -7,7 +7,7 @@
 
 `0001_init.up.sql` creates `ledgerops_app LOGIN PASSWORD 'app-secret'` inside an
 `IF NOT EXISTS` guard and runs `GRANT CONNECT ON DATABASE ledgerops`. Operators
-must bring their own password (D5), on any database name (US-1), and the app
+must bring their own password (D5), on any database name (US-1b), and the app
 role must never accept a password the operator did not supply on a database a
 `migrate` run created (Rule A). Databases created before this feature already
 accept `app-secret`; that is existing state until a `migrate` run completes the

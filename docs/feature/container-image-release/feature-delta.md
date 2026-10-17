@@ -66,13 +66,13 @@ User answers, taken as given (D1-D9) plus DISCUSS decisions (D10-D13).
 - D9 (revised 2026-10-17, user decision) The published image refuses to start when `LEDGEROPS_OPERATOR_KEY` or `LEDGEROPS_APP_DSN` is unset or blank (fail fast, one clear error, no baked-in demo keys). `LEDGEROPS_DEMO_TENANT_KEY` is optional: when unset the demo-tenant mapping is off and nothing resolves to `tnt_legacy_seed` through it. Rationale: the mapping is a demo affordance onto a sentinel tenant; a fresh production database has no legacy data, and requiring it would force every client to mint a credential for that tenant. The original D9 required all of the keys; only the demo key changed. OQ-1 closed.
 - D10 Scope: oversized by the heuristic once D7 was chosen (see Scope Assessment). User-approved 2026-10-17 to keep as one feature with eight slices of at most one day each. OQ-11 closed.
 - D14 First version is `v0.1.0`; release notes are GitHub auto-generated. OQ-12 closed.
-- D11 Ordering: walking skeleton is slices 01-03 (migrate, safe start, gated publish with smoke), so a usable rc image exists after three slices. Hardening (upgrade, console, tags/arch, signing, docs) follows.
+- D11 Ordering: walking skeleton is slices 01a, 02 and 03 (migrate, safe start, gated publish with smoke), so a usable rc image exists after three slices. Slice 01 was later split into 01a and 01b (D15). Hardening (upgrade, console, tags/arch, signing, docs) follows.
 - D12 Two further jobs added beyond J11: J12 (provenance) and J13 (upgrade in place). Each is a distinct P2 outcome that the user's D7 and D8 choices imply.
 - D13 One new journey, `docs/product/journeys/pull-and-run-ledgerops.yaml`, extends the SSOT; no existing journey changes.
 
 ## Wave: DISCUSS / [REF] Scope Assessment (Elephant Carpaccio Gate)
 
-Result: oversized by heuristic, user-approved (2026-10-17) to keep as one feature with 8 slices of at most one day each.
+Result: oversized by heuristic, user-approved (2026-10-17) to keep as one feature with 8 slices of at most one day each; slice 01 was later split into 01a/01b (D15), giving nine slices of at most one day.
 
 | Signal | Reading |
 |---|---|
@@ -90,23 +90,24 @@ User: P1 Priya (run it), P2 Tomasz (trust it, upgrade it). Goal: run a pinned, v
 
 | Find a release | Pull | Prepare database | Start | Operate | Upgrade |
 |---|---|---|---|---|---|
-| Tag-triggered GitHub Release (06) | Pull exact tag, `docker pull` (03) | `migrate` with my password (01) | Fail-fast config check (02) | Console at `/console` (05) | Migrate existing demo DB in place (04) |
-| Minor and `latest` tags (06) | Multi-arch manifest (06) | Non-default database name (01) | `version` output (05) | Verify signature and SBOM (07) | Rotate password (04) |
+| Tag-triggered GitHub Release (06) | Pull exact tag, `docker pull` (03) | `migrate` with my password (01a) | Fail-fast config check (02) | Console at `/console` (05) | Migrate existing demo DB in place (04) |
+| Minor and `latest` tags (06) | Multi-arch manifest (06) | One ledgerops database per cluster, any name for the first (01b) | `version` output (05) | Verify signature and SBOM (07) | Rotate password (04) |
 | Prerelease handling (06) | Anonymous pull (OQ-7) | | | Quickstart for published image (08) | |
 
-Walking skeleton (thinnest end-to-end): US-1 (migrate with a password), US-2 (refuse bad config), US-3 (gated publish and smoke, amd64, exact tag only). After these, `docker pull` then `migrate` then run then `/health` works from a registry.
+Walking skeleton (thinnest end-to-end): US-1a (migrate with a password), US-2 (refuse bad config), US-3 (gated publish and smoke, amd64, exact tag only). After these, `docker pull` then `migrate` then run then `/health` works from a registry.
 
 Releases by outcome:
-- Release A, "A client can run a pinned image": US-1, US-2, US-3. Outcome KPIs K1, K3.
+- Release A, "A client can run a pinned image": US-1a, US-1b, US-2, US-3. Outcome KPIs K1, K3. US-1b is not on the walking skeleton; it follows US-1a and is delivered before US-4.
 - Release B, "Existing and operator users are safe": US-4, US-5. KPIs K4, K6.
 - Release C, "Looks like a real release": US-6, US-7, US-8. KPIs K2, K5, K7.
 
 ## Priority Rationale
 
-1. Slice 01 first: the password literal in `0001` is the highest-uncertainty change (it touches an applied migration) and everything else depends on `migrate` existing. If setting a password Go-side breaks the append-only guarantee or the demo path, we learn it on day one.
+1. Slice 01a first: the password literal in `0001` is the highest-uncertainty change (it touches an applied migration) and everything else depends on `migrate` existing. If setting a password Go-side breaks the append-only guarantee or the demo path, we learn it on day one.
+1b. Slice 01b right after 01a, before slice 04: the cluster rule is a refusal layered on `migrate`, off the walking-skeleton path, and slice 04's upgrade must know whether it may touch an existing role. It carries the DDD-48 atomic-claim risk, so it is learned early but does not block slices 02 and 03, which can run in parallel with it.
 2. Slice 02 second: tiny, no dependency, and it removes the failure that would otherwise make the smoke test in slice 03 meaningless (an image that starts with no operator key).
 3. Slice 03 third: proves the pipeline end to end on an exact tag only. Biggest unknown in CI (workflow_call reuse of a compose-based `ci.yml`), so it comes before polish.
-4. Slice 04 next: the upgrade promise (D8) protects people who already run the demo stack; it reuses 01's code and the 03 pipeline.
+4. Slice 04 next: the upgrade promise (D8) protects people who already run the demo stack; it reuses 01a's code, 01b's role-ownership rule, and the 03 pipeline.
 5. Slice 05: console and version. Independent of the others; placed after the pipeline exists so the smoke test can assert `/console`.
 6. Slice 06: full tag set, arm64, labels, GitHub Release. Pure packaging polish over a working pipeline; moves `latest` for the first time.
 7. Slice 07: signing and SBOM. Highest external-tooling risk (keyless identity, permissions) with the lowest effect on whether a client can run the image, so it comes after `latest` exists but before docs freeze the verify command.
@@ -116,9 +117,9 @@ Releases by outcome:
 
 Every story has a real user-invocable entry point and an observable result. No story is `@infrastructure`. Image and command names are illustrative; DESIGN settles exact names (OQ-3). Passwords below are fixtures, not secrets.
 
-### US-1 — Migrate a fresh database with my own app password
+### US-1a — Migrate a fresh database with my own app password
 
-job_id: J11 | persona: P1 | slice: 01
+job_id: J11 | persona: P1 | slice: 01a (split from the former US-1; the cluster rule is US-1b)
 
 Problem: Priya Nair is a backend engineer at Kestrel Wallet who wants to try ledgerops against her own Postgres. The only way to set up the database today is the demo stack, whose migrate step carries a password written into the SQL (`app-secret`) that she cannot change, and that only works against a database literally named `ledgerops`.
 
@@ -172,25 +173,6 @@ When Priya re-runs `migrate`
 Then it exits non-zero naming the dirty version and changes nothing
 And `ledgerops_app` still refuses `app-secret`
 
-Scenario: The first ledgerops database in a cluster can have any name
-Given the cluster has no `ledgerops_app` role and the database is named `kestrel_ledger`, not `ledgerops`
-When Priya runs `migrate`
-Then it succeeds and `ledgerops_app` can connect to `kestrel_ledger`
-
-Scenario: A second ledgerops database in the same cluster is refused
-Given the cluster's database `kestrel_ledger` is already migrated, so the role `ledgerops_app` exists
-When Priya runs `migrate` against a second, empty database `kestrel_ledger_2` in that cluster
-Then it exits non-zero naming the conflict
-And the role, its password, `kestrel_ledger` and `kestrel_ledger_2` are all unchanged
-And running `migrate` again against `kestrel_ledger` itself (a database already carrying the schema) is not refused
-And the message names the remedy: migrate the database that owns the role, use a separate cluster, or, when that database no longer exists, run `DROP ROLE ledgerops_app` as a privileged role
-
-Scenario: Two simultaneous first migrations in one cluster cannot both claim the role
-Given two empty databases `kestrel_ledger` and `kestrel_ledger_2` in one cluster
-When two `migrate` runs start at the same time
-Then exactly one succeeds and the other refuses with the cluster-rule message
-And neither database is left in a dirty migration state
-
 Scenario: A mismatched password is caught at app start, not at the first request
 Given the database was migrated with `T7!kq@9x%Zm`
 When Priya starts the app with an app DSN carrying a different password
@@ -203,26 +185,77 @@ Acceptance Criteria
 - [ ] At no point, including after an interrupted run, does `ledgerops_app` authenticate with a password the operator did not supply
 - [ ] A run killed during a migration file leaves a dirty version; re-running `migrate` refuses naming that version and changes nothing
 - [ ] A password file the image user cannot read fails with a named error and no database change
-- [ ] Migration works for a database with any name, for the first ledgerops database in a cluster
-- [ ] A fresh `migrate` against an empty database in a cluster where `ledgerops_app` already exists exits non-zero naming the conflict, with the role, its password and both databases unchanged; a database already carrying the ledgerops schema (upgrade, rotation, re-run) is not refused; the message names the remedies (migrate the owning database, use a separate cluster, or `DROP ROLE ledgerops_app` as a privileged role when the owning database no longer exists)
-- [ ] Two simultaneous `migrate` runs against two empty databases in one cluster: exactly one succeeds, the other refuses with the cluster-rule message, and neither database is left dirty
 - [ ] The password never appears in command output or logs, with or without failure
 - [ ] `docker-compose.yml`, the loadtest compose, the test helper and CI set `LEDGEROPS_APP_PASSWORD=app-secret` explicitly and `make demo-01..04`, `chaos-01`, `race-02`, `race-03` pass unmodified
 - [ ] An app started with the wrong password exits non-zero with a clear refusal and no password in the log
 
 Outcome KPIs
 - Who: integrating developers preparing a database from the image
-- Does what: reach a migrated database with their own password without editing SQL or choosing the database name `ledgerops`
-- By how much: 100% of fresh-database acceptance runs end with the supplied password working and `app-secret` refused
+- Does what: reach a migrated database with their own password without editing SQL
+- By how much: 100% of fresh-database acceptance runs end with the supplied password working and `app-secret` refused (K3)
 - Measured by: acceptance suite against a Testcontainers Postgres, and the release smoke test
 - Baseline: 0% (the password is fixed in SQL)
 
 Technical Notes
 - Changes an already-applied migration's content (`0001`): safe handling is OQ-2. The compose `migrate` service moves from `migrate/migrate` to this subcommand, because `migrate/migrate` cannot set the password; demo CI then exercises the same code the release ships.
 - The privileged role needs enough privilege to create and alter roles (OQ-8). `migrate` runs a preflight privilege probe first: an insufficient privilege fails before any schema change with "no changes applied".
-- One ledgerops database per Postgres cluster (user decision, DESIGN review cycle 1): the role `ledgerops_app` is cluster-global, so a second fresh database in the same cluster is refused. Remedy: use a separate cluster, migrate the database that already owns the role, or, when that database no longer exists, run `DROP ROLE ledgerops_app` as a privileged role. The role claim is atomic (DDD-48), so concurrent first migrations cannot both succeed.
 - A secret file owned by root with mode 0400 is unreadable by the non-root image user; the named error documents this trap.
+- The cluster rule (one ledgerops database per cluster) is US-1b, which builds on this story.
 - Dependencies: none inside this feature; depends on shipped `ledger-core`.
+
+### US-1b — One ledgerops database per cluster
+
+job_id: J11 | persona: P1 | slice: 01b | depends on: US-1a
+
+Problem: Tomasz Kowalski shares one Postgres cluster at Kestrel between teams. The role `ledgerops_app` is cluster-global, so running `migrate` for a second ledgerops database in the same cluster would silently share (and on rotation, change) one login across both databases. Today nothing tells him, and he finds out when one team's password rotation locks the other team's service out.
+
+#### Elevator Pitch
+Before: Tomasz cannot tell that a second ledgerops database in the same cluster would share the app role and its password with the first.
+After: run `docker run --rm -e LEDGEROPS_MIGRATE_DSN=postgres://kestrel_admin:...@db/kestrel_ledger_2 -e LEDGEROPS_APP_PASSWORD_FILE=/run/secrets/ledgerops_app_password -v ./secrets:/run/secrets ledgerops:dev migrate` against a cluster whose `kestrel_ledger` is already migrated → sees a refusal naming the conflict and the remedies, exit non-zero (wording illustrative)
+Decision enabled: Tomasz decides whether to provision a separate cluster, migrate the database that owns the role instead, or drop an orphaned role.
+
+Domain Examples
+1. Priya's cluster has no ledgerops role; she migrates `kestrel_ledger` (not the name `ledgerops`) and it works: the first database in a cluster can have any name.
+2. Tomasz's cluster already has `kestrel_ledger` migrated; he tries `kestrel_ledger_2`. Migrate refuses, nothing changes, and re-running migrate against `kestrel_ledger` is still allowed.
+3. Two engineers start `migrate` for `kestrel_ledger` and `kestrel_ledger_2` at the same moment on a fresh cluster. Exactly one succeeds; the other refuses and leaves no dirty state. A third case: `kestrel_ledger` was dropped but the role remains; the refusal names `DROP ROLE ledgerops_app` as the privileged remedy.
+
+UAT Scenarios (BDD)
+
+Scenario: The first ledgerops database in a cluster can have any name
+Given the cluster has no `ledgerops_app` role and the database is named `kestrel_ledger`, not `ledgerops`
+When Priya runs `migrate`
+Then it succeeds and `ledgerops_app` can connect to `kestrel_ledger`
+
+Scenario: A second ledgerops database in the same cluster is refused
+Given the cluster's database `kestrel_ledger` is already migrated, so the role `ledgerops_app` exists
+When Tomasz runs `migrate` against a second, empty database `kestrel_ledger_2` in that cluster
+Then it exits non-zero naming the conflict
+And the role, its password, `kestrel_ledger` and `kestrel_ledger_2` are all unchanged
+And running `migrate` again against `kestrel_ledger` itself (a database already carrying the schema) is not refused
+And the message names the remedy: migrate the database that owns the role, use a separate cluster, or, when that database no longer exists, run `DROP ROLE ledgerops_app` as a privileged role
+
+Scenario: Two simultaneous first migrations in one cluster cannot both claim the role
+Given two empty databases `kestrel_ledger` and `kestrel_ledger_2` in one cluster
+When two `migrate` runs start at the same time
+Then exactly one succeeds and the other refuses with the cluster-rule message
+And neither database is left in a dirty migration state
+
+Acceptance Criteria
+- [ ] Migration works for a database with any name, for the first ledgerops database in a cluster
+- [ ] A fresh `migrate` against an empty database in a cluster where `ledgerops_app` already exists exits non-zero naming the conflict, with the role, its password and both databases unchanged; a database already carrying the ledgerops schema (upgrade, rotation, re-run) is not refused; the message names the remedies (migrate the owning database, use a separate cluster, or `DROP ROLE ledgerops_app` as a privileged role when the owning database no longer exists)
+- [ ] Two simultaneous `migrate` runs against two empty databases in one cluster: exactly one succeeds, the other refuses with the cluster-rule message, and neither database is left dirty
+
+Outcome KPIs
+- Who: operators sharing a Postgres cluster
+- Does what: learn at migrate time that a second ledgerops database would share the app role, instead of through a lockout
+- By how much: 100% of second-database acceptance runs refuse with the role, password and both databases unchanged; 0 concurrent runs both succeed
+- Measured by: acceptance suite in a dedicated Testcontainers cluster
+- Baseline: 0% (no detection today)
+
+Technical Notes
+- User decision (DESIGN review cycle 1): one ledgerops database per Postgres cluster, because the role `ledgerops_app` is cluster-global. The role claim is atomic (DDD-48), so concurrent first migrations cannot both succeed.
+- Needs `migrate` from US-1a. Scenarios that create the role mutate a cluster-global object and need their own cluster.
+- Dependencies: US-1a.
 
 ### US-2 — Know immediately when the image is misconfigured
 
@@ -377,7 +410,7 @@ Outcome KPIs
 Technical Notes
 - Pre-requisite (OQ-7): the first push creates a private package; the owner must set it public once for anonymous pulls. `GITHUB_TOKEN` cannot do this.
 - A tag push also triggers `ci.yml`'s own `push:` trigger; the duplicate run is a DESIGN item (OQ-6).
-- Dependencies: US-1 (migrate), US-2 (fail-fast), both in the same feature.
+- Dependencies: US-1a (migrate), US-2 (fail-fast), both in the same feature.
 
 ### US-4 — Upgrade a demo database in place and set my own password
 
@@ -449,7 +482,7 @@ Technical Notes
 - Edited-`0001` safety against already-migrated databases is OQ-2. golang-migrate stores only a version number, so an edited file is not re-run on a migrated database, but this must be proven, not assumed.
 - Constraint: migrations stay expand-only (`brief.md:86-91`).
 - `migrate` runs a preflight privilege probe, so insufficient privilege always fails before any schema change; "whether schema changes were applied" is therefore a definite "no changes applied" in that case.
-- Dependencies: US-1.
+- Dependencies: US-1a and US-1b.
 
 ### US-5 — Open the console and see the version from the image
 
@@ -746,7 +779,7 @@ Hypothesis: we believe that a gated, smoke-tested, signed multi-arch image with 
 
 ## Wave: DISCUSS / [REF] Definition of Done (DoD)
 
-1. All UAT scenarios across US-1 to US-8 pass (green)
+1. All UAT scenarios across US-1a, US-1b and US-2 to US-8 pass (green)
 2. Supporting tests pass (unit for config validation; integration for `migrate` and password handling against Postgres; workflow checks)
 3. Code refactored, reviewed and approved
 4. Merged to main
@@ -769,7 +802,7 @@ Hypothesis: we believe that a gated, smoke-tested, signed multi-arch image with 
 
 ## Wave: DISCUSS / [REF] WS strategy
 
-A: thin, sequential slices with no environment switch. Walking skeleton is slices 01-03. The password, keys and DSNs are ordinary configuration, not an environment-switching mechanism.
+A: thin, sequential slices with no environment switch. Walking skeleton is slices 01a, 02 and 03 (01b follows 01a). The password, keys and DSNs are ordinary configuration, not an environment-switching mechanism.
 
 ## Wave: DISCUSS / [REF] Driving ports
 
@@ -805,7 +838,7 @@ Dependencies on prior features: `ledger-core`, `multitenancy`, `inter-tenant-tra
 
 ## Wave: DISCUSS / [REF] Requirements Completeness
 
-Functional: covered, US-1 to US-8, 5 to 7 scenarios each. Non-functional: security (password and key handling, no secrets in logs, provenance), reliability (idempotent migrate, smoke before `latest`, immutable versions), performance (smoke at most 120 s; image size recorded, not gated), compatibility (demo path unchanged), operability (clear config errors). Business rules: tag classification and `latest` semantics explicit in US-6. Estimated completeness score: 0.96. The remaining gap is the eleven open items above, each named and owned rather than assumed.
+Functional: covered, US-1a, US-1b and US-2 to US-8, 3 to 9 scenarios each. Non-functional: security (password and key handling, no secrets in logs, provenance), reliability (idempotent migrate, smoke before `latest`, immutable versions), performance (smoke at most 120 s; image size recorded, not gated), compatibility (demo path unchanged), operability (clear config errors). Business rules: tag classification and `latest` semantics explicit in US-6. Estimated completeness score: 0.96. The remaining gap is the eleven open items above, each named and owned rather than assumed.
 
 ## Wave: DISCUSS / [REF] Definition of Ready (DoR) Validation
 
@@ -814,14 +847,14 @@ Functional: covered, US-1 to US-8, 5 to 7 scenarios each. Non-functional: securi
 | 1. Problem statement clear, domain language | PASS | Each story opens with a named person and a concrete pain with file refs where relevant |
 | 2. Persona with specific characteristics | PASS for P2 (real-project-owner); PARTIAL for P1 (archetype-unvalidated, inherited from `integrating-developer.yaml`) | Priya Nair and Tomasz Kowalski used consistently |
 | 3. 3+ domain examples with real data | PASS | Every story has 3, with real names, tags, passwords and counts (1,240 entries; v0.2.0) |
-| 4. UAT in Given/When/Then, 3 to 7 scenarios | PASS | US-1: 6, US-2: 5, US-3: 6, US-4: 6, US-5: 5, US-6: 7, US-7: 5, US-8: 5 |
+| 4. UAT in Given/When/Then, 3 to 7 scenarios | PASS except US-2 (documented exception) | US-1a: 7, US-1b: 3, US-2: 9 (exception), US-3: 6, US-4: 6, US-5: 5, US-6: 7, US-7: 5, US-8: 7 |
 | 5. AC derived from UAT | PASS | Each AC list maps to its scenarios |
 | 6. Right-sized, 1 to 3 days | PASS per story (each slice at most 1 day); feature-level scope is oversized by heuristic, user-approved to keep as one feature (OQ-11 closed) |
 | 7. Technical notes: constraints and dependencies | PASS | Per-story notes, Pre-requisites OQ-1 to OQ-12 |
 | 8. Dependencies resolved or tracked | PASS with one owner action | Shipped features resolved; GHCR package visibility (OQ-7) tracked as an owner action before US-3 can be fully verified |
 | 9. Outcome KPIs with measurable targets | PASS | Per-story KPIs and K1 to K7 |
 
-DoR status: PASSED for all eight stories. Re-run 2026-10-17 after item 14 (US-1, US-8): US-1 now has 10 scenarios (exception, at the proposed split threshold; see Applied note), US-8 has 7 (within range); other DoR items pass. Earlier: re-run after review-cycle-1 items 9-13 (US-1, 3, 6, 7, 8): items 1-3, 5, 7-9 still PASS; scenario counts now US-1 9 (exception, same reasoning as below), US-3 6, US-6 7, US-7 5, US-8 7 (within 3-7). Re-run 2026-10-17 after the DESIGN back-propagation edits (US-1, 2, 3, 4, 7, 8): items 1-3, 5, 7-9 still PASS. Item 4/6 scenario count is now over the 3-7 guideline for two stories: US-1 has 8 and US-2 has 9 (US-3 6, US-4 6, US-7 5, US-8 6 are within). The extra scenarios are variants of the migrate-safety rule (US-1) and the startup-config rule (US-2); slice effort is unchanged at one day or less. PO accepts this as a documented exception, to be revisited by DISTILL, which may split a story's scenarios across two acceptance features without changing slices. Earlier amendment note follows. Re-run 2026-10-17 after the amendments: still PASSED. US-2 now has 8 scenarios (within the 3 to 7 guideline by one; the three demo-key scenarios are short variants of one rule, so the story is not split, noted for DESIGN). Carried: P1 archetype caveat (inherited), OQ-7 owner action. OQ-1, OQ-11, OQ-12 closed. Peer review (`nw-product-owner-reviewer`) was not run in this dispatch; it is optional per the DISCUSS skill and the mandatory consolidated review fires at the end of DISTILL.
+DoR status: PASSED for all nine stories (US-1a, US-1b, US-2 to US-8). Re-run 2026-10-17 after the US-1 split (user-approved): US-1a has 7 scenarios and US-1b has 3, both within 3-7, so the US-1 scenario-count exception is retired. Remaining exception: US-2 at 9 scenarios (variants of one startup-config rule, one day or less). All other DoR items pass for US-1a and US-1b: each has a named problem, full elevator pitch, three domain examples, ACs from scenarios, J11, KPI (US-1a to K3, US-1b a cluster-refusal KPI added to the K3 family), technical notes and a tracked dependency (US-1b on US-1a). History of earlier re-runs (the first mentions of US-1 counts refer to the story before the split): re-run after review-cycle-1 items 9-13 (US-1, 3, 6, 7, 8): items 1-3, 5, 7-9 still PASS; scenario counts now US-1 9 (exception, same reasoning as below), US-3 6, US-6 7, US-7 5, US-8 7 (within 3-7). Re-run 2026-10-17 after the DESIGN back-propagation edits (US-1, 2, 3, 4, 7, 8): items 1-3, 5, 7-9 still PASS. Item 4/6 scenario count is now over the 3-7 guideline for two stories: US-1 has 8 and US-2 has 9 (US-3 6, US-4 6, US-7 5, US-8 6 are within). The extra scenarios are variants of the migrate-safety rule (US-1) and the startup-config rule (US-2); slice effort is unchanged at one day or less. PO accepts this as a documented exception, to be revisited by DISTILL, which may split a story's scenarios across two acceptance features without changing slices. Earlier amendment note follows. Re-run 2026-10-17 after the amendments: still PASSED. US-2 now has 8 scenarios (within the 3 to 7 guideline by one; the three demo-key scenarios are short variants of one rule, so the story is not split, noted for DESIGN). Carried: P1 archetype caveat (inherited), OQ-7 owner action. OQ-1, OQ-11, OQ-12 closed. Peer review (`nw-product-owner-reviewer`) was not run in this dispatch; it is optional per the DISCUSS skill and the mandatory consolidated review fires at the end of DISTILL.
 
 ## Wave: DISCUSS / [REF] Wave Decisions Summary
 
@@ -831,7 +864,8 @@ DoR status: PASSED for all eight stories. Re-run 2026-10-17 after item 14 (US-1,
 - [D1-D9] User answers as listed in Locked decisions; D9 revised 2026-10-17 (demo tenant key optional)
 - [D10] Scope oversized by heuristic, user-approved to keep as one feature with 8 slices of at most one day (OQ-11 closed)
 - [D14] First version v0.1.0, GitHub auto-generated release notes (OQ-12 closed)
-- [D11] Walking skeleton is slices 01-03, ordered by uncertainty
+- [D11] Walking skeleton is slices 01a, 02 and 03, ordered by uncertainty
+- [D15] Slice 01 / US-1 split into 01a/US-1a (migrate with own password) and 01b/US-1b (one ledgerops database per cluster) on 2026-10-17, user-approved, because US-1 reached 10 scenarios. The feature now has nine slices of at most one day each.
 - [D12] Added J12 (provenance) and J13 (upgrade in place) beside J11
 - [D13] New journey `pull-and-run-ledgerops`
 
@@ -856,7 +890,7 @@ DoR status: PASSED for all eight stories. Re-run 2026-10-17 after item 14 (US-1,
 
 ## Wave: DISCUSS / [REF] Next Wave
 
-Handoff to `nw-solution-architect` (DESIGN, full artifact set) and `nw-platform-architect` (DEVOPS, KPI sections only). Deliverables: this file, `slices/slice-01..08-*.md`, and the SSOT updates above. Peer review not yet run. No user answers outstanding; OQ-7 is an owner action.
+Handoff to `nw-solution-architect` (DESIGN, full artifact set) and `nw-platform-architect` (DEVOPS, KPI sections only). Deliverables: this file, `slices/slice-01a-*.md`, `slice-01b-*.md` and `slice-02..08-*.md`, and the SSOT updates above. Peer review not yet run. No user answers outstanding; OQ-7 is an owner action.
 
 ---
 
@@ -864,7 +898,7 @@ Handoff to `nw-solution-architect` (DESIGN, full artifact set) and `nw-platform-
 
 Rendered on request (expansion `gherkin-scenarios`, triggered by AC ambiguity). Declined by the user: `alternatives-considered`, `migration-playbook`.
 
-The ambiguity: US-1 and US-4 both say "the app role never accepts a password the operator did not supply". Readers could disagree about two moments. The rule below settles them, stated as observable behavior; how it is achieved (OQ-2) is DESIGN's.
+The ambiguity: US-1a and US-4 both say "the app role never accepts a password the operator did not supply". Readers could disagree about two moments. The rule below settles them, stated as observable behavior; how it is achieved (OQ-2) is DESIGN's.
 
 Rule A (the window during migrate): from the moment a fresh `migrate` run starts until it finishes or dies, a login as `ledgerops_app` is accepted only with the operator's password or not at all. `app-secret` is never accepted on a database this run created, at any instant, including after a crash.
 Rule B (the pre-rotation existing database): a database created before this feature already accepts `app-secret`. That is existing state, not a violation. It stays so until a `migrate` run with an explicit password completes the password step; if that run fails or is interrupted before the password step, `app-secret` still works and the output says so. Rule A applies only to databases the run creates.
@@ -872,7 +906,7 @@ Rule B (the pre-rotation existing database): a database created before this feat
 ```gherkin
 Feature: Container image release
 
-  # --- US-1 / Rule A: the window during migrate on a fresh database
+  # --- US-1a / Rule A: the window during migrate on a fresh database
   Scenario: A fresh database never accepts the demo password at any point during migrate
     Given Priya has an empty database "kestrel_ledger" and supplies the password "T7!kq@9x%Zm"
     When migrate runs and is observed after every schema step
@@ -1079,7 +1113,7 @@ Refinements accepted by the user 2026-10-17. DISCUSS sections are not edited; st
 2. **Rule A crash scenario.** Original (Gherkin scenarios): "And migrate is killed after the first schema change ... And re-running migrate with "T7!kq@9x%Zm" completes and that password works". New: true only when the kill falls between migration files. A kill mid-file leaves a dirty version; `migrate` refuses naming it (DDD-29). The role stays NOLOGIN, so Rule A holds in both cases. DISTILL needs both scenarios.
 3. **Test churn scope.** Original (D6): "`docker-compose.yml`, the loadtest compose, the test helper and CI set `LEDGEROPS_APP_PASSWORD=app-secret` explicitly". New: `postgres.Migrate`/`MigrateStep` change signature (password parameter) and have 7 direct call sites in 6 files (verified by grep, corrected in review cycle 1): `tests/acceptance/ledgercore/ledger_seeding.go` (2: `Migrate`, `MigrateStep`), `ledger_observations.go`, `tests/acceptance/multitenancy/world.go`, `tests/acceptance/intertenanttransfer/world.go`, `internal/adapters/postgres/testhelper_test.go`, `internal/adapters/http/trial_balance_tenant_scope_test.go`; `steps_ledger_test.go` reaches it through `MigrateFromZero`. There are at least six independent `app-secret` literals. All pass `app-secret` explicitly; the compiler finds every site.
 4. **Frozen pre-feature fixture.** New obligation: before 0001 is edited, the current 0001 text (and 0002-0006) is frozen as a test fixture so US-4 and the smoke upgrade leg can build a database exactly as the pre-feature demo stack did (role LOGIN with `app-secret`, grant on database `ledgerops`).
-5. **One ledgerops database per cluster (user decision, review cycle 1).** New constraint not present in DISCUSS: `ledgerops_app` is cluster-global, so a fresh `migrate` refuses when the role already exists in the cluster (DDD-41, ADR-017). DISCUSS's "A database with any name can be prepared" (US-1) stays true for the first ledgerops database in a cluster; see `design/upstream-changes.md` item 10 for the story text that needs a qualifier.
+5. **One ledgerops database per cluster (user decision, review cycle 1).** New constraint not present in DISCUSS: `ledgerops_app` is cluster-global, so a fresh `migrate` refuses when the role already exists in the cluster (DDD-41, ADR-017). DISCUSS's "The first ledgerops database in a cluster can have any name" (US-1b) stays true for the first ledgerops database in a cluster; see `design/upstream-changes.md` item 10 for the story text that needs a qualifier.
 
 ## Wave: DESIGN / [REF] Component decomposition
 
@@ -1259,7 +1293,7 @@ For DISTILL:
 Verified against `tests/acceptance/*`, `testhelper_test.go` and `trial_balance_tenant_scope_test.go` (review cycle 1):
 - **Acceptance worlds** (`ledgercore`, `multitenancy`, `intertenanttransfer`): each boots one shared Postgres per test binary, calls `Migrate` once on the template database (pristine cluster, role absent: allowed), then gives every scenario a database made with `CREATE DATABASE ... TEMPLATE` and an explicit `GRANT CONNECT`. Cloning is SQL, not `migrate`, so the cluster rule never fires. These suites keep working; they only pass `app-secret` to the new signature.
 - **Per-test containers** (`testhelper_test.go`, `trial_balance_tenant_scope_test.go`, `ledgercore` `StartWithoutSchema`/`MigrateFromZero`): one cluster per test; the role is absent; allowed.
-- **New scenarios that need their own cluster**: anything that creates the role, sets or rotates its password, or exercises Rule A/B (US-1, US-4, dirty state) mutates a cluster-global object, so it runs in a dedicated container (tag `@dedicated-cluster`), as `StartWithoutSchema` already does. The cluster-rule refusal scenario may run in any cluster that already has the role by creating an empty second database and dropping it afterwards.
+- **New scenarios that need their own cluster**: anything that creates the role, sets or rotates its password, or exercises Rule A/B (US-1a, US-1b, US-4, dirty state) mutates a cluster-global object, so it runs in a dedicated container (tag `@dedicated-cluster`), as `StartWithoutSchema` already does. The cluster-rule refusal scenario may run in any cluster that already has the role by creating an empty second database and dropping it afterwards.
 - **Deferred `LEDGEROPS_TEST_PG_DSN` shared-instance reuse** (no code exists yet; plan restated per user decision, review cycle 2): on the shared instance, one ledgerops database is migrated once and is the template. Subsequent runs skip `migrate` (the schema is present) and clone per scenario with `CREATE DATABASE ... TEMPLATE`. `@dedicated-cluster` scenarios get their own container, never the shared instance. That first ledgerops database is the only one allowed in that cluster (DDD-41/48: any other fresh `migrate` there is refused).
 - **No test-only path** is added to the production binary: the refusal has no override, so production behaviour is not weakened to suit tests. Harnesses that need extra migrated databases use `CREATE DATABASE ... TEMPLATE`.
 

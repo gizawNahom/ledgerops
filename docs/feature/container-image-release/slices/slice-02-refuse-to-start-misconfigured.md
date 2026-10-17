@@ -17,7 +17,7 @@ first operator call.
 - Demo compose already sets all three; `make up` unaffected
 
 ## OUT scope
-- Password handling (slice 01)
+- Password handling (slice 01a)
 - Requiring `LEDGEROPS_DEMO_TENANT_KEY` (decided against, OQ-1 closed)
 - Changing which routes the keys protect
 

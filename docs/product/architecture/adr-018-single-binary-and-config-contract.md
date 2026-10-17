@@ -63,5 +63,5 @@ app DSN starts silently, and the app must never hold the migrate role (OPS-10).
   `LEDGEROPS_APP_PASSWORD[_FILE]` in the migrate command file, plus the one
   presence-only site above (via `LookupEnv`); a `Secret` rendering test;
   sentinel-password tests on every failure path.
-- The acceptance suites for US-1/US-2 can drive config parsing as a pure
+- The acceptance suites for US-1a/US-2 can drive config parsing as a pure
   function plus one process-level exit-code check.

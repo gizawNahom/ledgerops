@@ -53,3 +53,7 @@ Counts: US-1 now has 9 scenarios (exception recorded in the DoR section); US-8 h
 ## Applied by PO 2026-10-17 (review cycle 2)
 
 14. Applied. (a) US-1 cluster-rule scenario gains the remedy line incl. privileged `DROP ROLE ledgerops_app`; AC and technical note updated. (b) New US-1 concurrency scenario and AC (exactly one succeeds, neither dirty). (c) US-8 AC names the `DROP ROLE` remedy. Slices 01 and 08 and the journey S2 error path updated. US-1 now has 10 scenarios, US-8 still 7.
+
+## Applied by PO 2026-10-17 (US-1 split)
+
+User approved splitting US-1 into US-1a (migrate with own password, 7 scenarios, slice 01a) and US-1b (one ledgerops database per cluster, 3 scenarios, slice 01b, depends on 01a). References to "US-1" and "slice 01" in the items above are historical; read items 3, 5, 6 as US-1a and items 10, 14 as US-1b.

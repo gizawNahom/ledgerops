@@ -276,7 +276,7 @@ jobs:
     importance: 8
     satisfaction: 1
     opportunity: 15
-    slice: "01-03,05,06,08"
+    slice: "01a,01b,02,03,05,06,08"
 
   - id: J12
     persona: P2

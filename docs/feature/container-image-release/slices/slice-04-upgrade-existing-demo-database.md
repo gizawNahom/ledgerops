@@ -35,7 +35,7 @@ after `migrate`, the edited `0001` or the Go-side role change is unsafe (OQ-2).
 - [ ] Missing role privilege: non-zero exit naming it before any schema change, "no changes applied", old password still works
 
 ## Dependencies
-Slice 01 (command and password handling). Slice 03 for the smoke leg.
+Slice 01a (command and password handling) and slice 01b (role-ownership rule: an existing database that owns the role must not be refused). Slice 03 for the smoke leg.
 
 ## Production data
 Seed the starting database with the actual demo stack at the previous commit
@@ -43,8 +43,8 @@ Seed the starting database with the actual demo stack at the previous commit
 synthetic fixture.
 
 ## Effort estimate
-At most 1 day. Reference class: slice 01 plus an existing-role branch and
+At most 1 day. Reference class: slices 01a and 01b plus an existing-role branch and
 fixture seeding.
 
 ## Pre-slice SPIKE
-Not required if slice 01's optional spike on edited `0001` was done.
+Not required if slice 01a's optional spike on edited `0001` was done.

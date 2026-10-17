@@ -171,5 +171,7 @@ changelog:
   - date: "2026-10-17"
     feature: container-image-release
     change: >
+      Story US-1 split into US-1a (S2 happy path and password errors) and
+      US-1b (S2 cluster-rule error paths), slices 01a and 01b.
       DESIGN back-propagation: S2/S3 error paths for dirty migration state,
       unreadable password file and MIGRATE_DSN in the serve environment.
