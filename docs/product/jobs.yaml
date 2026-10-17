@@ -251,4 +251,73 @@ jobs:
     opportunity: 13
     slice: "05"
 
+  # Added by feature container-image-release (DISCUSS, 2026-10-17).
+  # EVIDENCE CAVEAT (as for every job above): importance, satisfaction and
+  # opportunity are founder-estimated; no user interview backs them.
+  - id: J11
+    persona: P1
+    also_serves: [P2]
+    story: >
+      When I want to try or run ledgerops for my product and I do not have a Go
+      toolchain, I want to docker pull a versioned image and start it against my
+      own Postgres with a password I chose, so I can integrate against a pinned,
+      known release without building from source or running a well-known demo
+      credential.
+    dimensions:
+      functional: Obtain a versioned, runnable artifact and bring up a migrated schema with a secret I chose.
+      emotional: Trust that I am running a specific release, and that no well-known password guards the ledger.
+      social: Be the engineer who pinned a version and did not ship the demo password.
+    forces:
+      push: Running ledgerops needs a Go 1.25 toolchain and a source checkout, and the app database password is hardcoded in the migration SQL.
+      pull: docker pull a pinned tag, migrate, run.
+      anxiety: Whether the migrations are safe to run against my database and whether I can upgrade later.
+      habit: git clone and make up.
+    invariant: null
+    importance: 8
+    satisfaction: 1
+    opportunity: 15
+    slice: "01-03,05,06,08"
+
+  - id: J12
+    persona: P2
+    story: >
+      When I put a published ledgerops image in front of platform funds, I want
+      to verify it was built by the project's pipeline from the tagged source,
+      so I never run a look-alike or tampered image.
+    dimensions:
+      functional: Verify an image signature and read its software bill of materials before deploying.
+      emotional: Stop trusting a tag name as proof of origin.
+      social: Be the operator who checked provenance before putting money behind an artifact.
+    forces:
+      push: A registry tag proves nothing about who built an image or what is inside it.
+      pull: One command that either verifies against the project's identity or fails.
+      anxiety: Running an image that holds balances without any proof of origin.
+      habit: Pulling by tag and assuming it is genuine.
+    invariant: null
+    importance: 6
+    satisfaction: 1
+    opportunity: 11
+    slice: "07"
+
+  - id: J13
+    persona: P2
+    story: >
+      When I already run ledgerops from the demo stack or an earlier release, I
+      want to move to a newer image and set my own app password in place, so I
+      keep my ledger history and never rebuild or re-provision.
+    dimensions:
+      functional: Apply pending migrations over existing history and replace the app role password.
+      emotional: Trust that an upgrade cannot lose or alter recorded entries.
+      social: Retire the well-known demo password without an outage story to explain.
+    forces:
+      push: The database already holds data and a role created with a published demo password that nothing can reset.
+      pull: migrate against the existing database with my own password.
+      anxiety: An upgrade touching a ledger that cannot forget.
+      habit: Leaving the demo stack and its credentials running because nothing offers a safe way off.
+    invariant: null
+    importance: 7
+    satisfaction: 2
+    opportunity: 12
+    slice: "04"
+
 deferred: []
