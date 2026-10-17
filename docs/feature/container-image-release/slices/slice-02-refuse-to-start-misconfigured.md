@@ -12,6 +12,7 @@ first operator call.
 - Optional: `LEDGEROPS_DEMO_TENANT_KEY`; when unset or blank the demo-tenant mapping is off and nothing resolves to `tnt_legacy_seed` through it (existing behavior, `main.go:98-100`)
 - Empty and whitespace-only count as unset
 - All missing required variables reported together; exit 1 before any database connection
+- `serve` refuses to start when `LEDGEROPS_MIGRATE_DSN` is present in its environment, naming the variable, before any database connection (the app must never hold the migration credential)
 - No key or DSN value in any log line
 - Demo compose already sets all three; `make up` unaffected
 
@@ -31,6 +32,7 @@ more implicit defaults than recorded.
 - [ ] Each missing required variable causes exit 1 naming it
 - [ ] Multiple missing required variables are named in one message
 - [ ] Blank required values refused
+- [ ] `LEDGEROPS_MIGRATE_DSN` present in the serve environment: exit 1 naming it, no database connection
 - [ ] Unset or blank demo tenant key starts normally with the demo mapping off
 - [ ] Fully configured start behaves exactly as before
 - [ ] No secret in any log line

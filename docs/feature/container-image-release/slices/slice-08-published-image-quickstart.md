@@ -10,8 +10,9 @@ verification steps.
 ## IN scope
 - A published-image quickstart (docker run or compose snippet, separate from `docker-compose.yml`)
 - Generated password and keys, never demo values; warning against `app-secret` and `demo-*` keys
-- Upgrade and rotation section (restart the app after rotation)
-- Verification section with the real cosign identity
+- Upgrade and rotation section (run `migrate`, then restart the app, in that order)
+- Verification section with the cosign identity regex from ADR-021
+- Recommendation to pin the image by digest (the registry cannot enforce tag immutability)
 - README Quickstart leads with the published image; "no published container image; you build from source" limitation removed; roadmap "Adoptable" amended to what remains
 - CI runs the quickstart's commands verbatim against the published image
 
@@ -30,7 +31,10 @@ enough and needs a product change, not only more prose.
 - [ ] Documented commands pass verbatim in CI against the latest release
 - [ ] README and limitations lines updated
 - [ ] No demo credentials in the published-image path
-- [ ] Upgrade, rotation and verification sections present
+- [ ] Upgrade, rotation and verification sections present; verify command uses the ADR-021 identity regex
+- [ ] Pin-by-digest recommendation and migrate-then-restart order stated
+- [ ] Verification shows both `cosign verify` on the tag and platform-digest lookup then `verify-attestation`
+- [ ] Secrets steered to `LEDGEROPS_APP_PASSWORD_FILE`; `log_statement=ddl` verifier exposure warning; manual dirty-migration recovery; one-ledgerops-database-per-cluster constraint and remedy, including `DROP ROLE ledgerops_app` (privileged) for a dropped owning database or an abandoned first run
 - [ ] Example compose or `docker run` file present and separate from the demo compose
 
 ## Dependencies

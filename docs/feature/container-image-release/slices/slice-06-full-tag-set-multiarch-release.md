@@ -33,7 +33,7 @@ is affected.
 - [ ] `v0.1.9` after `0.2.0` moves `0.1` but not `latest`
 - [ ] Index lists both architectures
 - [ ] Labels correct
-- [ ] GitHub Release exists for each tag
+- [ ] GitHub Release exists for each tag; body names image reference, digest and verify command, followed by auto-generated notes
 
 ## Dependencies
 Slice 03 (pipeline), slice 05 (version stamped into the binary and label).

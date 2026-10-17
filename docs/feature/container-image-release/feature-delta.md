@@ -148,6 +148,12 @@ Given Tomasz's secret file contains `Zr4#mV8$wQ1` followed by a newline
 When he runs `migrate` pointing at that file
 Then `ledgerops_app` logs in with `Zr4#mV8$wQ1` and not with a value that includes the newline
 
+Scenario: A secret file the image user cannot read gives a named error
+Given Tomasz's secret file is owned by root with mode 0400 and the image runs as a non-root user
+When he runs `migrate` pointing at that file
+Then it exits non-zero naming the file and that it is not readable by the image user
+And the database is unchanged
+
 Scenario: Migration refuses to run without a password
 Given Priya sets neither the password nor the password file
 When she runs `migrate` against the empty database
@@ -156,14 +162,34 @@ And no table exists in the database afterwards
 And `ledgerops_app` does not accept `app-secret`
 
 Scenario: No moment exists when the app role accepts a password the operator did not supply
-Given a migration run that stops after the first schema change
+Given a migration run that is killed between two migration files
 When someone tries to log in as `ledgerops_app` with `app-secret`
 Then the login is refused
 
-Scenario: A database with any name can be prepared
-Given the database is named `kestrel_ledger`, not `ledgerops`
+Scenario: A run killed during a migration file leaves a state migrate refuses to continue from
+Given a migration run that is killed during a migration file, leaving a dirty version
+When Priya re-runs `migrate`
+Then it exits non-zero naming the dirty version and changes nothing
+And `ledgerops_app` still refuses `app-secret`
+
+Scenario: The first ledgerops database in a cluster can have any name
+Given the cluster has no `ledgerops_app` role and the database is named `kestrel_ledger`, not `ledgerops`
 When Priya runs `migrate`
 Then it succeeds and `ledgerops_app` can connect to `kestrel_ledger`
+
+Scenario: A second ledgerops database in the same cluster is refused
+Given the cluster's database `kestrel_ledger` is already migrated, so the role `ledgerops_app` exists
+When Priya runs `migrate` against a second, empty database `kestrel_ledger_2` in that cluster
+Then it exits non-zero naming the conflict
+And the role, its password, `kestrel_ledger` and `kestrel_ledger_2` are all unchanged
+And running `migrate` again against `kestrel_ledger` itself (a database already carrying the schema) is not refused
+And the message names the remedy: migrate the database that owns the role, use a separate cluster, or, when that database no longer exists, run `DROP ROLE ledgerops_app` as a privileged role
+
+Scenario: Two simultaneous first migrations in one cluster cannot both claim the role
+Given two empty databases `kestrel_ledger` and `kestrel_ledger_2` in one cluster
+When two `migrate` runs start at the same time
+Then exactly one succeeds and the other refuses with the cluster-rule message
+And neither database is left in a dirty migration state
 
 Scenario: A mismatched password is caught at app start, not at the first request
 Given the database was migrated with `T7!kq@9x%Zm`
@@ -175,7 +201,11 @@ Acceptance Criteria
 - [ ] `migrate` applies the full migration set to an empty database and sets the app role password from `LEDGEROPS_APP_PASSWORD` or its `_FILE` variant; a trailing newline in the file is not part of the password
 - [ ] `migrate` without a usable password (unset, empty) exits non-zero before changing the database and names both variables
 - [ ] At no point, including after an interrupted run, does `ledgerops_app` authenticate with a password the operator did not supply
-- [ ] Migration works for a database with any name
+- [ ] A run killed during a migration file leaves a dirty version; re-running `migrate` refuses naming that version and changes nothing
+- [ ] A password file the image user cannot read fails with a named error and no database change
+- [ ] Migration works for a database with any name, for the first ledgerops database in a cluster
+- [ ] A fresh `migrate` against an empty database in a cluster where `ledgerops_app` already exists exits non-zero naming the conflict, with the role, its password and both databases unchanged; a database already carrying the ledgerops schema (upgrade, rotation, re-run) is not refused; the message names the remedies (migrate the owning database, use a separate cluster, or `DROP ROLE ledgerops_app` as a privileged role when the owning database no longer exists)
+- [ ] Two simultaneous `migrate` runs against two empty databases in one cluster: exactly one succeeds, the other refuses with the cluster-rule message, and neither database is left dirty
 - [ ] The password never appears in command output or logs, with or without failure
 - [ ] `docker-compose.yml`, the loadtest compose, the test helper and CI set `LEDGEROPS_APP_PASSWORD=app-secret` explicitly and `make demo-01..04`, `chaos-01`, `race-02`, `race-03` pass unmodified
 - [ ] An app started with the wrong password exits non-zero with a clear refusal and no password in the log
@@ -189,7 +219,9 @@ Outcome KPIs
 
 Technical Notes
 - Changes an already-applied migration's content (`0001`): safe handling is OQ-2. The compose `migrate` service moves from `migrate/migrate` to this subcommand, because `migrate/migrate` cannot set the password; demo CI then exercises the same code the release ships.
-- The privileged role needs enough privilege to create and alter roles (OQ-8).
+- The privileged role needs enough privilege to create and alter roles (OQ-8). `migrate` runs a preflight privilege probe first: an insufficient privilege fails before any schema change with "no changes applied".
+- One ledgerops database per Postgres cluster (user decision, DESIGN review cycle 1): the role `ledgerops_app` is cluster-global, so a second fresh database in the same cluster is refused. Remedy: use a separate cluster, migrate the database that already owns the role, or, when that database no longer exists, run `DROP ROLE ledgerops_app` as a privileged role. The role claim is atomic (DDD-48), so concurrent first migrations cannot both succeed.
+- A secret file owned by root with mode 0400 is unreadable by the non-root image user; the named error documents this trap.
 - Dependencies: none inside this feature; depends on shipped `ledger-core`.
 
 ### US-2 — Know immediately when the image is misconfigured
@@ -247,6 +279,12 @@ Given the DSN and operator key are set and the database was migrated
 When the container starts
 Then `/health` answers 200 and `/tenants` accepts the operator key
 
+Scenario: The serving process refuses to hold the migration credential
+Given the container environment contains `LEDGEROPS_MIGRATE_DSN`
+When the container starts to serve
+Then it exits 1 naming `LEDGEROPS_MIGRATE_DSN`
+And no database connection was attempted
+
 Scenario: Key values are never printed
 Given Tomasz sets `LEDGEROPS_OPERATOR_KEY` to `op-9f3b71c2`
 When the container starts, successfully or not
@@ -257,6 +295,7 @@ Acceptance Criteria
 - [ ] Unset or blank `LEDGEROPS_DEMO_TENANT_KEY` is accepted and turns the demo-tenant mapping off; no token resolves to `tnt_legacy_seed` through it
 - [ ] One message lists every missing required variable
 - [ ] Key and DSN values never appear in logs
+- [ ] `serve` refuses to start when `LEDGEROPS_MIGRATE_DSN` is present in its environment, naming the variable, before any database connection
 - [ ] With all variables set, the server starts and existing behavior is unchanged
 - [ ] The demo compose sets all three so `make up` is unaffected
 
@@ -299,15 +338,15 @@ Given an integration test fails at the commit tagged `v0.1.1`
 When the pipeline runs
 Then no image exists for `0.1.1` and the run is red
 
-Scenario: A published image is proven usable
-Given `0.1.0` is published
-When the pipeline's final check pulls that image, migrates a fresh Postgres and starts it
-Then `/health` answers 200
+Scenario: A pushed image is proven usable before it gets a version tag
+Given the image for `0.1.0` has been pushed by digest and no version tag exists yet
+When the pipeline's check pulls that digest for each published architecture, migrates a fresh Postgres and starts it
+Then `/health` answers 200 and only then is `0.1.0` tagged
 
 Scenario: A version that fails its usability check is not presented as a release
-Given the published image cannot migrate a fresh database
-When the final check fails
-Then the run ends red naming the failing step and the version is not announced as usable
+Given the pushed image cannot migrate a fresh database
+When the check fails
+Then the run ends red naming the failing step and no version tag exists for it
 
 Scenario: Only strict version tags publish
 Given Gizaw pushes the tag `v1.2`, the tag `nightly-2026-10-17`, and a branch
@@ -322,8 +361,9 @@ Then the pipeline refuses and the published digest is unchanged
 Acceptance Criteria
 - [ ] Pushing a tag `vMAJOR.MINOR.PATCH` (prerelease suffix allowed) publishes `ghcr.io/gizawnahom/ledgerops:<version without v>` for amd64
 - [ ] Publishing requires the full existing CI suite to pass on that commit
-- [ ] After publishing, a check pulls the published image, migrates a fresh Postgres with a generated password, starts it, and requires `/health` 200
-- [ ] A failed check leaves the run red and the version not announced as usable
+- [ ] Anonymous pullability is checked on the pushed digest before any version tag is promoted; the first release run is expected to fail this check until the owner makes the GHCR package public (OQ-7), after which a re-run passes
+- [ ] The check pulls the image by digest before any version tag exists, for each published architecture (amd64 in this slice; arm64 joins in slice 06), migrates a fresh Postgres with a generated password, starts it, and requires `/health` 200; the version tag appears only after the check passes (and, once slice 07 lands, after signature verification)
+- [ ] A failed check leaves the run red and no version tag exists for it
 - [ ] Non-matching tags and branch pushes publish nothing
 - [ ] An existing version tag is never overwritten
 
@@ -388,14 +428,14 @@ Given Tomasz's privileged role cannot alter other roles
 When he runs `migrate` with a new password
 Then it exits non-zero naming the missing privilege
 And the old password still works
-And the message says whether schema changes were already applied
+And the message says "no changes applied", because the privilege check runs before any schema change
 
 Acceptance Criteria
 - [ ] An existing database created by the demo stack at an earlier schema version is migrated to head with no entry, balance or trial-balance change
 - [ ] An explicit supplied password is always applied, including when `ledgerops_app` already exists
 - [ ] Re-running with the same inputs is a successful no-op
 - [ ] The append-only guarantee (UPDATE and DELETE refused for `ledgerops_app`) holds after upgrade
-- [ ] Insufficient privilege fails with a message naming it and does not change the password
+- [ ] Insufficient privilege fails before any schema change, with a message naming the privilege and stating "no changes applied"; the password is unchanged
 - [ ] Documentation states that a running app must be restarted after a rotation
 
 Outcome KPIs
@@ -408,6 +448,7 @@ Outcome KPIs
 Technical Notes
 - Edited-`0001` safety against already-migrated databases is OQ-2. golang-migrate stores only a version number, so an edited file is not re-run on a migrated database, but this must be proven, not assumed.
 - Constraint: migrations stay expand-only (`brief.md:86-91`).
+- `migrate` runs a preflight privilege probe, so insufficient privilege always fails before any schema change; "whether schema changes were applied" is therefore a definite "no changes applied" in that case.
 - Dependencies: US-1.
 
 ### US-5 — Open the console and see the version from the image
@@ -522,7 +563,8 @@ Then version is `0.2.0`, revision is `3f9c2ab` and source is the repository URL
 Scenario: Each tag has a GitHub Release
 Given `v0.2.0` and `v0.3.0-rc.1` are released
 When Priya opens the repository's releases
-Then both appear, and the rc is marked pre-release, each naming the image reference
+Then both appear, and the rc is marked pre-release
+And each release body names the image reference, its digest and the verify command, followed by auto-generated notes
 
 Acceptance Criteria
 - [ ] Stable tags publish `X.Y.Z`, `X.Y`, `latest`; prereleases publish the exact version only
@@ -530,7 +572,7 @@ Acceptance Criteria
 - [ ] Older exact tags are never moved
 - [ ] The image index contains linux/amd64 and linux/arm64
 - [ ] OCI labels for version, revision and source are present and correct
-- [ ] A GitHub Release is created for each tag, prerelease flagged correctly
+- [ ] A GitHub Release is created for each tag, prerelease flagged correctly; its body names the image reference (`ghcr.io/gizawnahom/ledgerops:X.Y.Z`), its digest and the verify command, followed by auto-generated notes
 - [ ] `latest` is moved only after the usability check passes
 
 Outcome KPIs
@@ -572,10 +614,11 @@ Given an image with the same name built elsewhere
 When Tomasz runs the same command
 Then verification fails
 
-Scenario: The software bill of materials can be retrieved
+Scenario: The software bill of materials can be retrieved for a platform
 Given release `0.2.0`
-When Tomasz fetches its SBOM attestation
-Then it lists the Go modules and base-image packages in the image
+When Tomasz resolves the digest for his platform and fetches that digest's SBOM attestation
+Then it lists the Go modules and base-image packages for that platform
+And the index signature still verifies on the tag itself
 
 Scenario: Prereleases are signed as well
 Given `0.3.0-rc.1`
@@ -590,19 +633,19 @@ Then the run is red and `latest` has not moved
 Acceptance Criteria
 - [ ] Every published tag is signed keylessly and verifies against the repository's release workflow identity
 - [ ] An image not built by that workflow fails verification
-- [ ] An SBOM attestation is published for every release
+- [ ] An SBOM attestation is published for every release, per platform digest (it is verified through the platform digest, not the tag)
 - [ ] A signing or attestation failure fails the release and `latest` does not move
-- [ ] Both architectures are covered (OQ-10 settles how)
+- [ ] Both architectures are covered: the index and each platform manifest are signed, and each platform carries its own SBOM attestation
 
 Outcome KPIs
 - Who: operators about to deploy the image
 - Does what: verify provenance before running
 - By how much: 100% of stable releases verify and carry an SBOM
-- Measured by: final release step runs `cosign verify` and `verify-attestation`
+- Measured by: final release step runs `cosign verify` and, for each published platform digest, `verify-attestation`
 - Baseline: none
 
 Technical Notes
-- SBOM format and what is signed (index vs per-platform) are OQ-10.
+- Signing covers the index and each platform manifest; SBOM is per platform (settled in DESIGN, ADR-021).
 - The workflow needs the OIDC token permission (OQ-6).
 - Dependencies: US-3, US-6.
 
@@ -642,18 +685,34 @@ Then it generates the app password and keys rather than reusing demo values, and
 Scenario: The upgrade path is documented
 Given Tomasz's demo-created database
 When he reads the upgrade section
-Then it tells him to run `migrate` with his own password and restart the app
+Then it tells him to run `migrate` with his own password first and then restart the app, in that order
 
 Scenario: The verification command is documented with the real identity
 Given the quickstart
 When Priya copies its verify command
-Then it succeeds against a release
+Then it uses the documented release-workflow identity pattern and succeeds against a release
+
+Scenario: The docs cover the traps a careful operator would hit
+Given the quickstart
+When Tomasz reads the secrets, recovery and constraints sections
+Then they steer to the password file, warn that DDL statement logging exposes the password verifier, explain manual dirty-migration recovery, and state one ledgerops database per Postgres cluster
+
+Scenario: The docs recommend pinning by digest
+Given the quickstart
+When Priya reads how to reference the image
+Then it recommends pinning by digest and explains the registry cannot enforce tag immutability
 
 Acceptance Criteria
 - [ ] The quickstart's commands run verbatim against the published image in CI
 - [ ] README Quickstart leads with the published image; the limitation line is removed or reworded; roadmap item "Adoptable" is amended to say what remains (OpenAPI, transfer metadata)
 - [ ] No demo credential is used in the published-image path
-- [ ] Upgrade, rotation and verification sections exist
+- [ ] Upgrade, rotation and verification sections exist; the verify command uses the identity regex from ADR-021
+- [ ] The document states the pin-by-digest recommendation (the registry cannot enforce tag immutability)
+- [ ] The rotation instructions state the order: run `migrate`, then restart the app (ADR-023)
+- [ ] The verification section shows both commands: `cosign verify` on the tag (index signature), and platform-digest lookup followed by `verify-attestation` for the SBOM
+- [ ] Secrets guidance steers to `LEDGEROPS_APP_PASSWORD_FILE` (environment variables are visible through `docker inspect`) and states that under `log_statement=ddl` the password verifier is logged and is offline-attackable, so a generated high-entropy password is required
+- [ ] Manual dirty-migration recovery is documented: check whether migration N's objects exist, set `schema_migrations` to N-1 or N with `dirty = false`, then re-run `migrate`
+- [ ] The one-ledgerops-database-per-cluster constraint and its remedy (separate cluster, or migrate the database that owns the role) are stated, including `DROP ROLE ledgerops_app` as a privileged role for a dropped owning database or an abandoned first run
 - [ ] A compose or `docker run` example for the published image exists separately from `docker-compose.yml`
 
 Outcome KPIs
@@ -692,7 +751,7 @@ Hypothesis: we believe that a gated, smoke-tested, signed multi-arch image with 
 3. Code refactored, reviewed and approved
 4. Merged to main
 5. Demoable: from a clean machine with Docker, pull the latest rc, migrate, start and post a transfer
-6. A real rc tag (`v0.1.0-rc.1`) has been published, smoke-passed and, once slice 07 lands, verified
+6. A real rc tag (`v0.1.0-rc.1`) has been published, smoke-passed and, once slice 07 lands, verified. The first release run is expected to fail at the anonymous-pull check until the owner sets the GHCR package public (OQ-7); the owner then re-runs
 7. Existing `demo-*`, `chaos-*`, `race-*` targets and all CI jobs pass unmodified
 8. D1-D9 are honored or any change is recorded with the user's approval (D9 revised 2026-10-17); OQ-1, OQ-11 and OQ-12 closed
 9. README and quickstart reflect the published path
@@ -762,7 +821,7 @@ Functional: covered, US-1 to US-8, 5 to 7 scenarios each. Non-functional: securi
 | 8. Dependencies resolved or tracked | PASS with one owner action | Shipped features resolved; GHCR package visibility (OQ-7) tracked as an owner action before US-3 can be fully verified |
 | 9. Outcome KPIs with measurable targets | PASS | Per-story KPIs and K1 to K7 |
 
-DoR status: PASSED for all eight stories. Re-run 2026-10-17 after the amendments: still PASSED. US-2 now has 8 scenarios (within the 3 to 7 guideline by one; the three demo-key scenarios are short variants of one rule, so the story is not split, noted for DESIGN). Carried: P1 archetype caveat (inherited), OQ-7 owner action. OQ-1, OQ-11, OQ-12 closed. Peer review (`nw-product-owner-reviewer`) was not run in this dispatch; it is optional per the DISCUSS skill and the mandatory consolidated review fires at the end of DISTILL.
+DoR status: PASSED for all eight stories. Re-run 2026-10-17 after item 14 (US-1, US-8): US-1 now has 10 scenarios (exception, at the proposed split threshold; see Applied note), US-8 has 7 (within range); other DoR items pass. Earlier: re-run after review-cycle-1 items 9-13 (US-1, 3, 6, 7, 8): items 1-3, 5, 7-9 still PASS; scenario counts now US-1 9 (exception, same reasoning as below), US-3 6, US-6 7, US-7 5, US-8 7 (within 3-7). Re-run 2026-10-17 after the DESIGN back-propagation edits (US-1, 2, 3, 4, 7, 8): items 1-3, 5, 7-9 still PASS. Item 4/6 scenario count is now over the 3-7 guideline for two stories: US-1 has 8 and US-2 has 9 (US-3 6, US-4 6, US-7 5, US-8 6 are within). The extra scenarios are variants of the migrate-safety rule (US-1) and the startup-config rule (US-2); slice effort is unchanged at one day or less. PO accepts this as a documented exception, to be revisited by DISTILL, which may split a story's scenarios across two acceptance features without changing slices. Earlier amendment note follows. Re-run 2026-10-17 after the amendments: still PASSED. US-2 now has 8 scenarios (within the 3 to 7 guideline by one; the three demo-key scenarios are short variants of one rule, so the story is not split, noted for DESIGN). Carried: P1 archetype caveat (inherited), OQ-7 owner action. OQ-1, OQ-11, OQ-12 closed. Peer review (`nw-product-owner-reviewer`) was not run in this dispatch; it is optional per the DISCUSS skill and the mandatory consolidated review fires at the end of DISTILL.
 
 ## Wave: DISCUSS / [REF] Wave Decisions Summary
 
@@ -822,10 +881,17 @@ Feature: Container image release
 
   Scenario: A crash partway through a fresh migrate leaves no demo password behind
     Given Priya has an empty database "kestrel_ledger" and supplies "T7!kq@9x%Zm"
-    And migrate is killed after the first schema change
+    And migrate is killed between two migration files
     When someone logs in as "ledgerops_app" with "app-secret"
     Then the login is refused
     And re-running migrate with "T7!kq@9x%Zm" completes and that password works
+
+  Scenario: A crash during a migration file leaves a dirty version that migrate refuses to continue from
+    Given Priya has an empty database "kestrel_ledger" and supplies "T7!kq@9x%Zm"
+    And migrate is killed during a migration file
+    When she re-runs migrate
+    Then it exits non-zero naming the dirty version and changes nothing
+    And a login as "ledgerops_app" with "app-secret" is refused
 
   Scenario: Migrate refuses with no password before touching the database
     Given Priya supplies neither LEDGEROPS_APP_PASSWORD nor LEDGEROPS_APP_PASSWORD_FILE
@@ -877,7 +943,7 @@ Feature: Container image release
     When Tomasz runs migrate with a new password
     Then it exits non-zero naming the missing privilege
     And the old password still works
-    And the output says whether schema changes were applied
+    And the output says "no changes applied"
 
   Scenario: History stays append-only after upgrade
     Given the upgrade completed
@@ -895,6 +961,16 @@ Feature: Container image release
     When a caller presents the token "demo-tenant-key"
     Then the container is serving and the token is refused 401
 
+  Scenario: The serving process refuses to start holding the migration credential
+    Given LEDGEROPS_MIGRATE_DSN is present in the serve environment
+    When the container starts to serve
+    Then it exits 1 naming LEDGEROPS_MIGRATE_DSN with no database connection made
+
+  Scenario: An unreadable password file gives a named error
+    Given the password file is mode 0400 owned by root and the image runs non-root
+    When migrate runs
+    Then it exits non-zero naming the file and the database is unchanged
+
   Scenario: Wrong app password at start is a clear refusal
     Given the database was migrated with "T7!kq@9x%Zm" and the DSN carries "wrong-guess"
     When the container starts
@@ -906,7 +982,7 @@ Feature: Container image release
     Given main is green at the commit tagged "v0.1.0"
     When the release pipeline finishes
     Then "ghcr.io/gizawnahom/ledgerops:0.1.0" pulls without login
-    And the smoke check migrated a fresh database and saw /health 200
+    And the smoke check ran against the pushed digest before "0.1.0" was tagged, migrated a fresh database and saw /health 200
 
   Scenario: A red build publishes nothing
     Given an integration job fails at the commit tagged "v0.1.1"
@@ -950,3 +1026,267 @@ Feature: Container image release
     Then only the release verifies
     And the release's SBOM attestation lists its Go modules
 ```
+
+---
+
+## Wave: DESIGN / [REF] Prior Wave Consultation
+
+Scope: application (nw-solution-architect), mode: propose, user accepted every recommendation 2026-10-17. Density: lean (Tier-1 only).
+
+- ✓ `docs/product/architecture/brief.md` (read in parts; extended, not recreated), ADR-007 and ADR-013 in full; ADRs 001-006, 008-012, 014-016 not read in full (none touches packaging)
+- ✓ `docs/product/journeys/pull-and-run-ledgerops.yaml`
+- ✓ This file's DISCUSS sections; ⊘ `slices/*.md` (globbed, content duplicated here)
+- ✓ `CLAUDE.md` (functional paradigm, pure core / effect shell; not re-asked)
+- ✓ Codebase: `Dockerfile`, `docker-compose.yml`, `ci.yml`, `cmd/api/main.go`, `postgres/store.go`, `0001_init.up.sql`, `console_static.go`, `web/console/package.json`; by grep: `Makefile`, workflow triggers, `router.go`, `.golangci.yml`, migration grants
+- ⊘ `discover/`, `diverge/`, `design/`, `spike/` (not found)
+
+No unresolved contradictions with DISCUSS. Five refinements are recorded under § Changed Assumptions. Revised in review cycle 1 (2026-10-17): DDD-27..40 amended where noted, DDD-41..47 added; the PO's applied upstream changes 1-8 were re-read and are consistent with this wave.
+
+## Wave: DESIGN / [REF] DDD list
+
+Numbering continues from DDD-26 (`multitenancy`/`inter-tenant-transfer`). ADRs 017-023.
+
+| ID | Decision | One-line rationale |
+|---|---|---|
+| DDD-27 | Edit applied migration 0001 once, in place: `ledgerops_app` created NOLOGIN, no password; `GRANT CONNECT` via `current_database()` (ADR-017) | A new migration cannot help; 0001 itself fails on any other database name; golang-migrate never re-runs it |
+| DDD-28 | Password step is Go-side, last, always applied, sent as a client-built SCRAM-SHA-256 verifier via a password-only capability (ADR-017, ADR-022) | Rule A by construction (no login at any instant); plaintext never reaches server logs or a non-TLS wire |
+| DDD-29 | Dirty migration state: refuse naming the version and both candidate states, no `--force` in v0.1.0, documented manual recovery, premise guarded by a kill-mid-file test (ADR-017) | Verified in golang-migrate 4.18.3: each file is one implicit transaction, so the schema is at N-1 or N and the version row cannot say which; forcing could corrupt a ledger |
+| DDD-30 | One binary `ledgerops`: `serve` (default), `migrate`, `version`; directory stays `cmd/api` (ADR-018) | D4; compose keeps working; no churn in documents that cite `cmd/api` |
+| DDD-31 | Variables `LEDGEROPS_MIGRATE_DSN`, `LEDGEROPS_APP_PASSWORD[_FILE]`; both password sources set refuses; blank = unset; one trailing newline stripped; `serve` refuses when `LEDGEROPS_MIGRATE_DSN` is present; config parsing is a pure function (ADR-018) | Fail fast, list every problem, protect OPS-10 against shared env files |
+| DDD-32 | `Secret` redacting type, DSN error redaction, wrong app password at start classified (SQLSTATE 28P01) into `health.startup.refused` (ADR-018) | AC: no secret in any output; named refusal instead of a first-request failure |
+| DDD-33 | Console embedded via a `console_embed` build-tagged file pair in the existing HTTP adapter behind an `fs.FS` seam; every image build passes the tag; startup refusal if embedded `index.html` is missing (ADR-019) | Closes the silent-404 bug class; dev/CI builds unchanged; no new package |
+| DDD-34 | Image build shape: one Dockerfile, Node stage, `$BUILDPLATFORM` cross-compile, ldflags stamping, alpine with no `RUN` in the final stage, numeric non-root `USER 65532:65532`, OCI labels, `.dockerignore` (ADR-019) | What is tested is what ships; no QEMU for compile; non-root for a ledger holding funds |
+| DDD-35 | `release.yml` on version-tag push; `ci.yml` gains `workflow_call`, `push:` becomes branches-only; digest-first order (build, smoke, sign/attest/verify, anonymous-pull probe, then tags promoted last) (ADR-020) | No duplicate CI run; no public version tag before smoke, signature and public visibility |
+| DDD-36 | `internal/release` pure classifier produces a `ReleasePlan`; workflow only executes it (ADR-020) | Backport/prerelease/`latest` rules are testable business logic, not inline shell |
+| DDD-37 | Tag immutability guard (absent or same digest), global non-cancelling concurrency group, least-privilege per-job permissions (sign job: `packages: write` + `id-token: write`; smoke: `packages: read`), frozen `release.yml` identity (ADR-020) | Re-runs are idempotent; "highest stable" is evaluated serially; the signing identity includes the workflow path |
+| DDD-38 | Keyless cosign `--recursive` over index and platforms (verify works on the tag); per-platform SPDX-JSON SBOM via syft attached with `cosign attest --type spdxjson` (ADR-021) | Matches `cosign verify`/`verify-attestation` stories; SBOM content is per platform |
+| DDD-39 | Supported minimum privilege set for the migrate role as an explicit checklist (database CONNECT-grant right, CREATE on `public`, CREATEROLE, PG16 ADMIN OPTION, ownership of altered tables, cluster and collision rules), gathered as facts plus always-rolled-back empirical probes, mapped 42501 backstop (ADR-022) | Failure before any change, naming the privilege; PG16 `CREATEROLE` semantics |
+| DDD-40 | Rotation is migrate-then-restart; hot reload recorded, not built (ADR-023) | Pooled connections keep the old credential only until recycled; no story asks for hot reload |
+| DDD-41 | One ledgerops database per Postgres cluster (user decision): `migrate` against a target with no ledgerops schema refuses, before any change, when role `ledgerops_app` already exists in the cluster; no override flag; atomic only through the role claim of DDD-48 (ADR-017) | The role is cluster-global: Rule A holds by construction and a rotation can never reach another database |
+| DDD-42 | Migration is a pure `PlanMigration(facts, config)` returning a refusal or an ordered plan; facts come from read-only catalog queries plus rolled-back empirical probes; driven ports split into `SchemaMigrator` and `RolePasswordSetter` (takes a finished verifier only) (ADR-022) | Every refusal reason is table-testable; the password setter cannot touch schema and never sees plaintext |
+| DDD-43 | SBOM verify target is the platform digest (two-step lookup documented); no index-level SBOM; cosign 2.x, digest references only (ADR-021) | One merged SBOM would be wrong for one platform; avoids relying on an unverified `--platform` flag |
+| DDD-44 | Pinning policy: every `uses:` by full commit SHA, tool versions pinned, all base images (incl. smoke `postgres:16`) by digest, automated unpinned-`uses:` check (ADR-019, ADR-020) | Supply-chain integrity of the pipeline that signs the image |
+| DDD-45 | Re-run semantics: if the exact tag exists, resume with its digest (skip build), else build anew; builds not claimed reproducible; no automatic pruning in v0.1.0 (ADR-020) | Idempotent re-runs without reproducible-build effort; naive pruning would break multi-arch indexes |
+| DDD-46 | Smoke harness, quickstart checker and release planner are Go programs under `scripts/<name>/` (existing `scripts/race` convention); GitHub Release body is a template naming the image reference and verify commands plus generated notes; docs and example compose are components (ADR-020) | One convention; the quickstart document is the tested artifact |
+| DDD-47 | SCRAM verifier uses SASLprep (RFC 4013) normalisation, injected salt and iteration count, non-ASCII acceptance case (ADR-017) | Correct for non-ASCII passwords; deterministic unit tests |
+| DDD-48 | The DDD-41 guarantee is made atomic by claiming the role: when absent, `migrate` first creates `ledgerops_app` NOLOGIN with an owner-database marker (`COMMENT ON ROLE`) in its own committed transaction; the loser of a race gets 42710, re-reads the marker and refuses with the cluster-rule message; a re-run against the marked database resumes. No advisory lock (ADR-017) | `pg_advisory_lock` keys are per-database, so migrates on different databases would not contend, and a fixed shared database may deny CONNECT; role creation is the one cluster-global atomic operation. Refusal message names the privileged remedy `DROP ROLE ledgerops_app` when the marked database no longer exists |
+
+## Wave: DESIGN / [REF] Changed Assumptions
+
+Refinements accepted by the user 2026-10-17. DISCUSS sections are not edited; story/AC wording that needs PO revision is listed in `design/upstream-changes.md`.
+
+1. **Smoke ordering (digest-first).** Original (this file, D8): "then a post-push smoke test pulls the published image, migrates a fresh Postgres and checks `/health`." New: the image is pushed by digest with no version tag; the smoke pulls that exact digest from GHCR, both architectures, plus the upgrade leg; signing follows; only then is `X.Y.Z` promoted, then `X.Y` and `latest`. Rationale: a failed smoke or signature leaves an untagged digest, never a public version tag. Stricter than D8, same registry bytes.
+2. **Rule A crash scenario.** Original (Gherkin scenarios): "And migrate is killed after the first schema change ... And re-running migrate with "T7!kq@9x%Zm" completes and that password works". New: true only when the kill falls between migration files. A kill mid-file leaves a dirty version; `migrate` refuses naming it (DDD-29). The role stays NOLOGIN, so Rule A holds in both cases. DISTILL needs both scenarios.
+3. **Test churn scope.** Original (D6): "`docker-compose.yml`, the loadtest compose, the test helper and CI set `LEDGEROPS_APP_PASSWORD=app-secret` explicitly". New: `postgres.Migrate`/`MigrateStep` change signature (password parameter) and have 7 direct call sites in 6 files (verified by grep, corrected in review cycle 1): `tests/acceptance/ledgercore/ledger_seeding.go` (2: `Migrate`, `MigrateStep`), `ledger_observations.go`, `tests/acceptance/multitenancy/world.go`, `tests/acceptance/intertenanttransfer/world.go`, `internal/adapters/postgres/testhelper_test.go`, `internal/adapters/http/trial_balance_tenant_scope_test.go`; `steps_ledger_test.go` reaches it through `MigrateFromZero`. There are at least six independent `app-secret` literals. All pass `app-secret` explicitly; the compiler finds every site.
+4. **Frozen pre-feature fixture.** New obligation: before 0001 is edited, the current 0001 text (and 0002-0006) is frozen as a test fixture so US-4 and the smoke upgrade leg can build a database exactly as the pre-feature demo stack did (role LOGIN with `app-secret`, grant on database `ledgerops`).
+5. **One ledgerops database per cluster (user decision, review cycle 1).** New constraint not present in DISCUSS: `ledgerops_app` is cluster-global, so a fresh `migrate` refuses when the role already exists in the cluster (DDD-41, ADR-017). DISCUSS's "A database with any name can be prepared" (US-1) stays true for the first ledgerops database in a cluster; see `design/upstream-changes.md` item 10 for the story text that needs a qualifier.
+
+## Wave: DESIGN / [REF] Component decomposition
+
+| Component | Path | Change | Notes |
+|---|---|---|---|
+| Subcommand dispatcher, `LoadServeConfig`, `ParseMigrateConfig`, startup refusal classifier, `refuseIfMigrateDSNPresent`, version vars | `cmd/api/` | EXTEND | Binary renamed `ledgerops`; directory unchanged |
+| `PlanMigration` (pure), `FactReader` (read-only), `PreflightProber` (write-capable, rolled back, never committed), role claim, dirty detection, DSN redactor | `internal/adapters/postgres/` (plan and redactor may live in a pure sub-file) | EXTEND | Plan is pure over facts; shell executes |
+| `SchemaMigrator` and `RolePasswordSetter` driven ports; SCRAM verifier builder | `internal/adapters/postgres/` | EXTEND | `Migrate`/`MigrateStep` become the orchestration entry points and gain a `Secret` password; the setter takes a finished verifier only |
+| Migration 0001 | `internal/adapters/postgres/migrations/0001_init.up.sql` | EXTEND (one-time edit) | NOLOGIN role; dynamic grant; `.down.sql` reviewed for consistency |
+| `Secret` | `internal/support/` | EXTEND | Redacts under `String`, `GoString`, `slog.LogValuer` |
+| Console assets seam | `internal/adapters/http/console_static.go`, `router.go`, plus a `console_embed`-tagged file pair and gitignored `console_dist/` in the same package | EXTEND | `fs.FS` into `mountConsole`; no new package |
+| Release classifier | `internal/release/`, thin `scripts/releaseplan/main.go` | CREATE NEW | Pure |
+| Smoke harness | `scripts/smoke/main.go` | CREATE NEW | Go, per the `scripts/race` convention; used by `release.yml` and local runs |
+| Quickstart checker | `scripts/quickstart/main.go` | CREATE NEW | Extracts the tagged fenced command blocks of the quickstart and runs them in order; shares helpers with the smoke harness |
+| Release workflow | `.github/workflows/release.yml` | CREATE NEW | Path is a public interface; the quickstart job runs last |
+| CI workflow | `.github/workflows/ci.yml` | EXTEND | `workflow_call`; branches-only `push:` |
+| Dockerfile | root | EXTEND | See DDD-34 |
+| `.dockerignore` | root | CREATE NEW | None exists; controls the build context |
+| Compose files | `docker-compose.yml`, `docker-compose.loadtest.yml` | EXTEND | `migrate` service runs `ledgerops migrate` from the built image |
+| Quickstart for the published image | `docs/quickstart-published-image.md` | CREATE NEW | US-8; fenced blocks tagged for the checker; includes verify, upgrade, rotation, dirty-state recovery |
+| Published-image run example | `examples/published-image/docker-compose.yml`, `examples/published-image/README.md` | CREATE NEW | Separate from the demo compose; no demo credentials; secrets generated by documented commands |
+| README | `README.md` | EXTEND | Quickstart leads with the published image; limitation line removed; "Adoptable" roadmap item amended |
+
+The domain core, application layer and ports are untouched.
+
+## Wave: DESIGN / [REF] Driving ports
+
+| Port | Surface | Contract |
+|---|---|---|
+| `ledgerops migrate` | container command | Env: `LEDGEROPS_MIGRATE_DSN`, `LEDGEROPS_APP_PASSWORD` xor `_FILE`. Exit 0 with schema version and "app role password set/updated"; non-zero with named causes. Never prints secrets |
+| `ledgerops serve` / no argument | container command | Env: `LEDGEROPS_APP_DSN`, `LEDGEROPS_OPERATOR_KEY` required; `LEDGEROPS_DEMO_TENANT_KEY`, `LEDGEROPS_ADDR` optional; refuses if `LEDGEROPS_MIGRATE_DSN` is present |
+| `ledgerops version` | container command | `ledgerops <version> (commit <short>)` or `dev (commit unknown)`; needs no env |
+| `git push` of `vMAJOR.MINOR.PATCH[-pre]` | Actions trigger | Only entry to `release.yml` |
+| `docker pull ghcr.io/gizawnahom/ledgerops:<tag>` | registry | Tags per `ReleasePlan` |
+| `cosign verify`, `cosign verify-attestation` | registry artifacts | Identity regex in ADR-021 |
+| `GET /health`, `GET /console`, `GET /console/verdict` | HTTP (existing) | Unchanged |
+
+The serve path exposes no write method to migration state, and the migrate path is a separate driving port; read and write are not combined on one interface.
+
+## Wave: DESIGN / [REF] Driven ports + adapters
+
+| Port (outbound) | Adapter | Probe (Earned Trust) |
+|---|---|---|
+| `SchemaMigrator` (privileged DSN) | `postgres` migrator | `FactReader` (read-only catalog queries) and `PreflightProber` (write-capable empirical probes, rolled back, never committed) (ADR-022). Fault injections: no `CREATEROLE`, no `ADMIN OPTION` on existing role, not database owner, no `CREATE` on `public`, table owned by another role, second database in a cluster with the role. Dirty-state detection before any change |
+| `RolePasswordSetter` (privileged DSN) | `postgres` role adapter | Accepts a finished SCRAM verifier only; probe: a real client login with the plaintext succeeds after the set (post-condition check in the acceptance suite and the smoke) |
+| App store (app DSN) | existing `postgres.Open` | Existing `probeStartup` (SELECT, UPDATE-on-entries refused) + SQLSTATE 28P01 classification |
+| Console assets (`fs.FS`) | embedded FS, or `os.DirFS` | In a `console_embed` build, `index.html` must exist or refuse to start |
+| Password file read | OS file read in the shell | Strips one trailing newline; unreadable file is a named config error (documents the 0400-root trap) |
+| Registry, signing, release APIs | GitHub Actions steps | Verification steps: `cosign verify` (index and platforms), `verify-attestation` (platform digests), `imagetools inspect` (platforms, labels), anonymous pull of the digest before any tag is promoted, release body contains the image reference |
+
+Probe contract enforcement: subtype check (Go interface assertion `var _ Prober = (*migrator)(nil)` at the composition root), structural check (AST test that every driven adapter type exposes a probe), behavioural check (fault-injection acceptance tests above). Self-application: the structural test fails if a new adapter lacks a probe.
+
+## Wave: DESIGN / [REF] Technology choices
+
+| Item | Choice | License |
+|---|---|---|
+| Language/runtime | Go 1.25 (existing), `CGO_ENABLED=0` | BSD-3 |
+| Migration engine | golang-migrate v4 (existing, embedded via iofs) | MIT |
+| Base image | alpine:3.20 (existing); every `FROM` (and smoke `postgres:16`) pinned by digest, values by DEVOPS | MIT |
+| Actions | every `uses:` pinned by full commit SHA; cosign 2.x, syft, buildx versions pinned | Apache-2.0 / MIT |
+| Console build | Node 20 stage, Vite 5 (existing) | MIT |
+| Registry | GHCR via `GITHUB_TOKEN` (D1) | n/a (service) |
+| Image build | docker/buildx, docker/metadata-action | Apache-2.0 |
+| Signing | cosign keyless, Sigstore Fulcio/Rekor | Apache-2.0 |
+| SBOM | syft, SPDX-JSON | Apache-2.0 |
+| Password verifier | SCRAM-SHA-256: PBKDF2-HMAC-SHA-256 and HMAC from Go stdlib; SASLprep via `golang.org/x/text/secure/precis` (module already in `go.mod` v0.40.0 as `// indirect` via pgx; becomes a direct dependency, so `go.mod` is edited) | BSD-3 |
+
+## Wave: DESIGN / [REF] Decisions table
+
+| DDD | Locked? | Origin | ADR |
+|---|---|---|---|
+| DDD-27..29, 41, 47, 48 | Yes | OQ-2, user-accepted; DDD-41 is a user decision (review cycle 1) | 017 |
+| DDD-30..32 | Yes | OQ-3 | 018 |
+| DDD-33..34 | Yes | OQ-5, non-root | 019 |
+| DDD-35..37, 44..46 | Yes | OQ-6, review cycle 1 | 020 (044 also 019) |
+| DDD-38, 43 | Yes | OQ-10, review cycle 1 | 021 |
+| DDD-39, 42 | Yes | OQ-8, review cycle 1 | 022 |
+| DDD-40 | Yes | OQ-9 | 023 |
+
+## Wave: DESIGN / [REF] Reuse Analysis
+
+| Existing component | File | Overlap | Decision | Justification |
+|---|---|---|---|---|
+| Embedded migration runner | `internal/adapters/postgres/store.go` | Embedded SQL up as the privileged role | EXTEND | Same engine; adds password parameter, provisioning, probe, dirty detection |
+| Migration 0001 | `.../migrations/0001_init.up.sql` | Password literal, hardcoded grant | EXTEND | A new migration cannot fix it (0001 fails first); one-time edit, fixture + checksum guard |
+| Composition root | `cmd/api/main.go` | Env reads, startup probe | EXTEND | Dispatcher, pure config, classifier |
+| `mountConsole` / `consoleDistDir` | `internal/adapters/http/console_static.go` | SPA serving | EXTEND | `fs.FS` seam; dev behaviour retained |
+| Embed file pair (`console_embed` / `!console_embed`) | `internal/adapters/http/` (new files, same package) | Where the bundle enters the binary | EXTEND (new files in an existing package) | A separate `consoledist` package was considered and rejected: the HTTP adapter already owns console serving, `go:embed` needs the bundle inside the embedding package's directory, and a tagged file pair adds no import edge |
+| `.dockerignore` | root | Build context hygiene | CREATE NEW | No file exists; without it `.git`, `node_modules` and docs enter the context and defeat stage caching |
+| README quickstart and limitations | `README.md` | Documents the build-from-source path | EXTEND | Leads with the published image; limitation removed |
+| Quickstart for the published image; example compose | `docs/quickstart-published-image.md`, `examples/published-image/` | Overlaps README quickstart and the demo `docker-compose.yml` | CREATE NEW | The demo compose bakes demo credentials and builds from source (D6 keeps it unchanged); the published-image path must use generated secrets and the pulled image, so it cannot extend the demo files without breaking `make up` |
+| `support` package | `internal/support/` | Hash primitive, secret hygiene | EXTEND | Add `Secret` |
+| `Dockerfile` | root | Image build | EXTEND | Stages added |
+| Compose files | root | Demo migrate step | EXTEND | `migrate/migrate` replaced by the image's own `migrate` so demo CI exercises shipped code |
+| `ci.yml` | `.github/workflows/` | Gate reused for release | EXTEND | `workflow_call`, branches-only `push:` |
+| `release.yml` | new | Tag pipeline | CREATE NEW | No existing release workflow; `nightly.yml`/`load-test.yml` differ in trigger and purpose |
+| `internal/release` | new | Tag classification, highest stable | CREATE NEW | No alternative; `metadata-action` cannot express the backport rule; testable pure function |
+| Smoke harness (`scripts/smoke`) | new | Pull-migrate-run-assert | CREATE NEW | `scripts/race` is the only existing script and is a race runner against the compose stack; `Makefile` `demo-*` drive compose from source and cannot target a registry digest. Follows the Go-program-per-directory convention and reuses the repository's testcontainers dependency |
+| Quickstart checker (`scripts/quickstart`), release planner (`scripts/releaseplan`) | new | Run documented commands verbatim; execute the pure plan | CREATE NEW | No existing equivalent; both are thin mains over shared helpers or `internal/release` |
+
+### Contract shapes (per overlapping component)
+
+Only three shapes are used: pure-function (return-only), bounded-change (declared mutation set over a stated universe), unbounded-preservation (must return a Plan, never mutate). Every component of this feature has a row.
+
+| Component | Shape | Universe and assertion mechanism |
+|---|---|---|
+| Argument dispatcher | pure-function | argv in, command value (or usage error) out. Table tests |
+| `LoadServeConfig`, `ParseMigrateConfig` | pure-function | Env snapshot in, config plus all issues out. Table tests; property: blank, whitespace-only and unset are equivalent; both-password-sources refuses |
+| Password-file reader | pure-function over an injected `ReadFile` capability | Returns a `Secret` or a named error; strips exactly one trailing newline. Table tests with a fake reader (LF, CRLF, none, empty, unreadable) |
+| `Secret`, DSN redactor | pure-function | No formatting path prints the value (`%v`, `%+v`, `%#v`, slog JSON); redactor property: output never contains the password component |
+| Startup-refusal classifier | pure-function | (error, DSN user) in, `Refusal{reason, role}` out; sentinel-password assertion on every output |
+| Dirty-state detector | pure-function | (version, dirty) in, refusal naming the version out |
+| SCRAM-SHA-256 verifier builder | pure-function with injected salt and iteration count | Deterministic vectors; SASLprep cases; a real-client login after the set (acceptance) |
+| `PlanMigration` | pure-function (unbounded-preservation producer) | `Facts` plus config in, `Refuse(reason)` or ordered `Plan` out; never mutates. Table tests cover every refusal reason in ADR-022 and the cluster rule (DDD-41) |
+| Plan executor (`Migrate`/`MigrateStep` shell) | bounded-change | Declared delta: the role claim (when absent), objects created by pending migration files, `ledgerops_app` login attribute and rolpassword, and the `GRANT CONNECT` entry in the target database's ACL. Complement universe (asserted by a before/after snapshot diff in the upgrade and fresh-database acceptance runs): `pg_authid` (every role other than `ledgerops_app` identical, including `rolpassword`, `rolcanlogin`, `rolsuper`), `pg_shdescription` (every other shared object's comment), `pg_auth_members`, `pg_default_acl`, `pg_namespace` (+ `nspacl`), `pg_class` (relname, relkind, relowner, relacl: only declared additions), `pg_database` (every other database and its ACL identical), plus data: rows of `entries`, `accounts`, `transactions`, `idempotency_keys`, `tenants`, `tenant_links`, `counterparty_aliases`, `transfer_state` unchanged (counts and checksums) and trial balance zero |
+| `FactReader` | bounded-change, empty delta (read-only) | Pre/post snapshot over the universe above is identical; the port exposes no statement other than SELECT (structural test) |
+| `PreflightProber` | bounded-change, zero net change; explicitly write-capable, separately named port | Its statements are DDL run in a transaction that is rolled back, never committed; pre/post catalog snapshot identical (OID and txid consumption excluded as unobservable) |
+| Role claim | bounded-change | Declared delta: creation of `ledgerops_app` NOLOGIN and its owner-database marker (`pg_authid`, `pg_shdescription`) in its own committed transaction, only when the role is absent; atomic by the unique index on `pg_authid` (DDD-48). Complement: nothing else changes; concurrency scenario asserts exactly one winner |
+| `RolePasswordSetter` | bounded-change | Declared delta: `ledgerops_app` `rolcanlogin` and `rolpassword` only; same complement universe |
+| `SchemaMigrator` | bounded-change | Declared delta: pending migration files only; same complement universe; dirty-state premise test (kill mid-file) |
+| `serve` | bounded-change | Declared delta: rows written through the existing ledger ports as `ledgerops_app`; it can run no DDL and no role statement (grants), and holds no migrate DSN (refuses if present). Complement-universe assertion: an acceptance run drives postings through a running `serve`, then diffs the catalog snapshot (above) and the data tables, expecting only ledger-port row additions; a second check attempts `CREATE TABLE`, `ALTER ROLE` and `UPDATE`/`DELETE` on `entries` as the app role and expects refusal (existing `probeStartup` covers the last at startup) |
+| `refuseIfMigrateDSNPresent` | pure-function | Env snapshot in, optional refusal out; presence only, never reads the value |
+| Console assets seam | bounded-change, empty declared delta over an injected read capability | Reads are effects, so the `fs.FS` is injected (embedded FS or `os.DirFS`); the interface has no write methods (compile-time); startup check that `index.html` exists, asserted by the embed and no-index tests |
+| `internal/release` classifier | pure-function | (tag, existing stable versions) to `ReleasePlan`. Table and property tests on semver, prerelease, backport, re-run |
+| Smoke harness, quickstart checker | bounded-change | Declared delta: ephemeral containers and databases it creates and removes; registry access is pull-only (job has `packages: read`); nothing outside its temp universe changes |
+
+## Wave: DESIGN / [REF] Architecture Enforcement
+
+Style: modular monolith, ports-and-adapters, functional core / effect shell. Language: Go. Tools: golangci-lint (`depguard`, alongside the existing `exhaustive`) and an AST/grep test.
+- `internal/domain` and `internal/app` import no adapter package.
+- `LEDGEROPS_MIGRATE_DSN` and `LEDGEROPS_APP_PASSWORD[_FILE]` are read only in the migrate command file. The single allowed exception is serve's `refuseIfMigrateDSNPresent` site, which may name `LEDGEROPS_MIGRATE_DSN` only through `os.LookupEnv` and never reads or forwards the value. The AST test names that site explicitly; the serve path does not import the migrator.
+- `RolePasswordSetter` and `SchemaMigrator` are separate interfaces (neither embeds the other); the setter's signature accepts a verifier type, never a plaintext password.
+- Every `uses:` in `release.yml` is pinned to a full commit SHA (zizmor or a grep test), and every `FROM` carries a digest.
+- The Dockerfile's `go build` carries `-tags console_embed` (structural test).
+- The DSN passed to golang-migrate never carries `x-multi-statement` (test), because the dirty-state analysis depends on one implicit transaction per file.
+- `Secret` never renders via `%v`, `%+v`, `%#v` or slog JSON.
+- Checksum guard on migrations 0001 (edited) through 0006.
+- Every driven adapter exposes a probe (structural test), and fault-injection tests exercise it (behavioural).
+
+## Wave: DESIGN / [REF] External integrations (handoff annotation for DEVOPS)
+
+External Integrations Requiring Contract Tests:
+- GHCR (OCI distribution API): publish, promote tags, anonymous pull. Pact does not apply to a registry; the consumer-driven checks are the release workflow's verification steps (`imagetools inspect` for platforms and labels, anonymous pull of the digest) and the quickstart job.
+- Sigstore (Fulcio, Rekor, GitHub OIDC): keyless signing. Recommended: `cosign verify` (index and platform digests) and `verify-attestation` (platform digests) in the pipeline against the published identity regex.
+- GitHub Releases/Actions APIs: release creation, prerelease flag, release body naming the image reference. Verified by the pipeline's release job.
+- Docker Hub base images and PostgreSQL 16: pinned versions; smoke covers a real Postgres.
+
+## Wave: DESIGN / [REF] Open questions
+
+For DEVOPS:
+1. arm64 smoke runner: `ubuntu-24.04-arm` (preferred for a public repo) versus QEMU fallback.
+2. OQ-7 owner action: first GHCR push is private; the owner sets the package public and links the repository once. The anonymous-pull probe (now before any tag is promoted) fails the first run by design; the owner flips visibility and re-runs (the tag does not exist yet, so the re-run builds anew).
+3. KPI-5 `demo_first_green_seconds` rises because `make up` / the `demo` job now build the console; re-baseline in `kpi-contracts.yaml`. Use BuildKit npm cache mounts.
+4. Fill in digests for every `FROM` and the smoke `postgres:16`, SHAs for every `uses:`, pinned cosign/syft/buildx versions; dependabot/renovate for all of them (DDD-44); the unpinned-`uses:` check.
+5a. Untagged-digest cleanup: none in v0.1.0 (DDD-45); revisit with a multi-arch-aware tool.
+5b. Where the quickstart job runs beyond `release.yml` (for example `nightly.yml` against `latest`); the checker program is the same.
+5. K1-K7 wiring into `docs/product/kpi-contracts.yaml`.
+6. Slice 03 is amd64-only by the DISCUSS slicing; the design builds both architectures in one job. DEVOPS may stage arm64 in slice 06 or enable it from the start.
+
+For DISTILL:
+1. Frozen pre-feature fixture (0001-0006 old text) as the basis for the US-4 and smoke upgrade scenarios.
+2. Two crash scenarios: kill between files (re-run completes) and kill mid-file (dirty refusal naming the version, role still NOLOGIN).
+3. Non-superuser privilege fixtures: no `CREATEROLE`; no `ADMIN OPTION` on an existing role; not database owner.
+4. Sentinel-password and sentinel-key assertions on every failure path (migrate, serve, probe, wrong password at start).
+5. `serve` refuses when `LEDGEROPS_MIGRATE_DSN` is set (new scenario; see upstream-changes).
+6. Secret file mounted `0400 root` under the non-root user: named error, documented trap.
+7. Console embed (corrected in review cycle 1): with `console_dist` absent or empty, a `console_embed` build fails at `go build` (a Dockerfile-level or build test, not a startup test); with the directory present but no `index.html` the binary refuses to start; an untagged build serves from `consoleDistDir` as before; a structural test asserts the Dockerfile builds with the tag.
+8. Cluster rule (DDD-41): a second, empty database in a cluster that already has `ledgerops_app` -> `migrate` refuses naming the conflict, nothing changed (role, password, schema, the first database untouched); a database that already has the ledgerops schema is not refused (rotation, upgrade, re-run).
+9. Dirty-state premise: kill mid-file with `pg_terminate_backend` against a fixture migration; assert no partial effect and `dirty = true`; `migrate` then refuses naming the version.
+10. SCRAM: non-ASCII password acceptance (composed and decomposed forms, fullwidth characters) with a real pgx login; deterministic vectors with injected salt.
+11. Fault-injection privilege fixtures extended: no `CREATE` on `public`; a ledgerops table owned by another role; no `GRANT CONNECT` right on the database.
+13. Concurrency (DDD-48): two fresh `migrate` runs started together against two different empty databases in one cluster -> exactly one succeeds, the other refuses with the cluster-rule message, neither database is left dirty, the role carries the winner's password only; two concurrent runs against the same database both end consistent (the loser resumes via the marker). A role whose marked database no longer exists: refusal names `DROP ROLE ledgerops_app` as the privileged remedy and changes nothing.
+12. Release body names the image reference; a resumed run (tag exists) reuses the digest; anonymous-pull probe fails on a private package before any tag exists.
+
+## Wave: DESIGN / [REF] Test harness impact (cluster rule, DDD-41)
+
+Verified against `tests/acceptance/*`, `testhelper_test.go` and `trial_balance_tenant_scope_test.go` (review cycle 1):
+- **Acceptance worlds** (`ledgercore`, `multitenancy`, `intertenanttransfer`): each boots one shared Postgres per test binary, calls `Migrate` once on the template database (pristine cluster, role absent: allowed), then gives every scenario a database made with `CREATE DATABASE ... TEMPLATE` and an explicit `GRANT CONNECT`. Cloning is SQL, not `migrate`, so the cluster rule never fires. These suites keep working; they only pass `app-secret` to the new signature.
+- **Per-test containers** (`testhelper_test.go`, `trial_balance_tenant_scope_test.go`, `ledgercore` `StartWithoutSchema`/`MigrateFromZero`): one cluster per test; the role is absent; allowed.
+- **New scenarios that need their own cluster**: anything that creates the role, sets or rotates its password, or exercises Rule A/B (US-1, US-4, dirty state) mutates a cluster-global object, so it runs in a dedicated container (tag `@dedicated-cluster`), as `StartWithoutSchema` already does. The cluster-rule refusal scenario may run in any cluster that already has the role by creating an empty second database and dropping it afterwards.
+- **Deferred `LEDGEROPS_TEST_PG_DSN` shared-instance reuse** (no code exists yet; plan restated per user decision, review cycle 2): on the shared instance, one ledgerops database is migrated once and is the template. Subsequent runs skip `migrate` (the schema is present) and clone per scenario with `CREATE DATABASE ... TEMPLATE`. `@dedicated-cluster` scenarios get their own container, never the shared instance. That first ledgerops database is the only one allowed in that cluster (DDD-41/48: any other fresh `migrate` there is refused).
+- **No test-only path** is added to the production binary: the refusal has no override, so production behaviour is not weakened to suit tests. Harnesses that need extra migrated databases use `CREATE DATABASE ... TEMPLATE`.
+
+## Wave: DESIGN / [REF] Wave Decisions Summary
+
+- Pattern: modular monolith, ports-and-adapters, functional core / effect shell (unchanged). Paradigm: functional.
+- Key components: `ledgerops` binary (serve/migrate/version), postgres migrator + provisioner, embedded console, `internal/release`, `release.yml`, smoke harness.
+- Constraints established: app never reads or holds the migrate DSN (and refuses if present); app role cannot log in on a database `migrate` created until the operator's password is set; **one ledgerops database per Postgres cluster** (fresh migrate refuses when `ledgerops_app` exists); applied migrations immutable after the 0001 exception; published version tags immutable by workflow policy (pin by digest); `release.yml` path frozen; all actions and base images pinned; no secret in any output.
+- Upstream changes: see `design/upstream-changes.md` (items 1-8 applied by the PO; 9-12 new in review cycle 1).
+
+## Wave: DESIGN / [WHY] Trade-off analysis
+
+Rendered on request (expansion `trade-off-analysis`, user-approved). Quality attributes in rank order: security and supply-chain integrity (S), release-path reliability (R), operability (O), testability (T), portability (P), time-to-market (M). "+" helps, "-" costs, "0" neutral.
+
+| Decision | Chosen | S | R | O | T | P | M | Main alternative and why not |
+|---|---|---|---|---|---|---|---|---|
+| Edit 0001 in place, NOLOGIN (DDD-27) | edit once | + (Rule A by construction) | 0 | + (any db name) | - (fixture, checksum guard) | + | 0 | New migration: cannot work, 0001 fails first |
+| One ledgerops DB per cluster (DDD-41) | refuse | + (no inherited or shared credential) | + | - (second DB needs second cluster) | - (dedicated clusters for role-mutating tests) | - (managed instances hosting several apps' databases are fine, several ledgerops are not) | + (no role-per-db design) | Role per database: changes every grant and the public contract |
+| SCRAM verifier transport (DDD-28, 47) | client-side verifier | + (no plaintext on wire or log) | 0 | 0 | - (SASLprep, salt injection) | 0 | - (about 25 lines plus tests) | Plaintext literal: leaks under `log_statement=ddl` |
+| Dirty state: refuse, no force (DDD-29) | refuse | + (never guess on a ledger) | - (manual recovery on a rare event) | - (operator procedure) | + | 0 | + | Auto-force: state not derivable |
+| Embed console behind a build tag (DDD-33) | embed | + (no silent 404) | + | + | 0 | + (single binary) | - (build-tag split) | Path convention: silent skip survives |
+| Non-root numeric user (DDD-34) | non-root | + | 0 | - (0400-root secret trap) | 0 | 0 | 0 | Root: simpler, weaker |
+| `serve` refuses when migrate DSN present (DDD-31) | refuse | + (OPS-10 enforced at runtime) | 0 | - (shared env files fail) | + | 0 | 0 | Trust the operator: the invariant is decoration |
+| Digest-first release order (DDD-35) | digest-first | + (no unsigned public tag) | + (no partial public release) | - (first run fails by design; orphan digests) | 0 | 0 | - (more jobs) | Literal D8 order |
+| Re-run: resume, no reproducible builds, no pruning (DDD-45) | resume | 0 | + (idempotent) | - (orphans accumulate) | 0 | 0 | + | Reproducible builds: large effort; prune: breaks indexes |
+| SBOM per platform, verify by platform digest (DDD-43) | per platform | + (honest content) | 0 | - (two-step lookup for consumers) | 0 | + | 0 | Index-level SBOM: wrong for one platform |
+| Pinning everything (DDD-44) | pin | + | + (reproducible pipeline) | - (bump churn) | 0 | 0 | - | Floating tags: supply-chain exposure in the signing pipeline |
+| Privileged role: explicit minimum + facts/plan + empirical probes (DDD-39, 42) | tested minimum | + (least privilege) | + (fail before change) | + (named privilege) | + (pure plan) | + (managed Postgres) | - (more fixtures) | Superuser only: excludes managed Postgres |
+
+Sensitivity points: DDD-41 (single cluster) and DDD-45 (resume vs rebuild) each affect more than one attribute and are the two decisions most likely to be revisited if adoption shows operators hosting several ledgers per cluster or re-running releases often. Risks: the first-release run fails by design (documented); GHCR tag immutability is policy not enforcement (mitigated by digest pinning and signatures); the dirty-state recovery is manual (rare by construction).

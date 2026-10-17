@@ -12,7 +12,7 @@ pending migration, and replace the app password, with no change to history.
 - Pending migrations applied over existing entries and balances
 - Re-run with same inputs is a successful no-op; later run with a new password rotates
 - Append-only guarantee holds after upgrade
-- Insufficient privilege on the privileged role fails clearly, old password intact, message states whether schema changes landed
+- Insufficient privilege on the privileged role fails clearly, old password intact, a preflight privilege probe fails before any schema change and the message states "no changes applied"
 - Doc note: a running app must be restarted after rotation (OQ-9)
 - Upgrade leg added to the release smoke test
 
@@ -32,7 +32,7 @@ after `migrate`, the edited `0001` or the Go-side role change is unsafe (OQ-2).
 - [ ] `app-secret` refused and the new password accepted afterwards
 - [ ] Idempotent re-run; successful rotation to a third password
 - [ ] UPDATE and DELETE on entries refused for `ledgerops_app` after upgrade
-- [ ] Missing role privilege: non-zero exit naming it, old password still works
+- [ ] Missing role privilege: non-zero exit naming it before any schema change, "no changes applied", old password still works
 
 ## Dependencies
 Slice 01 (command and password handling). Slice 03 for the smoke leg.

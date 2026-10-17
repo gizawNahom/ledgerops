@@ -70,7 +70,7 @@ steps:
   - id: S5
     name: Verify provenance
     persona: P2
-    action: cosign verify ghcr.io/gizawnahom/ledgerops:0.2.0 --certificate-identity-regexp ...
+    action: cosign verify ghcr.io/gizawnahom/ledgerops:0.2.0 --certificate-identity-regexp ... ; then resolve the platform digest and run cosign verify-attestation on it (SBOM is per platform)
     output: Verification succeeded with the release workflow identity
     emotion: assured
     confidence: 9
@@ -132,6 +132,22 @@ error_paths:
     failure: Privileged role cannot create or alter roles
     response: Exit non-zero naming the missing privilege; old password intact
     recovery: Grant the privilege or use a role that has it.
+  - step: S2
+    failure: Fresh migrate of a second empty database in a cluster where ledgerops_app already exists
+    response: Exit non-zero naming the conflict; role, password and both databases unchanged
+    recovery: >
+      Use a separate Postgres cluster, or migrate the database that already
+      owns the role; if that database no longer exists, run DROP ROLE
+      ledgerops_app as a privileged role. One ledgerops database per cluster.
+      Two simultaneous first migrations: exactly one succeeds, the other is refused.
+  - step: S2
+    failure: Run killed during a migration file (dirty version), or password file unreadable by the non-root image user
+    response: Re-run refuses naming the dirty version and changes nothing; unreadable file gives a named error
+    recovery: Inspect the named version before any further action; fix file permissions.
+  - step: S3
+    failure: LEDGEROPS_MIGRATE_DSN present in the serve environment
+    response: Exit 1 naming the variable, no database connection (the app never holds the migrate credential)
+    recovery: Remove it from the app container's environment.
   - step: S3
     failure: Operator key or app DSN unset (demo tenant key is optional)
     response: Exit 1 listing every missing required variable together
@@ -152,3 +168,8 @@ changelog:
   - date: "2026-10-17"
     feature: container-image-release
     change: S3 aligned with revised D9; demo tenant key is optional.
+  - date: "2026-10-17"
+    feature: container-image-release
+    change: >
+      DESIGN back-propagation: S2/S3 error paths for dirty migration state,
+      unreadable password file and MIGRATE_DSN in the serve environment.

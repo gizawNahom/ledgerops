@@ -27,9 +27,9 @@ the docs would be wrong; this slice finds out on an rc.
 ## Acceptance criteria
 - [ ] `cosign verify` with the repository identity succeeds for each published tag
 - [ ] A look-alike image under the same name fails
-- [ ] SBOM attestation retrievable and lists Go modules and base packages
+- [ ] SBOM attestation is per platform digest: resolve the platform digest, fetch and verify that digest's attestation (not via the tag); index signature still verifies on the tag; lists Go modules and base packages for that platform
 - [ ] Signing or attestation failure turns the release red and `latest` does not move
-- [ ] Both architectures covered (OQ-10)
+- [ ] Both architectures covered: the index and each platform manifest are signed, and each platform carries its own SBOM attestation
 
 ## Dependencies
 Slices 03 and 06.

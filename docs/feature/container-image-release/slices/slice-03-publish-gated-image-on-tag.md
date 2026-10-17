@@ -11,8 +11,8 @@ exact-version tag has been proven to migrate a fresh Postgres and serve
 - Trigger on `v*.*.*` tags (prerelease suffix allowed)
 - Reuse the full `ci.yml` suite as a gate (`workflow_call`)
 - Build and push amd64, exact version tag only (version without `v`)
-- Smoke check: pull the published image, migrate a fresh Postgres with a generated password, start with generated keys, require `/health` 200
-- Failed smoke leaves the run red, version not announced as usable
+- Smoke check: pull the image by digest before any version tag exists (each published architecture; amd64 here), migrate a fresh Postgres with a generated password, start with generated keys, require `/health` 200; the version tag appears only after smoke passes
+- Failed smoke leaves the run red and no version tag exists for it
 - Non-matching tags and branch pushes publish nothing; existing versions never overwritten
 
 ## OUT scope
@@ -32,10 +32,10 @@ verified against a real database.
 ## Acceptance criteria
 - [ ] `v0.1.0-rc.1` publishes `ghcr.io/gizawnahom/ledgerops:0.1.0-rc.1`
 - [ ] A failing CI job on the tagged commit publishes nothing
-- [ ] Smoke check passes against the published reference and fails visibly when the image cannot migrate
+- [ ] Smoke check passes against the pushed digest (before tagging) and fails visibly, with no version tag created, when the image cannot migrate
 - [ ] `v1.2`, `nightly-*` tags and branch pushes publish nothing
 - [ ] Re-pushing an existing version tag is refused; digest unchanged
-- [ ] Anonymous pull works once the package is public (OQ-7)
+- [ ] Anonymous pullability is checked on the pushed digest before any version tag is promoted; the first run is expected to fail this step until the owner makes the package public (OQ-7), then a re-run passes
 
 ## Dependencies
 Slices 01 and 02. Owner action: make the GHCR package public (OQ-7).
