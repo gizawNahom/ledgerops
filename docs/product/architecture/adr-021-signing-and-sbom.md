@@ -64,3 +64,11 @@ honest about both.
 - The certificate and repository name enter the public Rekor log (repo is
   public; acceptable).
 - Depends on ADR-020's frozen `release.yml`.
+
+## Amendments from DEVOPS (2026-10-19; `devops/upstream-changes.md` items 2, 5, 6, 7)
+
+The text above is kept as decided; these amend it (DDD-38 updated in place).
+- **Identity regex, exact case (item 2, user-decided 2026-10-17):** decision 5 becomes `^https://github.com/gizawNahom/ledgerops/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-.+)?$`, issuer `https://token.actions.githubusercontent.com`. The certificate carries the GitHub owner's real case; the image reference stays lowercase (`ghcr.io/gizawnahom/ledgerops`, GHCR requires it). The first rc's `sign` job prints the real certificate identity and asserts the published regex matches it (Earned Trust: probe the claim on the first real signature).
+- **syft installation (item 6):** syft v1.54.1 is installed from its release tarball with a pinned sha256 (not through `anchore/sbom-action`). SPDX-JSON per platform digest and `cosign attest --type spdxjson` are unchanged.
+- **Provenance (item 5):** decision 6 changes from "may be emitted" to "not emitted": BuildKit provenance and SBOM attestations are off so the index holds exactly the declared platforms.
+- **Signature storage (item 7):** decision 3's tag fallback is confirmed by probe: signatures and attestations live as `sha256-<hex>.sig` / `.att` tags in the same package. Consumers and cleanup tooling must treat them as artifacts of the subject digest, not as versions (ADR-020 amendment).

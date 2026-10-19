@@ -1,0 +1,303 @@
+# environments.yaml — container-image-release
+#
+# Additive to docs/feature/multitenancy/devops/environments.yaml (which extends
+# docs/feature/ledger-core/devops/environments.yaml). Inherited unchanged:
+# `ci`, `contended`, `corrupted`, `populated`, `load`, `two-tenant`,
+# `legacy-backfilled`. `clean` is inherited but now builds the console (slower)
+# and migrates through the shipped `ledgerops migrate`.
+#
+# This feature has NO hosted environment (OPS-1). Every environment below is a
+# fixture reachable from CI or a developer machine, parametrised by DISTILL
+# (Mandate 4) and exercised by DELIVER and the release smoke.
+#
+# Cluster-global mutation: anything that creates the role ledgerops_app, sets or
+# rotates its password, or exercises the cluster rule mutates a cluster-global
+# object and MUST run in its own cluster (container). Never the shared template
+# cluster of the acceptance worlds (see feature-delta.md § DESIGN / Test harness
+# impact).
+
+schema_version: "0.1"
+feature_id: container-image-release
+extends: docs/feature/multitenancy/devops/environments.yaml
+
+target_environments:
+  - name: fresh-pg16-cluster
+    description: >
+      Empty PostgreSQL 16 cluster: no ledgerops_app role, one empty database
+      with an arbitrary name (not "ledgerops"). The first ledgerops database in
+      a cluster may have any name.
+    platform: [linux]
+    architectures: [amd64, arm64]
+    preconditions:
+      - "postgres:16 pinned by digest (sha256:ca0bd484cb98bf4b24eb1010e73fb3fcbd6714d240fbc1a10eea5b7dbecb641d on 2026-10-17); the smoke starts it through Testcontainers, ref read from examples/published-image/docker-compose.yml"
+      - "privileged role is the bootstrap superuser"
+      - "role ledgerops_app absent"
+      - "database name differs from 'ledgerops' (for example kestrel_ledger)"
+    used_by: ["US-1a", "KPI-R3", "release smoke fresh leg", "make up (demo, where the database IS named ledgerops)"]
+
+  - name: legacy-demo-db
+    description: >
+      A cluster whose single database was built by the FROZEN pre-feature
+      migrations 0001-0006 (old text, kept as a test fixture before 0001 is
+      edited): ledgerops_app created LOGIN with the literal password app-secret,
+      GRANT CONNECT on a database literally named ledgerops. Holds entries and a
+      zero trial balance.
+    platform: [linux]
+    architectures: [amd64]
+    preconditions:
+      - "frozen fixture of 0001-0006 as shipped before this feature, embedded as package internal/adapters/postgres/prefeature (//go:embed *.sql), importable by scripts/smoke and the acceptance suites, protected by the migration checksum guard"
+      - "variant A: schema at version 4; variant B: schema at version 6 (current head before the feature)"
+      - "at least 1,240 entries across alice-01, bob-01 and the demo tenant; trial balance zero"
+      - "ledgerops_app accepts app-secret"
+    used_by: ["US-4", "KPI-R4", "release smoke upgrade leg", "migrate re-run no-op", "password rotation"]
+    rationale: >
+      A migration validated only against a fresh database proves nothing about
+      the databases that actually exist in the field (the demo stack). Same
+      reasoning as `legacy-backfilled` in multitenancy.
+
+  - name: role-exists-other-db
+    description: >
+      A cluster in which ledgerops_app already exists for another database.
+      Dedicated cluster per scenario (mutates a cluster-global object).
+    platform: [linux]
+    architectures: [amd64]
+    preconditions:
+      - "variant A: owner database migrated and present; a second EMPTY database exists"
+      - "variant B: owner database dropped, role and its owner-database marker remain (orphan); refusal must name DROP ROLE ledgerops_app as the privileged remedy"
+      - "variant C: abandoned first run (role claimed NOLOGIN with marker, no schema); re-run against the same database resumes"
+      - "variant D: two empty databases, two migrate runs started together (exactly one winner)"
+    used_by: ["US-1b", "KPI-R8", "DDD-41", "DDD-48"]
+
+  - name: managed-pg-nonsuperuser
+    description: >
+      Managed-Postgres-like cluster: the privileged role passed to migrate is
+      NOT a superuser. One fixture holds exactly the supported minimum (ADR-022);
+      each further fixture removes one privilege.
+    platform: [linux]
+    architectures: [amd64]
+    preconditions:
+      - "minimum set: owns (or may grant CONNECT on) the target database, CREATE on schema public, CREATEROLE while ledgerops_app is absent, ADMIN OPTION on ledgerops_app when it exists (PostgreSQL 16 semantics), membership in the owner of every existing ledgerops table that pending migrations alter"
+      - "fault fixtures: no CREATEROLE; no ADMIN OPTION on an existing ledgerops_app; not the database owner; no CREATE on public; a ledgerops table owned by another role; no right to GRANT CONNECT on the database"
+      - "every fault fixture must end 'no changes applied', old password still working, catalog snapshot unchanged"
+      - "role name is free (not required to be ledgerops_migrate)"
+    used_by: ["US-4 privilege scenario", "ADR-022 probe", "OQ-8"]
+
+  - name: image-amd64
+    description: "Published or locally built image executed natively on linux/amd64, pulled BY DIGEST."
+    platform: [linux]
+    architectures: [amd64]
+    preconditions:
+      - "GitHub runner label ubuntu-24.04"
+      - "image reference is repo@sha256:<digest>, never a tag, in the smoke"
+      - "image user 65532:65532"
+    used_by: ["release smoke", "KPI-R1", "KPI-R6", "KPI-R7"]
+
+  - name: image-arm64
+    description: >
+      Same image executed natively on linux/arm64 (Apple Silicon users, Graviton).
+      Native runner, no QEMU. Joins in slice 06; slice 03 is amd64-only by the
+      DISCUSS slicing.
+    platform: [linux]
+    architectures: [arm64]
+    preconditions:
+      - "GitHub runner label ubuntu-24.04-arm (free for public repositories; the repository is public)"
+      - "fallback if the repository becomes private: QEMU for the smoke only (not built)"
+      - "postgres:16 index digest resolves to the arm64 manifest"
+    used_by: ["release smoke (slice 06)", "KPI-R7"]
+
+  - name: nonroot-secret-files
+    description: "Image runs as numeric user 65532:65532 with the app password supplied as a mounted secret file."
+    platform: [linux]
+    architectures: [amd64, arm64]
+    preconditions:
+      - "file mode 0444/0644 (Docker and Kubernetes defaults): readable, works"
+      - "file mode 0400 owned by root: unreadable, named error naming the file, database unchanged (documented trap)"
+      - "content with LF trailing newline and with CRLF: exactly one trailing newline stripped"
+      - "both LEDGEROPS_APP_PASSWORD and LEDGEROPS_APP_PASSWORD_FILE set: refused as ambiguous"
+    used_by: ["US-1a secret-file scenarios", "quickstart (secrets section)"]
+
+  - name: ddl-logging-cluster
+    description: "Cluster started with log_statement=all (superset of ddl); migrate run with a sentinel password."
+    platform: [linux]
+    architectures: [amd64]
+    preconditions:
+      - "server log captured and searchable"
+      - "sentinel password such as T7!kq@9x%Zm"
+    used_by: ["KPI-R3 (plaintext_in_server_log == false)", "DDD-28"]
+    rationale: "The password reaches the server only as a client-built SCRAM-SHA-256 verifier; the plaintext must be absent from the server log, not merely from migrate's own output."
+
+  - name: dirty-migration
+    description: "A migration run interrupted at a precise point."
+    platform: [linux]
+    architectures: [amd64]
+    preconditions:
+      - "variant A: killed BETWEEN two migration files: re-run completes, ledgerops_app was NOLOGIN throughout"
+      - "variant B: backend terminated MID-FILE (pg_terminate_backend on a fixture migration): schema_migrations dirty = true, no partial effect; migrate refuses naming the version and both candidate states, changes nothing"
+      - "in both variants ledgerops_app refuses app-secret at every observation"
+    used_by: ["US-1a Rule A", "DDD-29", "premise test for the one-implicit-transaction-per-file assumption"]
+
+  - name: ghcr-private-package
+    description: "State after the first push: the package exists and is private; anonymous manifest request is refused."
+    platform: [github-actions]
+    architectures: []
+    preconditions:
+      - "package ghcr.io/gizawnahom/ledgerops created by the first push, visibility private"
+      - "anonymous GET /v2/gizawnahom/ledgerops/manifests/<digest> answers 401 or 404"
+    used_by: ["anon-probe fails by design on the first run (OQ-7)", "owner runbook"]
+
+  - name: ghcr-public-package
+    description: "After the owner sets the package public; the state every later release runs in."
+    platform: [github-actions]
+    architectures: []
+    preconditions:
+      - "package visibility public; repository gizawNahom/ledgerops has Write under Manage Actions access"
+      - "anonymous manifest request by digest answers 200"
+    used_by: ["anon-probe passes", "quickstart job (runs with no login)", "anonymous cosign verify"]
+
+  - name: release-ci
+    description: "GitHub Actions environment for release.yml, tag-triggered only."
+    platform: [github-actions]
+    architectures: [amd64, arm64]
+    preconditions:
+      - "runner labels ubuntu-24.04 and ubuntu-24.04-arm"
+      - "OIDC available (id-token: write granted ONLY to the sign job)"
+      - "packages: write granted only to build, sign, promote; packages: read to classify and smoke; none to anon-probe"
+      - "concurrency group 'release', cancel-in-progress false"
+      - "ref is refs/tags/vMAJOR.MINOR.PATCH[-pre]; branch and dispatch runs are not release runs"
+    used_by: ["every release.yml job", "KPI-R1..R7"]
+
+  - name: serve-config
+    description: >
+      The image started to serve with each combination of missing, blank and
+      whitespace-only required variables, with and without the optional demo
+      key, and with LEDGEROPS_MIGRATE_DSN present. Sentinel values are used for
+      every key and DSN so leakage is detectable on every failure path.
+    platform: [linux]
+    architectures: [amd64]
+    preconditions:
+      - "sentinel operator key such as op-9f3b71c2 and sentinel DSN password; neither may appear in any output"
+      - "no database reachable for the refusal cases (proves no connection was attempted)"
+      - "LEDGEROPS_MIGRATE_DSN present: serve exits 1 naming the variable before any connection"
+      - "demo compose: the app service must not inherit LEDGEROPS_MIGRATE_DSN through a shared env_file or YAML anchor"
+    used_by: ["US-2", "KPI-R9", "ADR-018"]
+
+  - name: wrong-password-start
+    description: "Database migrated with password A; the app DSN carries password B."
+    platform: [linux]
+    architectures: [amd64]
+    preconditions:
+      - "dedicated cluster; role ledgerops_app has password A"
+      - "app DSN password B (sentinel)"
+    used_by: ["US-1a wrong-password scenario", "SQLSTATE 28P01 classification"]
+    rationale: "Exit is non-zero with a refusal naming the role and that authentication failed; neither password appears in any log line."
+
+  - name: console-embed-build
+    description: "Build-time variants of the console bundle; asserted at go build, at start, and by a structural test."
+    platform: [linux]
+    architectures: [amd64]
+    preconditions:
+      - "variant A: console_dist absent or empty and -tags console_embed: go build fails (embed pattern matches no files)"
+      - "variant B: console_dist present without index.html: binary refuses to start"
+      - "variant C: untagged build: serves from web/console/dist as before, silent skip retained for dev"
+      - "Dockerfile build command carries -tags console_embed (structural test in workflow-guards)"
+    used_by: ["US-5", "ADR-019", "KPI-R6"]
+
+  - name: scram-unicode
+    description: "App passwords whose verifier depends on SASLprep normalisation."
+    platform: [linux]
+    architectures: [amd64]
+    preconditions:
+      - "same password in composed and decomposed Unicode forms, and a fullwidth variant"
+      - "real pgx login after the verifier is set, with each form"
+      - "deterministic vectors with injected salt and iteration count (unit level)"
+    used_by: ["DDD-47", "KPI-R3"]
+
+  - name: same-db-concurrent
+    description: "Two migrate runs started together against the SAME empty database (distinct from the two-database race in role-exists-other-db variant D)."
+    platform: [linux]
+    architectures: [amd64]
+    preconditions:
+      - "dedicated cluster; one empty database"
+      - "both runs supply the same password"
+    used_by: ["DDD-48", "KPI-R8"]
+    rationale: "The loser resumes via the owner-database marker; both runs end consistent; no dirty state."
+
+  - name: rule-b-interrupted
+    description: "Legacy database where a migrate run with a new password fails or is interrupted BEFORE the password step."
+    platform: [linux]
+    architectures: [amd64]
+    preconditions:
+      - "built from legacy-demo-db; run fails during a schema step (variant A) or is killed before the password step (variant B)"
+    used_by: ["US-4 Rule B", "KPI-R3", "KPI-R4"]
+    rationale: "app-secret keeps working and the output states the password was not changed; Rule A applies only to databases the run created."
+
+  - name: resume-from-tag
+    description: "GHCR already holds the exact tag X.Y.Z (a partially promoted or previously released version) when release.yml runs."
+    platform: [github-actions]
+    architectures: []
+    preconditions:
+      - "variant A: X.Y.Z present, X.Y and latest missing (partial promote); fresh run resumes with the tag's digest and completes"
+      - "variant B: X.Y.Z present and complete; run is idempotent, no tag moves, release page untouched"
+      - "variant C: X.Y.Z present but pointing at a different digest than this run built: promote refuses, published digest unchanged"
+      - "ci runs in every variant (build is skipped, ci is not)"
+      - "first release: no stable tag exists, plan highest_stable is the empty string; a 404 tag list is the empty set"
+    used_by: ["DDD-45", "US-3 moved-tag scenario", "KPI-R2"]
+
+coexistence_matrix:
+  - tool: "make up, make demo-01 .. demo-04, make chaos-01"
+    must_not_break: true
+    note: "Compose migrate service now builds the repo Dockerfile and runs 'ledgerops migrate' with LEDGEROPS_APP_PASSWORD=app-secret; slower by the Node stage (KPI-5 re-baselined)."
+  - tool: "make race-02, make race-03 (scripts/race)"
+    must_not_break: true
+    note: "Drive the compose stack; app-secret and the demo keys stay set explicitly in compose."
+  - tool: "docker-compose.yml, docker-compose.loadtest.yml, .github/workflows/load-test.yml"
+    must_not_break: true
+    note: "Service names postgres/migrate/app unchanged. The app service must never receive LEDGEROPS_MIGRATE_DSN (serve refuses): no shared env_file or YAML anchor across migrate and app."
+  - tool: "golang-migrate"
+    must_not_break: true
+    note: "Library stays (embedded, iofs). The migrate/migrate container image is retired from compose."
+  - tool: "ci.yml required jobs on main"
+    must_not_break: true
+    note: "Job names unchanged; workflow-guards and container-acceptance added as required jobs; push trigger becomes branches-only."
+  - tool: ".github/workflows/nightly.yml"
+    must_not_break: true
+    note: "mutation-delta scope gains internal/release/; demo-cold pays the Node stage; uses: pinned by SHA."
+  - tool: "ledger-core-console (web/console, Vitest, Pact provider verification)"
+    must_not_break: true
+    note: "CI console job moves Node 20 to 22; Pact 17 declares node >=22."
+  - tool: "Prometheus and Grafana scaffold (demo compose)"
+    must_not_break: true
+    note: "Untouched."
+  - tool: "existing GitHub pre-release v0.1.0 and tag pre-multitenancy"
+    must_not_break: true
+    note: "Not modified. User-decided: the first image release is v0.2.0 (OPS-25)."
+  - tool: pre-commit
+    must_not_break: true
+    note: "Still not installed (inherited); no local hook is added."
+
+platform_coverage:
+  PostgreSQL: ["16 (digest-pinned in the smoke and the example compose)"]
+  Image architectures: ["linux/amd64 (slice 03)", "linux/arm64 (slice 06)"]
+  Image user: ["numeric 65532:65532"]
+  Runners: ["GitHub Actions ubuntu-24.04", "GitHub Actions ubuntu-24.04-arm"]
+  CI (inherited): ["GitHub Actions ubuntu-latest"]
+  Docker: ["Docker Engine with BuildKit; Docker Compose v2"]
+  Go: ["1.25 (go.mod)"]
+  Node: ["22 LTS (console build stage and CI console job)"]
+  Base images: ["golang:1.25-alpine", "node:22-slim", "alpine:3.24 (user-decided; 3.20 as originally designed is past end of support)"]
+  Client side (documented, not tested here): ["docker run", "docker compose", "Kubernetes (no manifests shipped)", "managed PostgreSQL 16 with a non-superuser privileged role"]
+
+deployment_assumptions:
+  - "There is no hosted environment. Every environment above is a CI or developer-machine fixture; clients run the image in their own infrastructure."
+  - "A release is a signed, smoke-tested digest with version tags promoted only after smoke, signature and the anonymous-pull probe. Orphaned untagged digests are not releases."
+  - "The first release run FAILS BY DESIGN at the anonymous-pull probe until the owner makes the GHCR package public (OQ-7); a re-run passes. Do this on v0.2.0-rc.1, after the v* tag ruleset exists."
+  - "Cosign certificate identity uses the exact repository case gizawNahom; the image reference is lowercase."
+  - "ci.yml is a required gate on every release path, including a resumed run; the Dockerfile has no RUN after its final FROM."
+  - "Published version tags are immutable by workflow policy, not by registry enforcement; consumers pin by digest."
+  - "`migrate` is idempotent: re-running with the same inputs is a successful no-op; an explicit password is always applied; a database already carrying the schema is never refused by the cluster rule."
+  - "One ledgerops database per PostgreSQL cluster (ledgerops_app is cluster-global)."
+  - "Scenarios that create the role, set or rotate its password, or exercise Rule A/B and the cluster rule run in a dedicated cluster (tag @dedicated-cluster), never the shared template cluster."
+  - "`serve` never holds the migrate credential and refuses to start when LEDGEROPS_MIGRATE_DSN is present in its environment."
+  - "Rollback = redeploy the previous tag by digest; safe while migrations stay expand-only. Rotation requires migrate-then-restart (ADR-023)."
+  - "No secret value (password, DSN, key) appears in any log, job summary or output, including on failure paths; assertions use sentinel values."
+  - "Teardown removes only the containers, networks and volumes the run created, never a developer's other PostgreSQL data."

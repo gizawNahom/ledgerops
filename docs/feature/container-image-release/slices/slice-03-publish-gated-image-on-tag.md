@@ -30,7 +30,7 @@ Confirms if it succeeds: a client can `docker pull` a pinned version that was
 verified against a real database.
 
 ## Acceptance criteria
-- [ ] `v0.1.0-rc.1` publishes `ghcr.io/gizawnahom/ledgerops:0.1.0-rc.1`
+- [ ] `v0.2.0-rc.1` publishes `ghcr.io/gizawnahom/ledgerops:0.2.0-rc.1` (the existing source-only `v0.1.0` is untouched)
 - [ ] A failing CI job on the tagged commit publishes nothing
 - [ ] Smoke check passes against the pushed digest (before tagging) and fails visibly, with no version tag created, when the image cannot migrate
 - [ ] `v1.2`, `nightly-*` tags and branch pushes publish nothing
@@ -41,7 +41,7 @@ verified against a real database.
 Slices 01a and 02. Owner action: make the GHCR package public (OQ-7).
 
 ## Production data
-Real tag push on the real repository (`v0.1.0-rc.1`), real GHCR, real Postgres
+Real tag push on the real repository (`v0.2.0-rc.1`), real GHCR, real Postgres
 service container; dogfood by pulling the rc on Gizaw's machine the same day.
 
 ## Effort estimate

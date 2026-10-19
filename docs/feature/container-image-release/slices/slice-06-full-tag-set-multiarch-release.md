@@ -22,7 +22,7 @@ their exact version.
 
 ## Learning hypothesis
 Disproves: "tag classification can be decided from the tag string and the
-existing tag list alone." If a backport (`v0.1.9` after `0.2.0`) moves `latest`,
+existing tag list alone." If a backport (`v0.2.2` after `0.3.0`) moves `latest`,
 or an rc moves `0.3`, the rules in the workflow are wrong before a real user
 is affected.
 
@@ -30,7 +30,7 @@ is affected.
 - [ ] `v0.2.0`: `0.2.0`, `0.2`, `latest` on one digest
 - [ ] `v0.3.0-rc.1`: exact tag only; GitHub Release marked pre-release
 - [ ] `v0.2.1` moves `0.2`; `0.2.0` unchanged
-- [ ] `v0.1.9` after `0.2.0` moves `0.1` but not `latest`
+- [ ] `v0.2.2` after `0.3.0` moves `0.2` but not `latest`
 - [ ] Index lists both architectures
 - [ ] Labels correct
 - [ ] GitHub Release exists for each tag; body names image reference, digest and verify command, followed by auto-generated notes
@@ -39,7 +39,7 @@ is affected.
 Slice 03 (pipeline), slice 05 (version stamped into the binary and label).
 
 ## Production data
-Publish real tags `v0.1.0-rc.1`, `v0.1.0`, `v0.1.1` on the real repository;
+Publish real tags `v0.2.0-rc.2` (if needed), `v0.2.0`, `v0.2.1` on the real repository (the source-only `v0.1.0` is untouched);
 inspect the real registry. Pull on an Apple Silicon machine for the arm64
 check.
 

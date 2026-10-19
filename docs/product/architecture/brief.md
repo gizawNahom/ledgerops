@@ -1822,6 +1822,7 @@ graph TB
 - `ledgerops_app` cannot log in at any instant on a database `migrate` created (NOLOGIN until the password step; ADR-017).
 - **One ledgerops database per Postgres cluster**: the role is cluster-global, so a fresh `migrate` refuses when `ledgerops_app` already exists (ADR-017, DDD-41). The check is atomic because `migrate` claims the role (NOLOGIN plus an owner-database marker, own committed transaction) before any schema step; concurrent fresh migrates have exactly one winner (DDD-48). An abandoned or orphaned role is released by the privileged `DROP ROLE ledgerops_app`, never automatically.
 - All GitHub Actions are pinned by commit SHA and all base images by digest (ADR-020).
+- *Amended 2026-10-19 from DEVOPS:* runtime base `alpine:3.24`, console stage `node:22-slim`; one multi-platform build (no per-platform merge job); cosign identity regex uses the exact case `gizawNahom`; the first image release is `v0.2.0`; `promote` fails on a stale plan and `ci` gates every path including resume (ADR-019, ADR-020, ADR-021 amendments; DDD-49..51).
 - Applied migrations are immutable after the 0001 exception; a checksum test guards 0001-0006.
 - Published version tags are immutable by workflow policy; the registry cannot enforce it, so consumers should pin by digest (ADR-020).
 - `release.yml` must keep its path and must contain the signing steps itself (ADR-020, ADR-021).

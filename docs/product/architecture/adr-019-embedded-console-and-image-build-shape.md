@@ -66,3 +66,10 @@ reference a parent directory.
   `demo_first_green_seconds` baseline will rise; DEVOPS re-baselines.
 - Untagged developer builds still skip the console silently (existing dev
   behaviour); only image builds are guaranteed to carry it.
+
+## Amendments from DEVOPS (2026-10-19; `devops/upstream-changes.md` items 3, 4, 5)
+
+The text above is kept as decided; these amend it.
+- **Runtime base (item 3, user-decided 2026-10-17):** decision 4's final stage is `alpine:3.24` (index digest `sha256:294b683c...c77e6`, amd64 and arm64 verified), not 3.20, which left support on 2026-04-01.
+- **Node stage (item 4, user-decided 2026-10-17):** the console stage and the CI `console` job use `node:22-slim` (glibc), not Node 20. Reason: `npm ci` fails on musl (`EBADPLATFORM`; the Pact native package is glibc-only) and Pact 17 declares `node >=22`. Digests are DEVOPS's (feature-delta § Supply-chain pins).
+- **Topology (item 5):** the stage structure is now a tested contract. The golang and node stages are `FROM --platform=$BUILDPLATFORM`; `GOOS`/`GOARCH` come from `TARGETOS`/`TARGETARCH`; no `RUN` follows the last `FROM`, so nothing executes on arm64 during build. A `workflow-guards` structural test asserts it, with the `-tags console_embed` and digest-per-`FROM` assertions.

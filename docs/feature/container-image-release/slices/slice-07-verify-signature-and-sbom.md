@@ -35,7 +35,7 @@ the docs would be wrong; this slice finds out on an rc.
 Slices 03 and 06.
 
 ## Production data
-Sign and verify the real `v0.1.0-rc.1` image in the real registry; try to
+Sign and verify the real `v0.2.0-rc.1` image in the real registry; try to
 verify a locally pushed look-alike.
 
 ## Effort estimate

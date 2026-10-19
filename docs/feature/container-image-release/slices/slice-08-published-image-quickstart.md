@@ -41,7 +41,7 @@ enough and needs a product change, not only more prose.
 Slices 03 to 07 (real tag, real signing identity).
 
 ## Production data
-Run the quickstart on a machine with no checkout against the real `v0.1.0`
+Run the quickstart on a machine with no checkout against the real `v0.2.0`
 image the same day it is written.
 
 ## Effort estimate

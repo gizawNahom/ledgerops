@@ -70,7 +70,7 @@ steps:
   - id: S5
     name: Verify provenance
     persona: P2
-    action: cosign verify ghcr.io/gizawnahom/ledgerops:0.2.0 --certificate-identity-regexp ... ; then resolve the platform digest and run cosign verify-attestation on it (SBOM is per platform)
+    action: cosign verify ghcr.io/gizawnahom/ledgerops:0.2.0 --certificate-identity-regexp ... (exact-case owner gizawNahom in the regex; image reference stays lowercase) ; then resolve the platform digest and run cosign verify-attestation on it (SBOM is per platform)
     output: Verification succeeded with the release workflow identity
     emotion: assured
     confidence: 9
