@@ -7,7 +7,7 @@ Feature: Migrate a fresh database with my own app password
 
   # --- happy paths ------------------------------------------------------------
 
-  @pending @driving_port @kpi @KPI-R3 @contract-shape:bounded-change
+  @driving_port @kpi @KPI-R3 @contract-shape:bounded-change
   Scenario: A fresh database is ready with the password the operator chose
     Given the operator has an empty database "kestrel_ledger" and a privileged role "kestrel_admin"
     And the app password is "T7!kq@9x%Zm"
@@ -19,7 +19,7 @@ Feature: Migrate a fresh database with my own app password
     And the cluster changed only by the new app role and the new ledger schema
     And no output contains "T7!kq@9x%Zm"
 
-  @pending @driving_port @nonroot-secret-files @contract-shape:bounded-change
+  @driving_port @nonroot-secret-files @contract-shape:bounded-change
   Scenario Outline: A password from a mounted secret file loses only its trailing line ending
     Given the operator has an empty database "kestrel_ledger" and a privileged role "kestrel_admin"
     And the password file holds "Zr4#mV8$wQ1" followed by <ending>
@@ -83,7 +83,7 @@ Feature: Migrate a fresh database with my own app password
 
   # --- Rule A: no moment when the demo password works ----------------------------
 
-  @pending @driving_port @kpi @KPI-R3 @contract-shape:bounded-change
+  @driving_port @kpi @KPI-R3 @contract-shape:bounded-change
   Scenario: A fresh database never accepts the demo password at any point during migrate
     Given the operator has an empty database "kestrel_ledger" and a privileged role "kestrel_admin"
     And the app password is "T7!kq@9x%Zm"
@@ -146,7 +146,7 @@ Feature: Migrate a fresh database with my own app password
       | both password sources are set                              | only one         |
       | the cluster already holds another ledgerops database       | ledgerops_app    |
 
-  @pending @ddl-logging-cluster @kpi @KPI-R3 @contract-shape:bounded-change
+  @ddl-logging-cluster @kpi @KPI-R3 @contract-shape:bounded-change
   Scenario: The database server log never sees the plaintext password
     Given the operator has an empty database "kestrel_ledger" and a privileged role "kestrel_admin" on a server that logs every statement
     And the app password is "T7!kq@9x%Zm"
@@ -154,7 +154,7 @@ Feature: Migrate a fresh database with my own app password
     Then migrate succeeds and reports schema version 6
     And the database server log never contains "T7!kq@9x%Zm"
 
-  @pending @scram-unicode @contract-shape:bounded-change
+  @scram-unicode @contract-shape:bounded-change
   Scenario Outline: The same password typed in another Unicode form still logs in
     Given the operator has an empty database "kestrel_ledger" and a privileged role "kestrel_admin"
     And the app password is typed in its <set form> form

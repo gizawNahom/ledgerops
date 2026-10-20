@@ -1,6 +1,11 @@
 package main
 
-import "ledgerops/internal/support"
+import (
+	"fmt"
+	"strings"
+
+	"ledgerops/internal/support"
+)
 
 // SCAFFOLD: true -- RED stubs created by DISTILL (Mandate 7); signatures per
 // DDD-30..32 / ADR-018. All are pure over an env snapshot; the shell reads
@@ -22,8 +27,14 @@ const (
 
 // ParseArgs maps argv (without the program name) to a Command or a usage error.
 func ParseArgs(args []string) (Command, error) {
-	support.Scaffold("ParseArgs")
-	return CommandServe, nil
+	if len(args) == 0 {
+		return CommandServe, nil
+	}
+	switch command := Command(args[0]); command {
+	case CommandServe, CommandMigrate, CommandVersion:
+		return command, nil
+	}
+	return "", fmt.Errorf("unknown command %q: expected serve, migrate or version", args[0])
 }
 
 // ServeConfig is the validated serve configuration.
@@ -50,8 +61,55 @@ type MigrateSettings struct {
 // ParseMigrateConfig validates migrate's env; readFile is the injected
 // password-file reader (strips exactly one trailing newline).
 func ParseMigrateConfig(env Env, readFile func(path string) ([]byte, error)) (MigrateSettings, []string) {
-	support.Scaffold("ParseMigrateConfig")
-	return MigrateSettings{}, nil
+	var issues []string
+	dsn := env[envMigrateDSN]
+	if strings.TrimSpace(dsn) == "" {
+		issues = append(issues, envMigrateDSN+" is not set")
+	}
+	password, passwordIssues := resolveAppPassword(env, readFile)
+	issues = append(issues, passwordIssues...)
+	if len(issues) > 0 {
+		return MigrateSettings{}, issues
+	}
+	return MigrateSettings{MigrateDSN: support.NewSecret(dsn), AppPassword: password}, nil
+}
+
+// resolveAppPassword picks the one password source that is set: the inline
+// variable, or the file whose single trailing line ending is dropped.
+func resolveAppPassword(env Env, readFile func(path string) ([]byte, error)) (support.Secret, []string) {
+	inline, inlineSet := env[envAppPassword]
+	path, fileSet := env[envAppPasswordFile]
+	switch {
+	case inlineSet && fileSet:
+		return support.Secret{}, []string{"set only one of " + envAppPassword + " and " + envAppPasswordFile}
+	case fileSet:
+		return readPasswordFile(path, readFile)
+	case inlineSet:
+		return nonBlankPassword(inline)
+	}
+	return support.Secret{}, []string{"set " + envAppPassword + " or " + envAppPasswordFile}
+}
+
+func readPasswordFile(path string, readFile func(path string) ([]byte, error)) (support.Secret, []string) {
+	content, err := readFile(path)
+	if err != nil {
+		return support.Secret{}, []string{"ledgerops_app_password file not readable: " + err.Error()}
+	}
+	return nonBlankPassword(stripOneTrailingLineEnding(string(content)))
+}
+
+func stripOneTrailingLineEnding(text string) string {
+	if withoutCRLF, found := strings.CutSuffix(text, "\r\n"); found {
+		return withoutCRLF
+	}
+	return strings.TrimSuffix(text, "\n")
+}
+
+func nonBlankPassword(password string) (support.Secret, []string) {
+	if strings.TrimSpace(password) == "" {
+		return support.Secret{}, []string{"set " + envAppPassword + " or " + envAppPasswordFile + " to a non-blank password"}
+	}
+	return support.NewSecret(password), nil
 }
 
 // refuseIfMigrateDSNPresent checks presence only, never the value (ADR-018 item 4).

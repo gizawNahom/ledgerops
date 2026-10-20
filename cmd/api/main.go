@@ -35,6 +35,23 @@ import (
 )
 
 func main() {
+	command, err := ParseArgs(os.Args[1:])
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(exitConfigInvalid)
+	}
+	switch command {
+	case CommandMigrate:
+		os.Exit(runMigrate(context.Background(), environmentSnapshot(), os.Stdout, os.Stderr))
+	case CommandServe:
+		serve()
+	default:
+		fmt.Fprintf(os.Stderr, "%s: not available yet\n", command)
+		os.Exit(exitConfigInvalid)
+	}
+}
+
+func serve() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
 

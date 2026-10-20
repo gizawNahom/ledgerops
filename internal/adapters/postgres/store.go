@@ -33,6 +33,7 @@ import (
 	_ "github.com/golang-migrate/migrate/v4/database/postgres"
 	"github.com/golang-migrate/migrate/v4/source/iofs"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"ledgerops/internal/app/ports"
@@ -93,6 +94,9 @@ func MigrateStep(ctx context.Context, privilegedDSN string, appPassword support.
 }
 
 func applyAndSetPassword(ctx context.Context, privilegedDSN string, appPassword support.Secret, action string) error {
+	if err := claimAppRole(ctx, privilegedDSN); err != nil {
+		return redactedError(err, appPassword)
+	}
 	if err := applySchema(privilegedDSN, action); err != nil {
 		return err
 	}
@@ -107,6 +111,21 @@ func applyAndSetPassword(ctx context.Context, privilegedDSN string, appPassword 
 	return nil
 }
 
+// SchemaVersion reports the migration version the database is at.
+func SchemaVersion(privilegedDSN string) (uint, error) {
+	m, err := newMigrator(privilegedDSN)
+	if err != nil {
+		return 0, redactedError(err, support.Secret{})
+	}
+	defer closeMigrator(m)
+
+	version, _, err := m.Version()
+	if err != nil {
+		return 0, redactedError(fmt.Errorf("reading the schema version: %w", err), support.Secret{})
+	}
+	return version, nil
+}
+
 func applySchema(privilegedDSN, action string) error {
 	m, err := newMigrator(privilegedDSN)
 	if err != nil {
@@ -118,6 +137,42 @@ func applySchema(privilegedDSN, action string) error {
 		return redactedError(fmt.Errorf("%s: %w", action, err), support.Secret{})
 	}
 	return nil
+}
+
+// pgErrorDuplicateObject is SQLSTATE 42710: the role already exists.
+const pgErrorDuplicateObject = "42710"
+
+// claimAppRole creates ledgerops_app NOLOGIN, marked with the database that
+// owns it, before any schema file runs, so no instant exists at which the role
+// can log in. A role that already exists is left as it is.
+func claimAppRole(ctx context.Context, privilegedDSN string) error {
+	conn, err := pgx.Connect(ctx, privilegedDSN)
+	if err != nil {
+		return fmt.Errorf("connecting to claim the app role: %w", err)
+	}
+	defer func() { _ = conn.Close(ctx) }()
+
+	var database string
+	if err := conn.QueryRow(ctx, "SELECT current_database()").Scan(&database); err != nil {
+		return fmt.Errorf("reading the database name: %w", err)
+	}
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("claiming the app role: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if _, err := tx.Exec(ctx, "CREATE ROLE ledgerops_app NOLOGIN"); err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == pgErrorDuplicateObject {
+			return nil
+		}
+		return fmt.Errorf("creating the app role: %w", err)
+	}
+	if _, err := tx.Exec(ctx, "COMMENT ON ROLE ledgerops_app IS "+quoteLiteral(database)); err != nil {
+		return fmt.Errorf("marking the app role with its database: %w", err)
+	}
+	return tx.Commit(ctx)
 }
 
 // pgRolePasswordSetter is the RolePasswordSetter adapter: it sets LOGIN and
