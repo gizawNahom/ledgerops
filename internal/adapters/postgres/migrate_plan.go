@@ -1,6 +1,10 @@
 package postgres
 
-import "ledgerops/internal/support"
+import (
+	"regexp"
+
+	"ledgerops/internal/support"
+)
 
 // SCAFFOLD: true -- RED stubs created by DISTILL (Mandate 7); signatures per
 // DDD-42 / ADR-022. DELIVER implements; the acceptance suite drives migration
@@ -72,15 +76,14 @@ type RolePasswordSetter interface {
 	SetVerifier(verifier string) error
 }
 
-// BuildSCRAMVerifier builds a SCRAM-SHA-256 verifier with SASLprep
-// normalisation (DDD-47); salt and iterations are injected.
-func BuildSCRAMVerifier(password support.Secret, salt []byte, iterations int) string {
-	support.Scaffold("BuildSCRAMVerifier")
-	return ""
+// RedactDSN removes the password component from any text derived from a DSN:
+// URL userinfo and key=value (or quoted) password settings.
+func RedactDSN(text string) string {
+	text = urlPasswordPattern.ReplaceAllString(text, "${1}"+support.RedactionMarker+"@")
+	return keyValuePasswordPattern.ReplaceAllString(text, "${1}"+support.RedactionMarker)
 }
 
-// RedactDSN removes the password component from any text derived from a DSN.
-func RedactDSN(text string) string {
-	support.Scaffold("RedactDSN")
-	return ""
-}
+var (
+	urlPasswordPattern      = regexp.MustCompile(`(://[^:/@\s]*:)[^@\s]*@`)
+	keyValuePasswordPattern = regexp.MustCompile(`(?i)(password\s*=\s*)('(?:[^'\\]|\\.)*'|\S+)`)
+)

@@ -34,6 +34,7 @@ import (
 
 	apphttp "ledgerops/internal/adapters/http"
 	"ledgerops/internal/adapters/postgres"
+	"ledgerops/internal/support"
 )
 
 // migratedRouterServer brings up PostgreSQL 16, migrates it from zero, opens
@@ -67,7 +68,7 @@ func migratedRouterServer(t *testing.T) (*httptest.Server, string) {
 	if err != nil {
 		t.Fatalf("reading the privileged connection string: %v", err)
 	}
-	if err := postgres.Migrate(ctx, privilegedDSN); err != nil {
+	if err := postgres.Migrate(ctx, privilegedDSN, support.NewSecret("app-secret")); err != nil {
 		t.Fatalf("migrating from zero: %v", err)
 	}
 

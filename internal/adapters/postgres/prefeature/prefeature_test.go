@@ -105,20 +105,16 @@ func TestLiveZeroTwoThroughSixAreStillByteIdenticalToTheFrozenOnes(t *testing.T)
 	}
 }
 
-// The edited 0001 is pinned once it exists. Until the edit lands (slice 01a)
-// the live 0001 is still the frozen text, so there is nothing new to pin.
+// The edited 0001 is pinned: ADR-017 permits exactly one in-place edit.
 func TestLiveZeroOneIsPinnedOnceEdited(t *testing.T) {
 	live, err := os.ReadFile(filepath.Join(liveMigrationsDir, "0001_init.up.sql"))
 	if err != nil {
 		t.Fatalf("live 0001: %v", err)
 	}
 	if sha(live) == frozenChecksums["0001_init.up.sql"] {
-		t.Skip("pending slice 01a: live 0001 still equals the frozen text; when it is edited (DDD-27), pin its new sha256 in editedZeroOneChecksum and delete this skip")
+		t.Fatal("live 0001 still equals the frozen text: the DDD-27 edit has not landed")
 	}
-	const editedZeroOneChecksum = "" // set by slice 01a when 0001 is edited
-	if editedZeroOneChecksum == "" {
-		t.Fatal("live 0001 was edited but its new checksum is not pinned: set editedZeroOneChecksum")
-	}
+	const editedZeroOneChecksum = "c48ba421e7229e71b357cfd46cd11eaa39622d7f60c0d618f9774ffe3bf32d62"
 	if got := sha(live); got != editedZeroOneChecksum {
 		t.Errorf("live 0001 changed after the one permitted edit: sha256 %s, pinned %s", got, editedZeroOneChecksum)
 	}

@@ -55,16 +55,24 @@ CREATE TRIGGER entries_append_only
 
 -- Roles. ledgerops_migrate is provisioned by the deployment already (it is
 -- the connecting user this migration runs as); ledgerops_app is created here,
--- idempotently, since nothing else provisions it.
+-- idempotently, since nothing else provisions it. It is created NOLOGIN with
+-- no password: the migrator sets LOGIN and a SCRAM verifier Go-side, after the
+-- last migration file (ADR-017), so no credential lives in this SQL.
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ledgerops_app') THEN
-        CREATE ROLE ledgerops_app LOGIN PASSWORD 'app-secret';
+        CREATE ROLE ledgerops_app NOLOGIN;
     END IF;
 END
 $$;
 
-GRANT CONNECT ON DATABASE ledgerops TO ledgerops_app;
+-- CONNECT is granted on whichever database this migration runs in, whatever
+-- its name.
+DO $$
+BEGIN
+    EXECUTE format('GRANT CONNECT ON DATABASE %I TO ledgerops_app', current_database());
+END
+$$;
 GRANT USAGE ON SCHEMA public TO ledgerops_app;
 
 -- Append-only, layer two of two (OPS-10): the service's own credentials hold

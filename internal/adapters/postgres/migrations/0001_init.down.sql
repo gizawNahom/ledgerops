@@ -7,7 +7,11 @@ REVOKE SELECT, INSERT, UPDATE ON accounts FROM ledgerops_app;
 REVOKE SELECT, INSERT ON transactions FROM ledgerops_app;
 REVOKE SELECT, INSERT ON entries FROM ledgerops_app;
 REVOKE USAGE ON SCHEMA public FROM ledgerops_app;
-REVOKE CONNECT ON DATABASE ledgerops FROM ledgerops_app;
+DO $$
+BEGIN
+    EXECUTE format('REVOKE CONNECT ON DATABASE %I FROM ledgerops_app', current_database());
+END
+$$;
 
 DROP TRIGGER IF EXISTS entries_append_only ON entries;
 DROP FUNCTION IF EXISTS entries_are_append_only();

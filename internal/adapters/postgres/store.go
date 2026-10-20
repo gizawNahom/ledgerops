@@ -22,6 +22,7 @@ package postgres
 
 import (
 	"context"
+	"crypto/rand"
 	"embed"
 	"errors"
 	"fmt"
@@ -36,6 +37,7 @@ import (
 
 	"ledgerops/internal/app/ports"
 	"ledgerops/internal/domain"
+	"ledgerops/internal/support"
 )
 
 //go:embed migrations/*.sql
@@ -62,49 +64,96 @@ func closeMigrator(m *migrate.Migrate) {
 	_ = dbErr
 }
 
-// Migrate applies the whole migration set as the privileged role. Migrations
-// are expand-only: no migration may DELETE from or drop the entry table, and
-// every schema change must leave the previous binary able to run against the
-// new schema (brief.md § Deployment shape).
-func Migrate(ctx context.Context, privilegedDSN string) error {
-	m, err := newMigrator(privilegedDSN)
-	if err != nil {
+// scramIterations is PostgreSQL's default scram_iterations.
+const scramIterations = 4096
+
+// saltLength is the SCRAM salt size PostgreSQL itself generates.
+const saltLength = 16
+
+// Migrate applies the whole migration set as the privileged role, then sets
+// the app role's login and password last, from a client-built SCRAM verifier.
+// Migrations are expand-only: no migration may DELETE from or drop the entry
+// table, and every schema change must leave the previous binary able to run
+// against the new schema (brief.md § Deployment shape).
+func Migrate(ctx context.Context, privilegedDSN string, appPassword support.Secret) error {
+	return applyAndSetPassword(ctx, privilegedDSN, appPassword, "migrating from zero")
+}
+
+// MigrateStep brings the store to head over existing history, which is how a
+// scenario exercises a migration running over history it may not rewrite.
+//
+// This uses the same idempotent, expand-only m.Up() that Migrate uses, rather
+// than advancing exactly one version with m.Steps(1), which errors ("file does
+// not exist") when none is pending -- the case a scenario built from
+// MigrateFromZero already sits in. Re-running the full set over existing
+// history, proving nothing in it erases an entry, is the contract under test.
+// The password step runs every time, so a rotation applies on re-run.
+func MigrateStep(ctx context.Context, privilegedDSN string, appPassword support.Secret) error {
+	return applyAndSetPassword(ctx, privilegedDSN, appPassword, "applying the newest migration")
+}
+
+func applyAndSetPassword(ctx context.Context, privilegedDSN string, appPassword support.Secret, action string) error {
+	if err := applySchema(privilegedDSN, action); err != nil {
 		return err
 	}
-	defer closeMigrator(m)
-
-	if err := m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
-		return fmt.Errorf("migrating from zero: %w", err)
+	salt := make([]byte, saltLength)
+	if _, err := rand.Read(salt); err != nil {
+		return fmt.Errorf("generating the password salt: %w", err)
+	}
+	verifier := BuildSCRAMVerifier(appPassword, salt, scramIterations)
+	if err := (pgRolePasswordSetter{ctx: ctx, privilegedDSN: privilegedDSN}).SetVerifier(verifier); err != nil {
+		return redactedError(err, appPassword)
 	}
 	return nil
 }
 
-// MigrateStep applies the newest schema change over existing history, which
-// is how a scenario exercises a migration running over history it may not
-// rewrite.
-//
-// This brings the store to head via the same idempotent, expand-only m.Up()
-// that Migrate uses, rather than advancing exactly one version with
-// m.Steps(1). golang-migrate's Steps(1) seeks a specific next version and
-// errors ("file does not exist") when none is pending, which is exactly the
-// case a scenario built from MigrateFromZero already sits in: the newest
-// schema change was already applied while building the populated history it
-// is now asked to run "over". Modeling this as "bring current" rather than
-// "advance exactly one version" makes re-running the full set over existing
-// history — proving nothing in it erases an entry — the actual contract
-// under test, and it stays correct if a genuinely pending migration exists
-// too: m.Up() applies every migration not yet applied, one included.
-func MigrateStep(ctx context.Context, privilegedDSN string) error {
+func applySchema(privilegedDSN, action string) error {
 	m, err := newMigrator(privilegedDSN)
 	if err != nil {
-		return err
+		return redactedError(err, support.Secret{})
 	}
 	defer closeMigrator(m)
 
 	if err := m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
-		return fmt.Errorf("applying the newest migration: %w", err)
+		return redactedError(fmt.Errorf("%s: %w", action, err), support.Secret{})
 	}
 	return nil
+}
+
+// pgRolePasswordSetter is the RolePasswordSetter adapter: it sets LOGIN and
+// the finished verifier on ledgerops_app. It never sees the plaintext.
+type pgRolePasswordSetter struct {
+	ctx           context.Context
+	privilegedDSN string
+}
+
+var _ RolePasswordSetter = pgRolePasswordSetter{}
+
+func (s pgRolePasswordSetter) SetVerifier(verifier string) error {
+	conn, err := pgx.Connect(s.ctx, s.privilegedDSN)
+	if err != nil {
+		return fmt.Errorf("connecting to set the app role password: %w", err)
+	}
+	defer func() { _ = conn.Close(s.ctx) }()
+
+	statement := "ALTER ROLE ledgerops_app LOGIN PASSWORD " + quoteLiteral(verifier)
+	if _, err := conn.Exec(s.ctx, statement); err != nil {
+		return fmt.Errorf("setting the app role password: %w", err)
+	}
+	return nil
+}
+
+func quoteLiteral(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
+}
+
+// redactedError keeps DSN passwords and the app password out of error text.
+func redactedError(err error, appPassword support.Secret) error {
+	text := RedactDSN(err.Error())
+	if plaintext := appPassword.Reveal(); plaintext != "" {
+		text = strings.ReplaceAll(text, plaintext, support.RedactionMarker)
+	}
+	return errors.New(text)
 }
 
 // MigrationStatements returns every migration's up-direction SQL by file

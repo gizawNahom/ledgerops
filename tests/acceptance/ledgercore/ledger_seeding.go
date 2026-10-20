@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"ledgerops/internal/adapters/postgres"
+	"ledgerops/internal/support"
 )
 
 // Given-side helpers. Every one of them reaches the system through the same
@@ -133,7 +134,7 @@ func (l *Ledger) KillPartwayThrough(ctx context.Context, transfer Transfer) erro
 
 // MigrateFromZero applies the whole migration set to a bare store.
 func (l *Ledger) MigrateFromZero(ctx context.Context) error {
-	if err := postgres.Migrate(ctx, l.privilegedDSN); err != nil {
+	if err := postgres.Migrate(ctx, l.privilegedDSN, support.NewSecret("app-secret")); err != nil {
 		return err
 	}
 	return l.serve(ctx)
@@ -143,7 +144,7 @@ func (l *Ledger) MigrateFromZero(ctx context.Context) error {
 // which is the case that actually exists in operation — a migration validated
 // only against an empty store proves nothing about it.
 func (l *Ledger) ApplyNewestMigration(ctx context.Context) error {
-	return postgres.MigrateStep(ctx, l.privilegedDSN)
+	return postgres.MigrateStep(ctx, l.privilegedDSN, support.NewSecret("app-secret"))
 }
 
 func postgresMigrationStatements() (map[string]string, error) {
