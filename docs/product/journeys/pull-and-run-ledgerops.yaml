@@ -58,7 +58,7 @@ steps:
         Then it exits 1 naming both
   - id: S4
     name: Make a first call
-    action: GET /health ; POST /tenants with the operator key ; open /console
+    action: GET /health (new unauthenticated liveness route, fixed body, no ledger data; D16) ; POST /tenants with the operator key ; open /console
     output: 200 health; tenant created; console loads
     emotion: confident
     confidence: 9

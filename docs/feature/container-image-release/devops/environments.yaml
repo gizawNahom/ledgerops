@@ -239,6 +239,7 @@ target_environments:
       - "variant A: X.Y.Z present, X.Y and latest missing (partial promote); fresh run resumes with the tag's digest and completes"
       - "variant B: X.Y.Z present and complete; run is idempotent, no tag moves, release page untouched"
       - "variant C: X.Y.Z present but pointing at a different digest than this run built: promote refuses, published digest unchanged"
+      - "variant D (moved tag, user-decided 2026-10-19): X.Y.Z present, its image revision label differs from the commit being released (git tag moved and re-pushed), or the label is missing: classify fails RED, nothing after it runs, no tag moves"
       - "ci runs in every variant (build is skipped, ci is not)"
       - "first release: no stable tag exists, plan highest_stable is the empty string; a 404 tag list is the empty set"
     used_by: ["DDD-45", "US-3 moved-tag scenario", "KPI-R2"]

@@ -11,7 +11,7 @@ exact-version tag has been proven to migrate a fresh Postgres and serve
 - Trigger on `v*.*.*` tags (prerelease suffix allowed)
 - Reuse the full `ci.yml` suite as a gate (`workflow_call`)
 - Build and push amd64, exact version tag only (version without `v`)
-- Smoke check: pull the image by digest before any version tag exists (each published architecture; amd64 here), migrate a fresh Postgres with a generated password, start with generated keys, require `/health` 200; the version tag appears only after smoke passes
+- Smoke check: pull the image by digest before any version tag exists (each published architecture; amd64 here), migrate a fresh Postgres with a generated password, start with generated keys, require `/health` 200 (a new route added in slice 02, D16 / DDD-52, not an existing one); the version tag appears only after smoke passes
 - Failed smoke leaves the run red and no version tag exists for it
 - Non-matching tags and branch pushes publish nothing; existing versions never overwritten
 
@@ -35,6 +35,8 @@ verified against a real database.
 - [ ] Smoke check passes against the pushed digest (before tagging) and fails visibly, with no version tag created, when the image cannot migrate
 - [ ] `v1.2`, `nightly-*` tags and branch pushes publish nothing
 - [ ] Re-pushing an existing version tag is refused; digest unchanged
+- [ ] A resumed run fails when the image's `org.opencontainers.image.revision` label differs from the commit being released (moved git tag)
+- [ ] Smoke check uses the unauthenticated `GET /health` added in slice 02 (D16)
 - [ ] Anonymous pullability is checked on the pushed digest before any version tag is promoted; the first run is expected to fail this step until the owner makes the package public (OQ-7), then a re-run passes
 
 ## Dependencies

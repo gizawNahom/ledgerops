@@ -111,6 +111,10 @@ highest stable version (a backport must not move it).
   DEVOPS handoff.
 - Unpruned orphan digests accumulate slowly; acceptable for v0.1.0.
 
+## Amendment: revision check on the resume path (2026-10-19, user decision; DDD-45)
+
+Decision 4 resumes with the existing digest when `X.Y.Z` is already in GHCR. The run now also reads that image's `org.opencontainers.image.revision` label and compares it to the commit being released; a mismatch fails the run with a message naming both commits and the digest, and nothing is promoted or signed. This catches a moved git tag, which the tag-absent-or-same-digest guard (decision 2 step 7) cannot, because the registry tag still points at the old, correct digest. The label is written by `docker/metadata-action` at build, so it is the same value the US-6 scenario already asserts. A deliberately moved tag therefore requires a new version, consistent with "published versions are never overwritten".
+
 ## Amendments from DEVOPS (2026-10-19; `devops/upstream-changes.md` items 1, 5, 7, 9, 10, 11)
 
 The text above is kept as decided; these amend it. Decisions DDD-49..51 record them.

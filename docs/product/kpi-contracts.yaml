@@ -378,6 +378,9 @@ kpis:
       summary_line: "smoke_pull_to_healthy_seconds=<n> arch=<amd64|arm64>; quickstart_pull_to_first_transfer_seconds=<n>"
     fails_build: true
     note: >
+      "Healthy" means the new unauthenticated GET /health answers 200 (a route
+      delivered by this feature, user decision 2026-10-19; it does not exist
+      in the code before the feature).
       North star (K1). Failing smoke leaves an untagged digest and no version
       tag (digest-first order, ADR-020). A failing quickstart after release is a
       red run, not an unpublished release: the document or checker is fixed and
@@ -391,14 +394,17 @@ kpis:
     class: gate
     collected_by:
       surface: "structure of release.yml (needs graph) asserted by a test in workflow-guards; promote job summary"
-      fields: ["promote_needs_smoke_and_probe", "all_jobs_need_ci", "if_clauses_complete", "latest_moved", "move_latest_planned"]
+      fields: ["promote_needs_smoke_and_probe", "all_jobs_need_ci", "if_clauses_complete", "resume_revision_matches", "latest_moved", "move_latest_planned"]
       environment: [release-ci]
-    assertion: "if_clauses_complete == true (each downstream job's if: is !cancelled() plus an explicit success clause for every dependency) AND all_jobs_need_ci == true (every job after classify, resume path included) AND promote_needs_smoke_and_probe == true (and sign from slice 07; anon-probe also needs sign) AND (latest_moved implies move_latest_planned)"
+    assertion: "if_clauses_complete == true (each downstream job's if: is !cancelled() plus an explicit success clause for every dependency) AND (resumed implies resume_revision_matches == true: the existing image's org.opencontainers.image.revision equals the released commit, else classify fails) AND all_jobs_need_ci == true (every job after classify, resume path included) AND promote_needs_smoke_and_probe == true (and sign from slice 07; anon-probe also needs sign) AND (latest_moved implies move_latest_planned)"
     emitted_as:
       ci_job: "ci.yml workflow-guards; release.yml promote"
-      summary_line: "needs_ci=<bool> if_clauses_complete=<bool> promote_needs=smoke,anon-probe latest_moved=<bool> planned=<bool>"
+      summary_line: "needs_ci=<bool> if_clauses_complete=<bool> resume_revision_matches=<bool|n/a> promote_needs=smoke,anon-probe latest_moved=<bool> planned=<bool>"
     fails_build: true
     note: >
+      Added 2026-10-19 (user decision): on the resume path a moved git tag
+      fails the run red at classify via the revision-label comparison (DEVOPS
+      OPS-31).
       Enforced by construction (job dependencies), then checked structurally so
       a later edit cannot quietly reorder it. Without the structural test this
       KPI would be an assertion about intent rather than about the workflow.

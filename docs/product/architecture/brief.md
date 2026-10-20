@@ -1226,6 +1226,7 @@ spawning a new package). Full detail: § Inter-tenant transfer below.
 | `GET /accounts/{id}` | HTTP | 01 |
 | `GET /accounts/{id}/entries` | HTTP | 05 |
 | `GET /health/trial-balance` | HTTP | 04 |
+| `GET /health` | HTTP, unauthenticated, fixed 200 body, no ledger data (new, `container-image-release` DDD-52, 2026-10-19) | `container-image-release` |
 | `GET /console`, `GET /console/*` | HTTP, static (unauthenticated) | `ledger-core-console` DEVOPS |
 | Console SPA | Browser | 04, 05 |
 | `POST /tenants` | HTTP (new) | `multitenancy` slice 01 |

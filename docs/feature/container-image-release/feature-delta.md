@@ -62,10 +62,11 @@ User answers, taken as given (D1-D9) plus DISCUSS decisions (D10-D13).
 - D5 App password: `migrate` reads `LEDGEROPS_APP_PASSWORD` or `LEDGEROPS_APP_PASSWORD_FILE` and sets `ledgerops_app`'s password Go-side after the SQL migrations, on create and on rotate for existing databases (an explicit password always applies). Unset means migrate refuses; no fallback to `app-secret`. `0001`'s hardcoded `GRANT CONNECT ON DATABASE ledgerops` must work with `current_database()`. How to change an already-applied migration safely is a DESIGN question (OQ-2), not decided here.
 - D6 Demo path: `docker-compose.yml`, the loadtest compose, the test helper and CI set `LEDGEROPS_APP_PASSWORD=app-secret` explicitly. Demo behavior unchanged; `make up` keeps building locally. A separate published-image run example (docker run / compose snippet) is documented.
 - D7 First-release image scope: linux/amd64 and linux/arm64, the SPA console bundle served from the image, cosign keyless signing, SBOM attestation.
-- D8 Release gate: the release workflow reuses `ci.yml` via `workflow_call` (full suite green), then a post-push smoke test pulls the published image, migrates a fresh Postgres and checks `/health`. Upgrade promise: databases that already ran the demo migrations with `app-secret` are supported and tested.
+- D8 Release gate: the release workflow reuses `ci.yml` via `workflow_call` (full suite green), then a post-push smoke test pulls the published image, migrates a fresh Postgres and checks `/health` (a route new in this feature, D16; it did not exist when D8 was written). Upgrade promise: databases that already ran the demo migrations with `app-secret` are supported and tested.
 - D9 (revised 2026-10-17, user decision) The published image refuses to start when `LEDGEROPS_OPERATOR_KEY` or `LEDGEROPS_APP_DSN` is unset or blank (fail fast, one clear error, no baked-in demo keys). `LEDGEROPS_DEMO_TENANT_KEY` is optional: when unset the demo-tenant mapping is off and nothing resolves to `tnt_legacy_seed` through it. Rationale: the mapping is a demo affordance onto a sentinel tenant; a fresh production database has no legacy data, and requiring it would force every client to mint a credential for that tenant. The original D9 required all of the keys; only the demo key changed. OQ-1 closed.
 - D10 Scope: oversized by the heuristic once D7 was chosen (see Scope Assessment). User-approved 2026-10-17 to keep as one feature with eight slices of at most one day each. OQ-11 closed.
 - D14 (amended 2026-10-17, user decision from DEVOPS) First image release is `v0.2.0` (release candidates `v0.2.0-rc.N`); release notes are GitHub auto-generated. The existing source-only pre-release `v0.1.0` stays untouched; the release classifier reads published versions from GHCR, so `v0.1.0` is invisible to it. Original text: "First version is `v0.1.0`". OQ-12 closed.
+- D16 (user decision 2026-10-19, from DISTILL finding) `GET /health` does not exist in the code today (only the operator-keyed `GET /health/trial-balance` and the unauthenticated `GET /metrics`), yet D8, US-2, US-3 and journey S4 assumed it. A new unauthenticated `GET /health` is added: it returns 200 with a fixed body, needs no credentials, exposes no ledger data, and is available before any ledger call. It is the one API addition in this feature and is owned by US-2 (slice 02), the first story that needs "/health OK"; the US-3 smoke check and journey S4 consume it. Liveness only: no readiness semantics are promised. A resumed release run also fails when the image's `org.opencontainers.image.revision` label differs from the commit being released (a moved git tag); recorded in US-3.
 - D11 Ordering: walking skeleton is slices 01a, 02 and 03 (migrate, safe start, gated publish with smoke), so a usable rc image exists after three slices. Slice 01 was later split into 01a and 01b (D15). Hardening (upgrade, console, tags/arch, signing, docs) follows.
 - D12 Two further jobs added beyond J11: J12 (provenance) and J13 (upgrade in place). Each is a distinct P2 outcome that the user's D7 and D8 choices imply.
 - D13 One new journey, `docs/product/journeys/pull-and-run-ledgerops.yaml`, extends the SSOT; no existing journey changes.
@@ -94,7 +95,7 @@ User: P1 Priya (run it), P2 Tomasz (trust it, upgrade it). Goal: run a pinned, v
 | Minor and `latest` tags (06) | Multi-arch manifest (06) | One ledgerops database per cluster, any name for the first (01b) | `version` output (05) | Verify signature and SBOM (07) | Rotate password (04) |
 | Prerelease handling (06) | Anonymous pull (OQ-7) | | | Quickstart for published image (08) | |
 
-Walking skeleton (thinnest end-to-end): US-1a (migrate with a password), US-2 (refuse bad config), US-3 (gated publish and smoke, amd64, exact tag only). After these, `docker pull` then `migrate` then run then `/health` works from a registry.
+Walking skeleton (thinnest end-to-end): US-1a (migrate with a password), US-2 (refuse bad config), US-3 (gated publish and smoke, amd64, exact tag only). After these, `docker pull` then `migrate` then run then `/health` (new in this feature, D16) works from a registry.
 
 Releases by outcome:
 - Release A, "A client can run a pinned image": US-1a, US-1b, US-2, US-3. Outcome KPIs K1, K3. US-1b is not on the walking skeleton; it follows US-1a and is delivered before US-4.
@@ -310,7 +311,10 @@ Then it is refused as missing
 Scenario: A correctly configured image starts
 Given the DSN and operator key are set and the database was migrated
 When the container starts
-Then `/health` answers 200 and `/tenants` accepts the operator key
+Then `GET /health` answers 200 with no credentials presented
+And the body is fixed and contains no ledger data
+And this holds before any tenant, account or transfer exists
+And `/tenants` accepts the operator key
 
 Scenario: The serving process refuses to hold the migration credential
 Given the container environment contains `LEDGEROPS_MIGRATE_DSN`
@@ -329,7 +333,7 @@ Acceptance Criteria
 - [ ] One message lists every missing required variable
 - [ ] Key and DSN values never appear in logs
 - [ ] `serve` refuses to start when `LEDGEROPS_MIGRATE_DSN` is present in its environment, naming the variable, before any database connection
-- [ ] With all variables set, the server starts and existing behavior is unchanged
+- [ ] With all variables set, the server starts and existing behavior is unchanged, plus one addition (D16): `GET /health` needs no credentials, answers 200 with a fixed body that contains no ledger data, and is available before any ledger call (any tenant, account or transfer)
 - [ ] The demo compose sets all three so `make up` is unaffected
 
 Outcome KPIs
@@ -340,6 +344,7 @@ Outcome KPIs
 - Baseline: 0% (missing operator key starts silently)
 
 Technical Notes
+- D16: `GET /health` is a new route (not existing, contrary to earlier assumption); it is a liveness answer, deliberately outside the operator-key and tenant-key middleware, and exposes nothing about ledger state and makes no database access (DESIGN records it as DDD-52). The trial-balance verdict stays on the operator-keyed `GET /health/trial-balance`.
 - OQ-1 (closed, user decision 2026-10-17): `LEDGEROPS_DEMO_TENANT_KEY` is optional. Current code already behaves this way (`main.go:98-100`), so no code change is needed for it; the work in this story is only the required-variable check for the other two.
 - The check belongs at the entrypoint; the domain core is untouched.
 
@@ -391,14 +396,21 @@ Given `0.2.0` is already published
 When the tag `v0.2.0` is moved to another commit and pushed
 Then the pipeline refuses and the published digest is unchanged
 
+Scenario: A resumed run for a moved tag is refused
+Given `0.2.0` is published from commit `3f9c2ab` and its image revision label says `3f9c2ab`
+When the tag `v0.2.0` is moved to commit `9d41e07` and the release run is resumed or re-run
+Then the run fails because the image's revision label differs from the commit being released
+And the published digest is unchanged
+
 Acceptance Criteria
 - [ ] Pushing a tag `vMAJOR.MINOR.PATCH` (prerelease suffix allowed) publishes `ghcr.io/gizawnahom/ledgerops:<version without v>` for amd64
 - [ ] Publishing requires the full existing CI suite to pass on that commit
 - [ ] Anonymous pullability is checked on the pushed digest before any version tag is promoted; the first release run is expected to fail this check until the owner makes the GHCR package public (OQ-7), after which a re-run passes
-- [ ] The check pulls the image by digest before any version tag exists, for each published architecture (amd64 in this slice; arm64 joins in slice 06), migrates a fresh Postgres with a generated password, starts it, and requires `/health` 200; the version tag appears only after the check passes (and, once slice 07 lands, after signature verification)
+- [ ] The check pulls the image by digest before any version tag exists, for each published architecture (amd64 in this slice; arm64 joins in slice 06), migrates a fresh Postgres with a generated password, starts it, and requires `/health` 200 (new route in this feature, D16); the version tag appears only after the check passes (and, once slice 07 lands, after signature verification)
 - [ ] A failed check leaves the run red and no version tag exists for it
 - [ ] Non-matching tags and branch pushes publish nothing
-- [ ] An existing version tag is never overwritten
+- [ ] An existing version tag is never overwritten; a resumed release run fails when the image's `org.opencontainers.image.revision` label differs from the commit being released (a moved git tag), leaving the published digest unchanged
+- [ ] The smoke check uses the unauthenticated `GET /health` introduced in US-2 (D16)
 
 Outcome KPIs
 - Who: integrating developers pulling the image
@@ -797,7 +809,7 @@ Hypothesis: we believe that a gated, smoke-tested, signed multi-arch image with 
 - OpenAPI spec, client SDKs, transfer metadata (rest of the "Adoptable" roadmap item)
 - TLS in the service, secrets management integrations beyond env and file
 - Tenant key rotation (existing known limitation)
-- Changing the domain core or any API behavior
+- Changing the domain core or any existing API behavior. One carve-out (D16, user decision 2026-10-19): a new unauthenticated `GET /health` liveness route returning 200 with a fixed body; no other new route, no readiness semantics
 - Automated changelog tooling (release notes are auto-generated by GitHub, OQ-12)
 
 ## Wave: DISCUSS / [REF] WS strategy
@@ -813,7 +825,8 @@ A: thin, sequential slices with no environment switch. Walking skeleton is slice
 | `git push` of a `v*.*.*` tag | GitHub Actions trigger | 03, 06 |
 | `docker pull ghcr.io/gizawnahom/ledgerops:<tag>` | registry | 03, 06 |
 | `ledgerops version` | container command | 05 |
-| `GET /health`, `GET /console`, `GET /console/verdict` | HTTP (existing) | 03, 05 |
+| `GET /health` | HTTP (new, D16, unauthenticated) | 02 (owner), 03 (smoke) |
+| `GET /console`, `GET /console/verdict` | HTTP (existing) | 05 |
 | `cosign verify`, `cosign verify-attestation` | registry artifacts | 07 |
 
 All command and variable names are illustrative except those fixed by D4 and D5.
@@ -1100,9 +1113,10 @@ Numbering continues from DDD-26 (`multitenancy`/`inter-tenant-transfer`). ADRs 0
 | DDD-42 | Migration is a pure `PlanMigration(facts, config)` returning a refusal or an ordered plan; facts come from read-only catalog queries plus rolled-back empirical probes; driven ports split into `SchemaMigrator` and `RolePasswordSetter` (takes a finished verifier only) (ADR-022) | Every refusal reason is table-testable; the password setter cannot touch schema and never sees plaintext |
 | DDD-43 | SBOM verify target is the platform digest (two-step lookup documented); no index-level SBOM; cosign 2.x, digest references only (ADR-021) | One merged SBOM would be wrong for one platform; avoids relying on an unverified `--platform` flag |
 | DDD-44 | Pinning policy: every `uses:` by full commit SHA, tool versions pinned, all base images (incl. smoke `postgres:16`) by digest, automated unpinned-`uses:` check (ADR-019, ADR-020) | Supply-chain integrity of the pipeline that signs the image |
-| DDD-45 | Re-run semantics (clarified 2026-10-19 from DEVOPS: "build anew" applies to a fresh run with the tag absent; "Re-run failed jobs" reuses the earlier job outputs, so the earlier digest is reused; every run prints `image_digest=... source=built\|reused-output\|resumed-from-tag`): if the exact tag exists, resume with its digest (skip build), else build anew; builds not claimed reproducible; no automatic pruning in v0.1.0 (ADR-020) | Idempotent re-runs without reproducible-build effort; naive pruning would break multi-arch indexes |
+| DDD-45 | Re-run semantics (amended 2026-10-19, user decision: on the resume path the run compares the existing image's `org.opencontainers.image.revision` label to the commit being released and fails on mismatch, i.e. a moved git tag never resumes onto a different commit's image) (clarified 2026-10-19 from DEVOPS: "build anew" applies to a fresh run with the tag absent; "Re-run failed jobs" reuses the earlier job outputs, so the earlier digest is reused; every run prints `image_digest=... source=built\|reused-output\|resumed-from-tag`): if the exact tag exists, resume with its digest (skip build), else build anew; builds not claimed reproducible; no automatic pruning in v0.1.0 (ADR-020) | Idempotent re-runs without reproducible-build effort; naive pruning would break multi-arch indexes |
 | DDD-46 | Smoke harness, quickstart checker and release planner are Go programs under `scripts/<name>/` (existing `scripts/race` convention); GitHub Release body is a template naming the image reference and verify commands plus generated notes; docs and example compose are components (ADR-020) | One convention; the quickstart document is the tested artifact |
 | DDD-47 | SCRAM verifier uses SASLprep (RFC 4013) normalisation, injected salt and iteration count, non-ASCII acceptance case (ADR-017) | Correct for non-ASCII passwords; deterministic unit tests |
+| DDD-52 | (added 2026-10-19, user decision after DISTILL found the route missing) New unauthenticated `GET /health` returning 200 with a fixed body, mounted outside `requireOperatorKey` like `/metrics`; reveals no ledger data and touches no database. Liveness only: database readiness is already proven by the startup probe (wire, probe, use), and operator-keyed `/health/trial-balance` stays the books check. Contract shape: pure-function (no inputs, fixed output) | The smoke, K1 and the quickstart need a key-less liveness signal; exposing a fixed body adds no information beyond `/metrics` reachability |
 | DDD-49 | (added 2026-10-19 from DEVOPS, ADR-020 amendment) Stale-plan guard: `classify` runs the pure planner once and passes the plan; `promote` (no checkout, `packages: write`) fails "plan stale, re-run all jobs" when GHCR's highest stable tag differs from the plan's `highest_stable`. `ci` gates every path including resume; every job's `if:` names each dependency explicitly (structural test `if_clauses_complete`); `anon-probe` and `promote` also need `sign` from slice 07. The global concurrency group keeps one running and one pending run (older pending run is cancelled by GitHub): operational mitigation only | Safety of "highest stable" with a small write-permission job; `!cancelled()` disables the implicit `success()` so dependencies must be explicit |
 | DDD-50 | (added 2026-10-19 from DEVOPS, ADR-020/021 amendment) Tag namespace: GHCR returns 404 to the referrers API, so signatures and attestations are `sha256-<hex>.sig`/`.att` tags in the same package; the `internal/release` classifier's existing-versions input ignores every tag that is not strict semver or `latest`, and orphan cleanup treats `.sig`/`.att` as belonging to their subject digest | Signature tags must never be read as versions |
 | DDD-51 | (added 2026-10-19 from DEVOPS) Test placement: `unit` runs `./cmd/...`, `./internal/support/...`, `./internal/release/...`; the `console` job runs the whole HTTP adapter package plus a `-tags console_embed` run with the built bundle copied to `console_dist`; structural tests (Dockerfile `FROM` digests, `--platform=$BUILDPLATFORM`, no `RUN` after the last `FROM`, `-tags console_embed`, `release.yml` needs graph, `if:` clauses, no import of `internal/adapters/postgres/prefeature` from `cmd/...`, `internal/domain`, `internal/app`) run in a `workflow-guards` job; a required `container-acceptance` job (`needs: [integration]`) runs the `@dedicated-cluster` suites | Without a home, the new pure tests and embed tests would run in no CI job |
@@ -1128,6 +1142,7 @@ Refinements accepted by the user 2026-10-17. DISCUSS sections are not edited; st
 | `SchemaMigrator` and `RolePasswordSetter` driven ports; SCRAM verifier builder | `internal/adapters/postgres/` | EXTEND | `Migrate`/`MigrateStep` become the orchestration entry points and gain a `Secret` password; the setter takes a finished verifier only |
 | Migration 0001 | `internal/adapters/postgres/migrations/0001_init.up.sql` | EXTEND (one-time edit) | NOLOGIN role; dynamic grant; `.down.sql` reviewed for consistency |
 | `Secret` | `internal/support/` | EXTEND | Redacts under `String`, `GoString`, `slog.LogValuer` |
+| `GET /health` route and handler (amended 2026-10-19, DDD-52) | `internal/adapters/http/router.go` (+ a small handler file) | EXTEND | Mounted beside `/metrics`, outside the operator-key group |
 | Console assets seam | `internal/adapters/http/console_static.go`, `router.go`, plus a `console_embed`-tagged file pair and gitignored `console_dist/` in the same package | EXTEND | `fs.FS` into `mountConsole`; no new package |
 | Release classifier | `internal/release/`, thin `scripts/releaseplan/main.go` | CREATE NEW | Pure |
 | Smoke harness | `scripts/smoke/main.go` | CREATE NEW | Go, per the `scripts/race` convention; used by `release.yml` and local runs |
@@ -1153,7 +1168,8 @@ The domain core, application layer and ports are untouched.
 | `git push` of `vMAJOR.MINOR.PATCH[-pre]` | Actions trigger | Only entry to `release.yml` |
 | `docker pull ghcr.io/gizawnahom/ledgerops:<tag>` | registry | Tags per `ReleasePlan` |
 | `cosign verify`, `cosign verify-attestation` | registry artifacts | Identity regex in ADR-021 |
-| `GET /health`, `GET /console`, `GET /console/verdict` | HTTP (existing) | Unchanged |
+| `GET /health` | HTTP (**new**, amended 2026-10-19, DDD-52) | Unauthenticated, outside `requireOperatorKey` like `/metrics`; 200 with a fixed body; no ledger data, no database access. DISCUSS and the smoke assumed it existed; it did not (only operator-keyed `/health/trial-balance` and `/metrics`) |
+| `GET /console`, `GET /console/verdict` | HTTP (existing) | Unchanged |
 
 The serve path exposes no write method to migration state, and the migrate path is a separate driving port; read and write are not combined on one interface.
 
@@ -1194,6 +1210,7 @@ Probe contract enforcement: subtype check (Go interface assertion `var _ Prober 
 | DDD-33..34 | Yes | OQ-5, non-root | 019 |
 | DDD-35..37, 44..46 | Yes | OQ-6, review cycle 1 | 020 (044 also 019) |
 | DDD-49..51 | Yes | DEVOPS back-propagation 2026-10-19 | 020, 021, 019 |
+| DDD-52 | Yes | User decision 2026-10-19 (DISTILL finding) | none (brief route table) |
 | DDD-38, 43 | Yes | OQ-10, review cycle 1 | 021 |
 | DDD-39, 42 | Yes | OQ-8, review cycle 1 | 022 |
 | DDD-40 | Yes | OQ-9 | 023 |
@@ -1241,6 +1258,7 @@ Only three shapes are used: pure-function (return-only), bounded-change (declare
 | `SchemaMigrator` | bounded-change | Declared delta: pending migration files only; same complement universe; dirty-state premise test (kill mid-file) |
 | `serve` | bounded-change | Declared delta: rows written through the existing ledger ports as `ledgerops_app`; it can run no DDL and no role statement (grants), and holds no migrate DSN (refuses if present). Complement-universe assertion: an acceptance run drives postings through a running `serve`, then diffs the catalog snapshot (above) and the data tables, expecting only ledger-port row additions; a second check attempts `CREATE TABLE`, `ALTER ROLE` and `UPDATE`/`DELETE` on `entries` as the app role and expects refusal (existing `probeStartup` covers the last at startup) |
 | `refuseIfMigrateDSNPresent` | pure-function | Env snapshot in, optional refusal out; presence only, never reads the value |
+| `GET /health` handler (DDD-52) | pure-function | No input, fixed status and body; asserted by a table test and an unauthenticated-request acceptance check (200 with no key, same body every time, no ledger field) |
 | Console assets seam | bounded-change, empty declared delta over an injected read capability | Reads are effects, so the `fs.FS` is injected (embedded FS or `os.DirFS`); the interface has no write methods (compile-time); startup check that `index.html` exists, asserted by the embed and no-index tests |
 | `internal/release` classifier | pure-function | (tag, existing stable versions) to `ReleasePlan`. Table and property tests on semver, prerelease, backport, re-run |
 | Smoke harness, quickstart checker | bounded-change | Declared delta: ephemeral containers and databases it creates and removes; registry access is pull-only (job has `packages: read`); nothing outside its temp universe changes |
@@ -1384,6 +1402,7 @@ OPS-1..9 are inherited unchanged (same numbering as `multitenancy`). New ids sta
 | OPS-28 | New required `ci.yml` job **`container-acceptance`** (`needs: [integration]`) runs the `@dedicated-cluster` suites: US-1a, US-1b, US-2, US-4, dirty-state, SCRAM, `ddl-logging-cluster`, privilege fixtures, console-embed build tests. Suite path is DISTILL's. It is the emitter named by KPI-R3, R4, R8, R9 | These scenarios mutate cluster-global objects and need their own containers, so they must not share the `integration` job's package run; wall-clock expected to be the longest after `inter-tenant-transfer`, so it runs in parallel with it |
 | OPS-29 | `promote` runs no repository code and no checkout. `classify` runs `scripts/releaseplan` once and passes the plan as job outputs. Because "Re-run failed jobs" can replay a stale plan, `promote` guards `latest` with a shell check that the current highest stable GHCR tag equals the plan's `highest_stable`; otherwise it fails with "plan stale, re-run all jobs". `highest_stable` is the empty string on the first release (no stable tag exists); the guard compares empty to empty. Before any tag exists `promote` proves that single-source `imagetools create` keeps the index digest (§ Deployment strategy) | Keeps the `packages: write` job minimal. This replaces ADR-020's "re-evaluate `moveLatest` at that moment" with an equivalent fail-safe; upstream item 9 |
 | OPS-30 | Re-run semantics reconciled with ADR-020 item 4/11 (§ Deployment strategy): the contract is the ADR's (tag exists: resume with that digest; tag absent: a fresh run builds anew). "Re-run failed jobs" reuse of the same run's earlier outputs is a GitHub-level optimisation, not a contract. Every run prints `image_digest=<sha256> source=built\|reused-output\|resumed-from-tag` in the job summary | One unambiguous rule for the runbook and the orphan cleanup |
+| OPS-31 | **User-decided 2026-10-19:** on the resume path (tag `X.Y.Z` already in GHCR) `classify` compares the existing image's `org.opencontainers.image.revision` label with the commit being released (`$GITHUB_SHA`) and **fails the run red on mismatch** (a moved git tag must not be resumed onto an image built from another commit). A missing label also fails (fail closed). The `build` job therefore writes the revision label from slice 03 (via `metadata-action` labels), not only slice 06; slice 06 still owns the label assertions (K7). Read-only: `docker buildx imagetools inspect` of the existing digest (preinstalled plugin on the runner, no write, no pinned-binary requirement), config of the first platform | Closes the gap where a re-pushed or moved tag would pass the resume path because the digest already exists |
 
 ---
 
@@ -1409,7 +1428,7 @@ Machine artifact: `docs/feature/container-image-release/devops/environments.yaml
 | `scram-unicode` | linux · amd64 | passwords in composed, decomposed and fullwidth forms; real pgx login after the set | DDD-47 |
 | `same-db-concurrent` | linux · amd64 | two `migrate` runs against the same empty database started together | loser resumes via the marker, both end consistent |
 | `rule-b-interrupted` | linux · amd64 | legacy database where the migrate run fails or is interrupted before the password step | `app-secret` still works and the output says the password was not changed |
-| `resume-from-tag` | GitHub Actions | GHCR already holds `X.Y.Z` (partial promote, complete release, or a different digest); first release has `highest_stable = ""` and a 404 tag list | resume path, `ci` still runs, stale-plan guard, moved-tag refusal |
+| `resume-from-tag` | GitHub Actions | GHCR already holds `X.Y.Z` (partial promote, complete release, or a different digest); first release has `highest_stable = ""` and a 404 tag list | resume path, `ci` still runs, stale-plan guard, moved-tag refusal, revision-label mismatch or absence fails `classify` red (OPS-31) |
 
 ---
 
@@ -1450,7 +1469,7 @@ Workflow-level: `on.push.tags: ['v[0-9]+.[0-9]+.[0-9]+', 'v[0-9]+.[0-9]+.[0-9]+-
 
 | # | Job | Needs | Permissions (beyond `contents: read`) | Does | Failure leaves |
 |---|---|---|---|---|---|
-| 1 | `classify` | none | `packages: read`, `actions: read` | validate tag against strict semver; list existing GHCR tags (a 404 for the unknown package on the first run is the empty set, tested; `sha256-*` signature tags ignored); run `scripts/releaseplan` **once** and emit the plan as outputs (version, tags, prerelease, `move_latest`, `highest_stable`, `resumed`, `resume_digest`); notice listing other queued or in-progress release runs (OPS-27) | nothing |
+| 1 | `classify` | none | `packages: read`, `actions: read` | validate tag against strict semver; list existing GHCR tags (a 404 for the unknown package on the first run is the empty set, tested; `sha256-*` signature tags ignored); when the exact tag already exists (resume), compare the image's `org.opencontainers.image.revision` label to `$GITHUB_SHA` and fail on mismatch or absence (OPS-31); run `scripts/releaseplan` **once** and emit the plan as outputs (version, tags, prerelease, `move_latest`, `highest_stable`, `resumed`, `resume_digest`); notice listing other queued or in-progress release runs (OPS-27) | nothing |
 | 2 | `ci` | classify | inherits `contents: read` | `uses: ./.github/workflows/ci.yml` (includes `container-acceptance`, `workflow-guards`) | nothing |
 | 3 | `build` | classify, ci | `packages: write` | skipped when `resumed`. buildx (pinned, sha256-verified), `docker/login-action`, `metadata-action` for labels, `build-push-action` with `outputs: type=image,name=…,push-by-digest=true,name-canonical=true,push=true`, `platforms` per slice, build args `VERSION`/`COMMIT`, `provenance: false`, npm cache mount. Summary prints `image_digest=… source=built` | untagged digest |
 | 4 | `smoke` (matrix: amd64 on `ubuntu-24.04`; arm64 on `ubuntu-24.04-arm` from slice 06) | classify, ci, build | `packages: read` | pull **by digest**; `go run ./scripts/smoke` (Postgres from Testcontainers, image ref read from the example compose, § Smoke inputs): fresh leg and upgrade leg; timing and results to `$GITHUB_STEP_SUMMARY` | untagged digest |
@@ -1557,7 +1576,7 @@ No production telemetry exists (OPS-1). Every KPI is a release-gate or CI assert
 | KPI | Instrument (emitting component) | Fields | Assertion | Gate |
 |---|---|---|---|---|
 | K1 → KPI-R1 | `scripts/smoke` per arch; `scripts/quickstart` | `smoke_pull_to_healthy_seconds`, `quickstart_pull_to_first_transfer_seconds`, `arch` | ≤ 120 s each arch; ≤ 600 s | `smoke`, `quickstart` |
-| K2 → KPI-R2 | workflow structure test + promote-job summary | `promote_needs_smoke_and_probe`, `all_jobs_need_ci`, `if_clauses_complete`, `latest_moved` | `ci` in the needs of every job after classify (resume path included); `promote` cannot start unless smoke (and sign, probe) succeeded; `latest` only when `move_latest` | `workflow-guards`, `promote` |
+| K2 → KPI-R2 | workflow structure test + promote-job summary | `promote_needs_smoke_and_probe`, `all_jobs_need_ci`, `if_clauses_complete`, `resume_revision_matches`, `latest_moved` | `ci` in the needs of every job after classify (resume path included); on resume the image revision label equals the released commit; `promote` cannot start unless smoke (and sign, probe) succeeded; `latest` only when `move_latest` | `workflow-guards`, `promote` |
 | K3 → KPI-R3 | acceptance (dedicated cluster) and smoke fresh leg | `app_secret_login_refused`, `observations`, `supplied_password_login_ok`, `plaintext_in_server_log` | refused == observations, ok, false | `container-acceptance`, `smoke` |
 | K4 → KPI-R4 | smoke upgrade leg; upgrade acceptance | `entries_before`, `entries_after`, `imbalance_minor` | equal, equal, 0 | `smoke`, `container-acceptance` |
 | K5 → KPI-R5 | `sign` and `quickstart` | `signatures_per_digest_min`, `sbom_attestations_per_platform_min`, `cert_identity`, `signature_storage` | for the index and each platform digest at least 1 signature; for each platform digest at least 1 SBOM attestation; identity matches the published exact-case regex | `sign`, `quickstart` |
@@ -1589,6 +1608,7 @@ The contract is the ADR's (DDD-45): if `X.Y.Z` already exists in GHCR the run **
 | `promote` partway (`X.Y.Z` yes, `X.Y` or `latest` no) | public exact tag | **"Re-run all jobs"**, not "Re-run failed jobs": once `X.Y.Z` is tagged the current highest stable tag no longer equals the replayed plan's `highest_stable`, so the stale-plan guard would (correctly) fail a replay. A fresh run sees the tag, resumes with its digest, and completes |
 | `github-release` | tags public, no release page | re-run |
 | `quickstart` | release public, run red | fix the document or checker, re-run (idempotent) |
+| resume onto a moved git tag (`X.Y.Z` exists, image revision label differs from the released commit, or label missing) | public tag untouched; run red at `classify`, nothing after it runs | do not retry. Either restore the tag to the commit that was released, or, since published versions are immutable, cut a new patch version from the new commit |
 | run cancelled by a newer queued tag (OPS-27) | whatever the cancelled run had completed | re-run the cancelled run; confirm with `imagetools inspect` |
 | a bad release reached `promote` | immutable public tag | publish a fixed patch version. Manual exception for `latest` only: a maintainer with a package-write token runs `docker buildx imagetools create -t ghcr.io/gizawnahom/ledgerops:latest ghcr.io/gizawnahom/ledgerops@<previous digest>` and edits the Release page to say the version is withdrawn. Signatures stay valid (they are per digest) |
 
@@ -1643,7 +1663,7 @@ Required, in this order, by the owner:
 
 ## Wave: DEVOPS / [REF] Observability stack
 
-Unchanged (OPS-5): logs via `log/slog` JSON to stdout, metrics at `GET /metrics` (Prometheus text), no traces, Prometheus/Grafana scaffold in the demo compose only. Release-side signals are the job summaries above. One optional item for DELIVER, not a requirement: a `HEALTHCHECK` in the Dockerfile needs no `RUN` (alpine's busybox `wget` exists) and would let client compose files use `service_healthy`; Kubernetes users would use their own probes against `/health`.
+Unchanged (OPS-5): logs via `log/slog` JSON to stdout, metrics at `GET /metrics` (Prometheus text), no traces, Prometheus/Grafana scaffold in the demo compose only. Release-side signals are the job summaries above. **`GET /health` is a new route delivered by this feature** (user decision 2026-10-19: unauthenticated, 200, fixed body, no data); it does not exist in the code today (`/health/trial-balance` and `/metrics` do). "Healthy" in the smoke (KPI-R1), the quickstart and the compose examples means this route answers 200. It must land no later than slice 02/03, before the first smoke uses it. One optional item for DELIVER, not a requirement: once the route exists, a `HEALTHCHECK` in the Dockerfile needs no `RUN` (alpine's busybox `wget` exists) and would let client compose files use `service_healthy`; Kubernetes users point their own probes at `/health`.
 
 ## Wave: DEVOPS / [REF] Branching strategy
 
