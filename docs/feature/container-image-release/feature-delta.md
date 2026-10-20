@@ -1759,3 +1759,105 @@ For DELIVER (optional): pin `postgres:16` in the six test files; if mutation cov
 
 ## Upstream Changes
 - See `devops/upstream-changes.md`
+
+---
+
+## Wave: DISTILL / [REF] Prior Wave Consultation and Reconciliation
+
+Owner: nw-acceptance-designer (Quinn). Density: lean (Tier-1 only). Single-file layout: the "wave-decisions" are the Wave Decisions Summary sections of DISCUSS, DESIGN and DEVOPS in this file.
+
+- Read: DISCUSS, DESIGN and DEVOPS sections of this file; `slices/*.md` (by title; content duplicated here); `design/upstream-changes.md`, `devops/upstream-changes.md`, `devops/environments.yaml`; journey `pull-and-run-ledgerops.yaml`; `brief.md` (§ Container image release, § For Acceptance Designer); ADR-017..023; `kpi-contracts.yaml` (KPI-R1..R9); `atdd-infrastructure-policy.md`. Not found: `discuss/`, `design/wave-decisions.md`, `devops/wave-decisions.md` (single-file layout), SPIKE, DISCOVER, DIVERGE.
+- Reconciliation: two findings, both resolved by the user on 2026-10-19 (recorded in `distill/upstream-issues.md` U-1, U-2). (1) `GET /health` was assumed to exist by every wave and does not: user decision, add an unauthenticated `GET /health` with a fixed body; DISTILL registers it as a RED scaffold. (2) A moved version tag resumes rather than "refuses": user decision, a resumed run compares the image's `org.opencontainers.image.revision` label with the commit being released and goes red on mismatch. The PO, architect and platform architect record these in their own sections (D16 / DDD-52 / DEVOPS resume check, user-decided 2026-10-19). Result after resolution: 0 outstanding contradictions.
+- Deliverable type: application (no `des-config` key; default).
+
+## Wave: DISTILL / [REF] Scenario list with tags
+
+Suite: `tests/acceptance/containerimagerelease/` (godog in `TestMain`, default filter `~@pending`, override with `LEDGEROPS_AT_TAGS`). 131 scenarios after outline expansion in 10 feature files (100 blocks, 13 outlines): 1 walking skeleton (enabled), 130 `@pending`; 68 error or edge paths (52%, outline rows expanded). Contract shapes: unbounded-preservation 56, pure-function 39, bounded-change 36. Every scenario carries exactly one `@contract-shape:` tag, classified by the When (refusals are unbounded-preservation). Scenario-level versus component-level: DESIGN's table classifies COMPONENTS (for example `PlanMigration` is a pure function, the plan executor is bounded-change); a scenario is classified by what its single When does through the driving port, so a refusal of `migrate` is unbounded-preservation even though the planner behind it is pure, and a scenario that reads files or a registry is not pure-function. This is the project's established convention and DESIGN is not edited.
+
+| Feature file | Story / slice | Scenarios | Tags of note |
+|---|---|---|---|
+| `walking-skeleton.feature` | US-1a, US-2, slice 01a+02 (path of 03) | 1 (prepare and start are Givens run through the real binary; one When posts the first transfer) | `@walking_skeleton @driving_adapter @driving_port @real-io @dedicated-cluster` |
+| `milestone-01-migrate-with-own-password.feature` | US-1a / 01a | 25: fresh migrate with state-delta, secret file (LF, CRLF, none; image 0644; image 0400-root trap), no password / empty / whitespace, both sources (different, same), Rule A watched run, stopped between files, killed mid-file (dirty refusal), secret never in output (5 failure situations), server log (`log_statement=all`), SCRAM composed/decomposed/fullwidth, wrong app password at start | `@kpi @KPI-R3 @dedicated-cluster @dirty-migration @scram-unicode @ddl-logging-cluster @nonroot-secret-files @image` |
+| `milestone-02-one-database-per-cluster.feature` | US-1b / 01b | 7: any name, second database refused (+ owner re-run allowed), dropped owner names `DROP ROLE`, abandoned claim, two databases at once, same database at once, legacy first database | `@kpi @KPI-R8 @same-db-concurrent @legacy-demo-db` |
+| `milestone-03-refuse-to-start-misconfigured.feature` | US-2 / 02 | 18: required settings 3 states x 2 variables, all reported together, migration credential (host and image), image with no settings, healthy + bare `/health`, demo key unset / empty / set, secrets never printed (2 faults), unknown subcommand, demo compose structure | `@kpi @KPI-R9 @env-serve-config @image @compose` |
+| `milestone-04-upgrade-existing-database.feature` | US-4 / 04 | 17: upgrade from v4 and v6 with 1,240 entries (state-delta over history), old password stops, no-op re-run, rotation, append-only, Rule B (schema step fails; killed before password step), supported minimum, grant-connect-without-ownership boundary, 5 privilege gaps, upgrade refusal keeps old password, frozen-fixture guard | `@kpi @KPI-R3 @KPI-R4 @legacy-demo-db @managed-pg-nonsuperuser @rule-b-interrupted` |
+| `milestone-05-console-and-version.feature` | US-5 / 05 | 9: console from the image, version stamped, unstamped `dev`, bundle absent / empty fails the build, no index refuses to start, embedded console from any directory, untagged build serves `consoleDistDir`, Dockerfile console stage and `.dockerignore` | `@kpi @KPI-R6 @console-embed-build @image` |
+| `milestone-06-release-classification.feature` | US-3, US-6 / 03, 06 | 10: first release, prerelease, patch, backport, signature noise, resume, 4 rejected tags, each driven through the `scripts/releaseplan` subprocess (tag in argv, plan read from its `key=value` output) | `@driving_port` |
+| `milestone-07-release-pipeline.feature` | US-3, US-6, KPI-R1/R2/R7 | 25: tag triggers, `ci` in every `needs`, `if_clauses_complete`, promote needs smoke + anon-probe (+ sign), permissions, pins x4 workflows, no expression interpolation, by-digest build, serial concurrency, Dockerfile topology, example compose, both architectures + labels, release page, 4 promote scenarios and 2 smoke scenarios against a local `registry:2`, 3 `@requires_external`; resumed-tag commit check, no tag after a failed smoke, release page needs promote, signing failure cannot be bypassed | `@registry @real-io @adapter-integration @resume-from-tag @requires_external @structural` |
+| `milestone-08-verify-provenance.feature` | US-7 / 07 | 5: published identity regex positive and negative samples, real verify, look-alike, SBOM per platform, first-rc certificate | `@requires_external @KPI-R5` |
+| `milestone-09-published-image-docs.feature` | US-8 / 08 | 7 (6 document checks plus the deferred quickstart-run scenario): README leads with the image, secrets guidance, order migrate before restart, verify commands with `gizawNahom`, traps (dirty recovery, `DROP ROLE`, one per cluster), pin by digest | `@structural @deferred` |
+
+DISTILL items from DESIGN/DEVOPS "Open questions for DISTILL", all covered: frozen fixture + checksum guard (done, committed in cdd1253), both crash scenarios, privilege fixtures (no CREATEROLE, no ADMIN OPTION, not owner / grant-connect boundary, no CREATE on public, table owned by another role), sentinel secrets on every failure path, serve refusing with `LEDGEROPS_MIGRATE_DSN` (host, image, compose), 0400-root file, console-embed states, SCRAM forms, cluster rule incl. `DROP ROLE`, concurrency (two databases, same database), Rule B interrupted, wrong password at start, workflow-structure (KPI-R2), first-rc identity assertion, classifier noise / 404 first run / backport, resume-from-tag variants (promote re-run, moved tag external), compose shared env file, prefeature import guard.
+
+## Wave: DISTILL / [REF] WS strategy
+
+One `@walking_skeleton @driving_adapter @driving_port` scenario through the real `ledgerops` binary and a real PostgreSQL 16 (Architecture of Reference defaults: driving = real adapter, driven internal = Testcontainers, no external fake needed). Litmus: "I brought my own database and password; ledgerops ran and posted a transfer; the demo password does not work." It chains slice 01a (migrate with a chosen password), slice 02 (configured start, `GET /health`) and the ledger call. Slice 03's registry hop is proven by the release smoke, not this suite.
+
+## Wave: DISTILL / [REF] Adapter coverage table
+
+| Driven adapter / port | `@real-io` scenario | Covered by |
+|---|---|---|
+| `SchemaMigrator` (privileged DSN) | YES | WS, milestone-01 fresh migrate, milestone-04 upgrade, dirty-state scenarios |
+| `RolePasswordSetter` (SCRAM verifier) | YES | milestone-01 secret file / Unicode forms / server-log scenario (real pgx login after the set) |
+| `FactReader` + `PreflightProber` | YES | milestone-04 privilege outline and supported-minimum fixtures (catalog snapshot unchanged) |
+| Role claim (DDD-48) | YES | milestone-02 concurrency, abandoned claim, dropped owner |
+| App store (`postgres.Open`, `probeStartup`, SQLSTATE 28P01) | YES | WS, milestone-01 wrong password at start, milestone-03 |
+| Console assets `fs.FS` | YES | milestone-05 (overlay builds, image) |
+| Password file read | YES | milestone-01 secret-file scenarios incl. 0400-root in the image |
+| Registry (promote, smoke) | YES against local `registry:2`; GHCR `@requires_external` | milestone-07 |
+| Sigstore / cosign | `@requires_external` | milestone-08, proven on `v0.2.0-rc.1` |
+| GitHub Releases / Actions | structural (parsed YAML) + `@requires_external` | milestone-07 |
+
+What the doubles cannot model: there are no in-memory doubles for driven-internal ports. The only substitute is the local `registry:2`, which cannot model GHCR visibility (private first push), tag-fallback signature storage, referrers behaviour, or immutable-tag rulesets; those stay `@requires_external`.
+
+## Wave: DISTILL / [REF] Driving Adapter coverage
+
+| Entry point (DESIGN) | Scenario that exercises it by its protocol |
+|---|---|
+| `ledgerops migrate` (host binary and image) | WS; milestone-01/02/04 (subprocess, exit code, stdout/stderr, env) |
+| `ledgerops serve` / no argument | WS; milestone-03; milestone-05 |
+| `ledgerops version` | milestone-05 (stamped via ldflags, unstamped) |
+| `GET /health`, `GET /console`, `GET /console/verdict` | WS, milestone-03, milestone-05 (HTTP against the running process or image) |
+| `git push` of a version tag (`release.yml`) | milestone-07 structural trigger scenario; real run `@requires_external` |
+| `docker pull ghcr.io/...` | `@requires_external` (milestone-07/08); smoke against `registry:2` |
+| `cosign verify`, `verify-attestation` | milestone-08 (`@requires_external`) plus the identity pattern scenario |
+| `internal/release` classifier | milestone-06 (driven directly: a pure function's signature is its port) |
+
+## Wave: DISTILL / [REF] Scaffolds (Mandate 7)
+
+All RED, marker `SCAFFOLD: true` or `__SCAFFOLD__`, behaviour not implemented. `grep -rn "SCAFFOLD" internal cmd scripts` must return nothing when DELIVER finishes.
+
+| Scaffold | Path |
+|---|---|
+| `GET /health` route | `internal/adapters/http/router.go` (`scaffold("health")`, outside `requireOperatorKey`, answers 501 `__SCAFFOLD__`) |
+| `support.Scaffold`, `Secret` | `internal/support/scaffold.go`, `internal/support/secret.go` |
+| Release classifier (`Classify`, `ReleasePlan`, `ErrNotAVersionTag`) | `internal/release/release.go` |
+| Migration plan, facts, ports, SCRAM builder, DSN redactor | `internal/adapters/postgres/migrate_plan.go` |
+| Dispatcher, serve/migrate config parsers, migrate-DSN guard, startup classifier | `cmd/api/config.go` |
+| Smoke harness, release planner | `scripts/smoke/main.go`, `scripts/releaseplan/main.go` (exit 70 with `__SCAFFOLD__`; contract: `--tag`, `--existing-tags`, optional `--image-repo` and `--commit`, `key=value` output, "not a version tag" exit, resumed-tag revision check) |
+| Layer-1 classifier properties (RED) | `internal/release/release_property_test.go` |
+
+Not scaffolded because they are new files DELIVER creates and the suite only reads: `release.yml`, `.dockerignore`, `release-notes.md.tmpl`, `examples/published-image/`, `docs/quickstart-published-image.md`. The suite reports each as `MISSING_FUNCTIONALITY: <path> does not exist yet`.
+
+## Wave: DISTILL / [REF] Test placement
+
+`tests/acceptance/containerimagerelease/` (no hyphens), mirroring `tests/acceptance/multitenancy/`: `suite_test.go`, `domain_types.go`, `world*.go`, `harness_*.go`, `steps_containerimagerelease_test.go`, `walking-skeleton.feature`, `milestone-NN-*.feature`. CI home: `container-acceptance` runs the whole package (needs Docker, `postgres:16`, `registry:2`); the structural, classifier and documentation scenarios could also run in `workflow-guards`/`unit` with `LEDGEROPS_AT_TAGS` once enabled. The prefeature guard tests run in `unit` (`./internal/adapters/postgres/prefeature/...`, pure).
+
+Mandate 8 at layers 1-3: `statedelta.AssertStateDelta` is used for real. The helper needs a `testing.TB`; godog runs from `TestMain`, so `recordingTB` embeds a nil `testing.TB` and overrides only `Helper` and `Fatalf` (the two methods the helper calls), recording the message. Universe names are port-exposed catalog facts (`role.ledgerops_app.can_login`, `db.<name>.schema_version`, `db.<name>.entries.count`, `db.<name>.trial_balance.imbalance_minor`, `roles.others.fingerprint`, `databases`, ...), never internal fields. Mandate 9/11: no PBT machinery in the acceptance suite. The five classifier properties (latest only for the highest stable, prerelease exact-only, non-version tags never change a plan, minor tag never moves to a lower patch, re-run resumes with the same tags) moved to layer-1 unit PBT in `internal/release/release_property_test.go` (`rapid`; RED tests, skipped unless `LEDGEROPS_RUN_PENDING=1` so `go test ./...` stays green; DELIVER deletes the skip). The acceptance classifier scenarios are examples through the real `scripts/releaseplan` program. Every layer 3+ scenario is example-based with named situations. Interrupted runs go through the real `migrate` binary: a trigger on `schema_migrations` (armed by an event trigger when golang-migrate creates the table) sleeps on the write that marks migration 4 as running; `pg_terminate_backend` plus SIGKILL there leaves migration 3 complete and 4 unstarted ("between files"); an event trigger holding `CREATE TABLE tenants` gives the mid-file kill. The kill is a When in the scenario that tests it and a Given where the interrupted state is a precondition. No CM-A waiver is needed. Mandate 10: Tier B not applied (config/CLI-shaped feature, no journey of three or more chained scenarios with rich input).
+
+## Wave: DISTILL / [REF] Pre-requisites
+
+- Docker daemon and network for `postgres:16`, `registry:2`, `node:22-slim` (the promote scenarios also push the locally available `postgres:16` and `node:22-slim`), Go toolchain, `docker buildx`.
+- DEVOPS environments used: `fresh-pg16-cluster`, `legacy-demo-db` (frozen `prefeature` 0001-0006), `role-exists-other-db`, `managed-pg-nonsuperuser`, `nonroot-secret-files`, `ddl-logging-cluster`, `dirty-migration`, `serve-config`, `wrong-password-start`, `console-embed-build`, `scram-unicode`, `same-db-concurrent`, `rule-b-interrupted`, `resume-from-tag`, `release-ci`, `ghcr-*` (external). `image-amd64` is exercised by `@image`; `image-arm64` only by the external scenario.
+- Contracts DISTILL defined for DELIVER (change them in `domain_types.go` if renamed): output tokens (`OutputToken`), privilege-gap tokens, ldflags variables `main.version` / `main.commit`, the promote environment contract `IMAGE_REPO`, `IMAGE_DIGEST`, `PLAN_VERSION`, `PLAN_TAGS`, `PLAN_MOVE_LATEST`, `PLAN_HIGHEST_STABLE`, `scripts/smoke --image` and its `smoke_pull_to_healthy_seconds=<n>` line.
+- Opt-in: `LEDGEROPS_EXTERNAL=1` runs the `@requires_external` scenarios against GHCR and Sigstore.
+
+## Wave: DISTILL / [REF] AT-completeness audit and Mandate-12
+
+15-item checklist (verdict COMPLETE, 14/15; C2a counts as passing with the state machine in `world.go`'s docstring): C1a empty/blank password and settings; C1b tag-grammar boundaries covered only for the specified cases (gap recorded, U-3) - the one failing item; C2b illegal event per state (migrate on dirty, second database, serve with migrate DSN); C3 0/1/N entries (0 on fresh, 40, 1,240) and registry 0/1/many tags; C4a re-run migrate, re-run promote; C4b migrate against an unreachable database; C5a/C5b password-source and demo-key combinations, flag orthogonality (host and `@image` runs share every step); C6a/C6b/C6c malformed values per variable, each declared refusal triggered, no secret escapes; C7a unreadable secret file, C7b kill between and during files and before the password step, C7c concurrent migrations.
+
+Waivers and deferrals, recorded: (a) Sigstore: no scenario signs a local image with a key pair. The repository contains no Sigstore adapter, so such a check would test cosign, not our code; signing, attestation and identity are proven on the real `v0.2.0-rc.1` (`@requires_external`), and the structural scenarios cover the sign job's needs, permissions and no-bypass. The identity regex is exercised with positive and negative sample certificates. (b) US-8 "the documented commands work as written" is an explicit `@requires_external @deferred` scenario: the commands are run verbatim by the release's `quickstart` job (DEVOPS job 9) against the real release; deferral decided by DISTILL because the document and the release do not exist yet. (c) "No release page unless promoted" is structural (`github-release` needs `promote`); a real GitHub Release is not created locally.
+
+Mandate-12: (1) `domain_types.go` exists with typed enums for every Gherkin noun (`Command`, `Variable`, `ValueState`, `LineEnding`, `FailureSituation`, `PrivilegeGap`, `PasswordForm`, `KillPoint`, `ConsoleBundle`, `WorkflowJob`, `OutputToken`, ...). (2) World methods take those types; the few raw strings are literal fixture values (passwords, tags, tokens) with no enum. (3) AST check: 153 step definitions, 0 violations (every body is one `return w.<Method>(...)`, no control flow). (4) Step-reuse ratio, informational: 407 step lines / 153 definitions = 2.7x, the natural ceiling for a CLI/pipeline feature whose scenarios are mostly distinct refusals.
+
+Outcomes registered: OUT-15..OUT-28 in `docs/product/outcomes/registry.yaml` (written directly; `nwave-ai outcomes register` is broken). `kpi-contracts.yaml` KPI-R1..R9 gained `acceptance_scenarios` links.

@@ -140,6 +140,11 @@ func NewRouter(deps Deps) http.Handler {
 	// an operator bearer key, and Prometheus never will.
 	router.Get("/metrics", metrics.Handler().ServeHTTP)
 
+	// GET /health (container-image-release, user-decided 2026-10-19): an
+	// unauthenticated liveness route like /metrics, fixed body, no ledger
+	// data. RED scaffold today -- DELIVER slice 02/03 replaces it.
+	router.Get("/health", scaffold("health"))
+
 	router.Group(func(protected chi.Router) {
 		protected.Use(requireOperatorKey(deps.OperatorKey))
 

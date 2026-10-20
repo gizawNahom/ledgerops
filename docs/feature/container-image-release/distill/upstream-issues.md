@@ -2,7 +2,7 @@
 
 Written by `nw-acceptance-designer` (DISTILL) on 2026-10-19. DISCUSS, DESIGN and DEVOPS sections of `feature-delta.md` were not edited.
 
-Status: DISTILL STOPPED at the Wave-Decision Reconciliation hard gate. No scenario, step definition or scaffold has been written. Item U-1 is blocking. Items U-2 to U-9 are specification gaps DISTILL will resolve as stated unless told otherwise.
+Status (updated 2026-10-20): U-1 and U-2 were resolved by the user on 2026-10-19 (U-1 option A: unauthenticated `GET /health`, RED-scaffolded via `scaffold("health")`; U-2: a resumed run compares the image's `org.opencontainers.image.revision` label with the commit being released and goes red on mismatch). The defaults for U-3 to U-9 were accepted. DISTILL then ran in full; the U-2 revision check is covered by the `@requires_external` moved-tag scenario (real registry) because the check lives in `classify`/`smoke`, which do not exist yet.
 
 ## U-1 (BLOCKING) `GET /health` does not exist
 
@@ -54,7 +54,7 @@ US-2/D9 fix exit 1 for a serve configuration refusal. Migrate refusals are "non-
 
 ## U-7 "Killed between two migration files" cannot be produced by an external kill
 
-golang-migrate sets the dirty flag before each file, so a real kill lands inside a file or in a window of microseconds. DISTILL produces that state through the step-wise entry (`postgres.MigrateStep`, ADR-017 "orchestration entry points") and asserts its observable result (role NOLOGIN, version clean, re-run completes). The mid-file kill is real: an event trigger holds a chosen `CREATE TABLE` for a few seconds, then the test calls `pg_terminate_backend` and kills the process. Note for DELIVER: `MigrateStep`'s signature will change with the password parameter; the one call site in the suite's world is what to update.
+golang-migrate sets the dirty flag before each file, so a real kill lands inside a file or in a window of microseconds. CORRECTION (2026-10-20): `postgres.MigrateStep` brings the store to head (`m.Up()`), it is not step-wise, so it cannot build this state. DISTILL instead builds it in the World: it claims the role (`CREATE ROLE ledgerops_app NOLOGIN` plus the owner-marker comment), then applies the first three LIVE migration files with golang-migrate from a temp directory, and asserts the observable result (role NOLOGIN, version clean, re-run completes). Until slice 01a edits 0001 this fixture reports `MISSING_FUNCTIONALITY ... until migration 0001 accepts any database name`. The mid-file kill is real: an event trigger holds a chosen `CREATE TABLE` for a few seconds, then the test calls `pg_terminate_backend` and kills the process. Note for DELIVER: `MigrateStep`'s signature will change with the password parameter; the one call site in the suite's world is what to update.
 
 ## U-8 Promote logic: DISTILL-imposed environment contract
 
@@ -65,3 +65,9 @@ DEVOPS OPS-29 keeps `promote` free of repository code, so its guards are inline 
 - Existing suites keep compiling until `postgres.Migrate`/`MigrateStep` change signature; DISTILL does not change them.
 - `go build -overlay` is used to build `console_embed` variants without touching the working tree.
 - The frozen pre-feature fixture is `internal/adapters/postgres/prefeature/` (already created, pinned by checksum, import-guarded). `TestLiveZeroOneIsPinnedOnceEdited` is skipped until slice 01a edits `0001`; that slice must pin the new checksum and delete the skip.
+
+## U-10 (new, found while authoring) Scenario coverage that depends on later artefacts
+
+- US-6 "The image runs natively on both architectures" and "The image says where it came from" are covered structurally (build platforms and label wiring in `release.yml`) and by one `@requires_external` scenario that inspects the real index and labels. A local `docker buildx` run of both architectures was not attempted (no native arm64 runner).
+- US-8 "The documented commands work as written" and US-3 "A pushed image is proven usable ..." against GHCR are proven by the `quickstart` job and the real `v0.2.0-rc.1`, not by this suite.
+- `acceptance`-level checks on `docker-compose.loadtest.yml` only read the `app` service (it overrides `app` and `postgres` only).

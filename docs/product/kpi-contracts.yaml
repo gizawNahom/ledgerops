@@ -377,6 +377,8 @@ kpis:
       ci_job: "smoke (per matrix arch); quickstart"
       summary_line: "smoke_pull_to_healthy_seconds=<n> arch=<amd64|arm64>; quickstart_pull_to_first_transfer_seconds=<n>"
     fails_build: true
+    acceptance_scenarios:   # DISTILL 2026-10-20; tag @kpi @KPI-R1 in tests/acceptance/containerimagerelease/
+      - "milestone-07-release-pipeline.feature \"The smoke check passes an image that migrates and serves\" (@kpi @KPI-R1)"
     note: >
       "Healthy" means the new unauthenticated GET /health answers 200 (a route
       delivered by this feature, user decision 2026-10-19; it does not exist
@@ -401,6 +403,8 @@ kpis:
       ci_job: "ci.yml workflow-guards; release.yml promote"
       summary_line: "needs_ci=<bool> if_clauses_complete=<bool> resume_revision_matches=<bool|n/a> promote_needs=smoke,anon-probe latest_moved=<bool> planned=<bool>"
     fails_build: true
+    acceptance_scenarios:   # DISTILL 2026-10-20; tag @kpi @KPI-R2 in tests/acceptance/containerimagerelease/
+      - "milestone-07-release-pipeline.feature structural scenarios (needs graph, if clauses, promote needs smoke and anon-probe) and the registry promote scenarios (@KPI-R2)"
     note: >
       Added 2026-10-19 (user decision): on the resume path a moved git tag
       fails the run red at classify via the revision-label comparison (DEVOPS
@@ -423,6 +427,9 @@ kpis:
       ci_job: "ci.yml container-acceptance; release.yml smoke"
       summary_line: "app_secret_login_refused=<n>/<n> supplied_password_login_ok=<bool> plaintext_in_server_log=<bool>"
     fails_build: true
+    acceptance_scenarios:   # DISTILL 2026-10-20; tag @kpi @KPI-R3 in tests/acceptance/containerimagerelease/
+      - "milestone-01-migrate-with-own-password.feature (@KPI-R3: Rule A watched run, stopped between files, killed in a file, server log, wrong-password)"
+      - "milestone-04-upgrade-existing-database.feature (@KPI-R3: old password stops, Rule B)"
     note: >
       DISCUSS classes this a Guardrail; gated here. Rule A is observed after every schema step and after a kill, not only at
       the end. `observations > 0` is implied by comparing against the count so
@@ -442,6 +449,8 @@ kpis:
       ci_job: "ci.yml container-acceptance; release.yml smoke"
       summary_line: "upgrade_entries_before=<n> after=<n> imbalance_minor=<n>"
     fails_build: true
+    acceptance_scenarios:   # DISTILL 2026-10-20; tag @kpi @KPI-R4 in tests/acceptance/containerimagerelease/
+      - "milestone-04-upgrade-existing-database.feature \"An existing demo database is brought current without touching history\" (@KPI-R4)"
 
   - id: KPI-R5
     name: Provenance verifiable
@@ -457,6 +466,8 @@ kpis:
       ci_job: "sign; quickstart (slice 07 onwards)"
       summary_line: "signatures_per_digest_min=<n> sbom_attestations_per_platform_min=<n> signature_storage=<tag-fallback|referrers|both> identity=<san>"
     fails_build: true
+    acceptance_scenarios:   # DISTILL 2026-10-20; tag @kpi @KPI-R5 in tests/acceptance/containerimagerelease/
+      - "milestone-08-verify-provenance.feature (@KPI-R5; real-registry scenarios are @requires_external, proven on v0.2.0-rc.1)"
     note: >
       User-decided (OPS-24): the published regex uses the exact case
       gizawNahom. The first rc prints the real certificate identity and the
@@ -478,6 +489,8 @@ kpis:
       ci_job: "smoke"
       summary_line: "console_http_status=<code> arch=<arch>"
     fails_build: true
+    acceptance_scenarios:   # DISTILL 2026-10-20; tag @kpi @KPI-R6 in tests/acceptance/containerimagerelease/
+      - "milestone-05-console-and-version.feature \"The console loads from the image with no files mounted\" (@kpi @KPI-R6, @image)"
 
   - id: KPI-R7
     name: Both architectures and correct labels
@@ -493,6 +506,8 @@ kpis:
       ci_job: "promote"
       summary_line: "index_platforms=<list> label_version=<v> label_revision=<sha7> label_source=<url>"
     fails_build: true
+    acceptance_scenarios:   # DISTILL 2026-10-20; tag @kpi @KPI-R7 in tests/acceptance/containerimagerelease/
+      - "milestone-07-release-pipeline.feature \"The release builds both architectures and labels the image from the tag\" (structural) and \"The published index lists both architectures with correct labels\" (@requires_external)"
     note: >
       "Exactly" matters: provenance and BuildKit SBOM attestations are off so
       the index holds no unknown/unknown manifests (DEVOPS OPS-14). Slice 03
@@ -512,6 +527,8 @@ kpis:
       ci_job: "ci.yml container-acceptance"
       summary_line: "second_db_attempts=<n> second_db_refusals=<n>/<n> concurrent_winners=<n> unchanged_universe=<bool>"
     fails_build: true
+    acceptance_scenarios:   # DISTILL 2026-10-20; tag @kpi @KPI-R8 in tests/acceptance/containerimagerelease/
+      - "milestone-02-one-database-per-cluster.feature (@KPI-R8: second database refused, dropped owner, abandoned claim, two simultaneous migrations)"
     note: "DISCUSS lists this under the K3 family. `unchanged_universe` is the before/after catalog snapshot diff named in DESIGN's contract shapes."
 
   - id: KPI-R9
@@ -528,6 +545,8 @@ kpis:
       ci_job: "ci.yml container-acceptance"
       summary_line: "missing_var_runs=<n> refused_at_start=<n> secrets_in_output=<bool>"
     fails_build: true
+    acceptance_scenarios:   # DISTILL 2026-10-20; tag @kpi @KPI-R9 in tests/acceptance/containerimagerelease/
+      - "milestone-03-refuse-to-start-misconfigured.feature (@KPI-R9: required settings outline, migration credential, key never printed) and milestone-01 \"A mismatched password is caught at app start\""
     note: "US-2's own KPI; not among K1-K7 but a stated story outcome, so wired rather than left implicit."
 
 runtime_instrumentation:
