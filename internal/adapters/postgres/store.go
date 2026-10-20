@@ -22,7 +22,6 @@ package postgres
 
 import (
 	"context"
-	"crypto/rand"
 	"embed"
 	"errors"
 	"fmt"
@@ -94,21 +93,14 @@ func MigrateStep(ctx context.Context, privilegedDSN string, appPassword support.
 }
 
 func applyAndSetPassword(ctx context.Context, privilegedDSN string, appPassword support.Secret, action string) error {
-	if err := claimAppRole(ctx, privilegedDSN); err != nil {
-		return redactedError(err, appPassword)
-	}
-	if err := applySchema(privilegedDSN, action); err != nil {
+	plan, err := preflight(ctx, privilegedDSN, appPassword)
+	if err != nil {
 		return err
 	}
-	salt := make([]byte, saltLength)
-	if _, err := rand.Read(salt); err != nil {
-		return fmt.Errorf("generating the password salt: %w", err)
+	if plan.Refused() {
+		return &RefusalError{Plan: plan}
 	}
-	verifier := BuildSCRAMVerifier(appPassword, salt, scramIterations)
-	if err := (pgRolePasswordSetter{ctx: ctx, privilegedDSN: privilegedDSN}).SetVerifier(verifier); err != nil {
-		return redactedError(err, appPassword)
-	}
-	return nil
+	return executePlan(ctx, plan, privilegedDSN, appPassword, action)
 }
 
 // SchemaVersion reports the migration version the database is at.

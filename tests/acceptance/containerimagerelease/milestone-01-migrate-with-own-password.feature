@@ -52,7 +52,7 @@ Feature: Migrate a fresh database with my own app password
     Then migrate refuses naming "ledgerops_app_password" and "not readable"
     And the cluster is unchanged
 
-  @pending @error @driving_port @contract-shape:unbounded-preservation
+  @error @driving_port @contract-shape:unbounded-preservation
   Scenario Outline: Migrate refuses without a usable password
     Given the operator has an empty database "kestrel_ledger" and a privileged role "kestrel_admin"
     And the app password is <state>
@@ -68,7 +68,7 @@ Feature: Migrate a fresh database with my own app password
       | set to an empty value  |
       | set to whitespace only |
 
-  @pending @error @driving_port @contract-shape:unbounded-preservation
+  @error @driving_port @contract-shape:unbounded-preservation
   Scenario Outline: Setting both password sources is refused as ambiguous
     Given the operator has an empty database "kestrel_ledger" and a privileged role "kestrel_admin"
     And the app password is "T7!kq@9x%Zm" and the password file holds "<file content>"

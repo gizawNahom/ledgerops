@@ -6,10 +6,6 @@ import (
 	"ledgerops/internal/support"
 )
 
-// SCAFFOLD: true -- RED stubs created by DISTILL (Mandate 7); signatures per
-// DDD-42 / ADR-022. DELIVER implements; the acceptance suite drives migration
-// through the `ledgerops migrate` binary, and unit tests drive these directly.
-
 // Facts is what FactReader and PreflightProber gather before any change.
 type Facts struct {
 	TargetDatabase       string
@@ -49,10 +45,86 @@ type Plan struct {
 	NoChanges bool
 }
 
+// Refused reports whether the plan is a refusal rather than a list of steps.
+func (plan Plan) Refused() bool { return plan.Refusal != "" }
+
+// Privilege names as they appear in a refusal.
+const (
+	privilegeConnect    = "CONNECT"
+	privilegeCreate     = "CREATE on schema public"
+	privilegeCreateRole = "CREATEROLE"
+	privilegeAdminOpt   = "ADMIN OPTION on ledgerops_app"
+	privilegeOwner      = "table owner"
+)
+
+// noChangesSuffix closes every preflight refusal: nothing was applied.
+const noChangesSuffix = "; no changes applied"
+
 // PlanMigration is pure: facts and config in, refusal or ordered plan out.
+// Every check runs before any schema change (ADR-022), so a gap exits naming
+// the privilege and saying nothing was changed. The cluster rule and the
+// foreign-table-collision rule join this list in step 02-01.
 func PlanMigration(facts Facts, config MigrateConfig) Plan {
-	support.Scaffold("PlanMigration")
-	return Plan{}
+	for _, check := range preflightChecks {
+		if refusal, refused := check(facts); refused {
+			return refusal
+		}
+	}
+	return Plan{Steps: []Step{ClaimRole, ApplySchema, SetAppRolePassword}}
+}
+
+type preflightCheck func(Facts) (Plan, bool)
+
+var preflightChecks = []preflightCheck{
+	requireConnectRight,
+	requireCreateOnPublic,
+	requireCreateRoleWhenRoleAbsent,
+	requireAdminOptionWhenRoleExists,
+	requireOwnershipOfTablesToAlter,
+}
+
+func refuseMissing(privilege, because string) (Plan, bool) {
+	return Plan{
+		Refusal:   "the privileged role lacks " + privilege + ": " + because + noChangesSuffix,
+		Privilege: privilege,
+		NoChanges: true,
+	}, true
+}
+
+func requireConnectRight(facts Facts) (Plan, bool) {
+	if facts.OwnsDatabaseOrGrant {
+		return Plan{}, false
+	}
+	return refuseMissing(privilegeConnect,
+		"it neither owns database "+facts.TargetDatabase+" nor may grant CONNECT on it")
+}
+
+func requireCreateOnPublic(facts Facts) (Plan, bool) {
+	if facts.CanCreateOnPublic {
+		return Plan{}, false
+	}
+	return refuseMissing(privilegeCreate, "migrations create objects in the public schema")
+}
+
+func requireCreateRoleWhenRoleAbsent(facts Facts) (Plan, bool) {
+	if facts.RoleExists || facts.CanCreateRole {
+		return Plan{}, false
+	}
+	return refuseMissing(privilegeCreateRole, "ledgerops_app does not exist and must be created")
+}
+
+func requireAdminOptionWhenRoleExists(facts Facts) (Plan, bool) {
+	if !facts.RoleExists || facts.HasAdminOptionOnRole {
+		return Plan{}, false
+	}
+	return refuseMissing(privilegeAdminOpt, "the app role password must be set on the existing ledgerops_app")
+}
+
+func requireOwnershipOfTablesToAlter(facts Facts) (Plan, bool) {
+	if len(facts.PendingVersions) == 0 || !facts.HasLedgerSchema || facts.OwnsLedgerTables {
+		return Plan{}, false
+	}
+	return refuseMissing(privilegeOwner, "it is not the owner of a ledger table the pending migrations alter")
 }
 
 // FactReader gathers facts with read-only catalog queries.
