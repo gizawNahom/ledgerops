@@ -67,7 +67,7 @@ Feature: Only images that migrate and serve are promoted
   Scenario: Releases are serialised and never cancel one another
     Then the release is serialised and never cancels a run in progress
 
-  @pending @error @contract-shape:pure-function
+  @error @contract-shape:pure-function
   Scenario: The image is built from pinned bases, cross-compiled, non-root and without a step in the final stage
     Then every base image of the image build is pinned by digest
     And the image build cross-compiles on the build platform and embeds the console

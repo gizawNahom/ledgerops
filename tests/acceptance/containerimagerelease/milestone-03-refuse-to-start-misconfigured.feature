@@ -107,7 +107,7 @@ Feature: Know immediately when ledgerops is misconfigured
     When the operator runs "frobnicate"
     Then the command refuses naming "serve" and "migrate" and "version"
 
-  @pending @compose @contract-shape:pure-function
+  @compose @contract-shape:pure-function
   Scenario: The demo stack gives the migration credential to migrate only
     Then the demo compose file runs "ledgerops migrate" with the demo app password set explicitly
     And the demo app service never receives the migration credential

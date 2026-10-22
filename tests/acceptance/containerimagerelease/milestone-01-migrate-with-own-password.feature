@@ -32,7 +32,7 @@ Feature: Migrate a fresh database with my own app password
       | a carriage return and line feed  |
       | no line ending                   |
 
-  @pending @image @driving_port @nonroot-secret-files @contract-shape:bounded-change
+  @image @driving_port @nonroot-secret-files @contract-shape:bounded-change
   Scenario: The published image prepares a database from a world-readable secret file
     Given the operator has an empty database "kestrel_ledger" and a privileged role "kestrel_admin"
     And the password file holds "Zr4#mV8$wQ1" followed by a line feed
@@ -43,7 +43,7 @@ Feature: Migrate a fresh database with my own app password
 
   # --- refusals before any change ----------------------------------------------
 
-  @pending @error @image @nonroot-secret-files @contract-shape:unbounded-preservation
+  @error @image @nonroot-secret-files @contract-shape:unbounded-preservation
   Scenario: A secret file the image user cannot read gives a named error
     Given the operator has an empty database "kestrel_ledger" and a privileged role "kestrel_admin"
     And the password file holds "Zr4#mV8$wQ1" followed by a line feed
