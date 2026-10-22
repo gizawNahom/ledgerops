@@ -353,6 +353,9 @@ func (w *World) runKilled(ctx context.Context, snapshotAfter bool) error {
 	}
 	proc.Kill()
 	w.record(proc.Result())
+	if err := w.cluster.ReleaseHolds(ctx, string(w.target)); err != nil {
+		return err
+	}
 	if snapshotAfter {
 		snap, err := w.cluster.Snapshot(ctx, w.tracked...)
 		w.before = snap

@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -75,6 +76,35 @@ func TestPlanMigration_UnownedTablesAreIgnoredWhenNothingIsPending(t *testing.T)
 }
 
 // FactReader exposes only SELECT: structural guard on every statement it may run.
+func TestPlanMigration_RefusesAnUnfinishedMigrationFirstNamingItsVersion(t *testing.T) {
+	for _, version := range []uint{1, 3, 6} {
+		facts := fullyPrivilegedFacts()
+		facts.HasLedgerSchema, facts.DirtyVersion = true, &version
+		facts.OwnsDatabaseOrGrant = false // the dirty check runs before every privilege check
+		plan := PlanMigration(facts, MigrateConfig{})
+		if !plan.Refused() || !plan.NoChanges || len(plan.Steps) != 0 {
+			t.Fatalf("version %d: plan = %+v, want a refusal with no steps", version, plan)
+		}
+		want := fmt.Sprintf("migration %d is unfinished (dirty)", version)
+		if !strings.Contains(plan.Refusal, want) || !strings.Contains(plan.Refusal, "no changes applied") {
+			t.Errorf("refusal %q does not name %q and say no changes applied", plan.Refusal, want)
+		}
+	}
+}
+
+func TestSingleStatementDSN_NeverCarriesMultiStatement(t *testing.T) {
+	cases := map[string]string{
+		"postgres://u:p@h:5432/db?sslmode=disable":                        "postgres://u:p@h:5432/db?sslmode=disable",
+		"postgres://u:p@h:5432/db?x-multi-statement=true&sslmode=disable": "postgres://u:p@h:5432/db?sslmode=disable",
+		"postgres://u:p@h:5432/db?x-multi-statement=true":                 "postgres://u:p@h:5432/db",
+	}
+	for in, want := range cases {
+		if got := singleStatementDSN(in); got != want {
+			t.Errorf("singleStatementDSN(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestFactReader_RunsOnlySelectStatements(t *testing.T) {
 	for _, query := range factQueries {
 		if !strings.HasPrefix(strings.TrimSpace(strings.ToUpper(query)), "SELECT") {

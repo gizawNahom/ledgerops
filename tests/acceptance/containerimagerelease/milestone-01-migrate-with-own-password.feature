@@ -92,7 +92,7 @@ Feature: Migrate a fresh database with my own app password
     And the demo password was refused at every observation
     And the app role logs in with "T7!kq@9x%Zm"
 
-  @pending @error @dirty-migration @kpi @KPI-R3 @contract-shape:bounded-change
+  @error @dirty-migration @kpi @KPI-R3 @contract-shape:bounded-change
   Scenario: A run killed between two migration files leaves no demo password behind
     Given the operator has an empty database "kestrel_ledger" and a privileged role "kestrel_admin"
     And the app password is "T7!kq@9x%Zm"
@@ -100,7 +100,7 @@ Feature: Migrate a fresh database with my own app password
     Then the database stays at version 3 with no unfinished migration
     And the app role is refused with "app-secret"
 
-  @pending @error @dirty-migration @kpi @KPI-R3 @contract-shape:bounded-change
+  @error @dirty-migration @kpi @KPI-R3 @contract-shape:bounded-change
   Scenario: A run killed between two migration files completes when migrate is run again
     Given the operator has an empty database "kestrel_ledger" and a privileged role "kestrel_admin"
     And the app password is "T7!kq@9x%Zm"
@@ -109,7 +109,7 @@ Feature: Migrate a fresh database with my own app password
     Then migrate succeeds and reports schema version 6
     And the app role logs in with "T7!kq@9x%Zm"
 
-  @pending @error @dirty-migration @kpi @KPI-R3 @contract-shape:unbounded-preservation
+  @error @dirty-migration @kpi @KPI-R3 @contract-shape:unbounded-preservation
   Scenario: A run killed during a migration file leaves an unfinished migration and no partial change
     Given the operator has an empty database "kestrel_ledger" and a privileged role "kestrel_admin"
     And the app password is "T7!kq@9x%Zm"
@@ -117,7 +117,7 @@ Feature: Migrate a fresh database with my own app password
     Then the interrupted migration 3 is flagged unfinished and left no partial change
     And the app role is refused with "app-secret"
 
-  @pending @error @dirty-migration @kpi @KPI-R3 @contract-shape:unbounded-preservation
+  @error @dirty-migration @kpi @KPI-R3 @contract-shape:unbounded-preservation
   Scenario: Migrate refuses to continue from an interrupted migration
     Given the operator has an empty database "kestrel_ledger" and a privileged role "kestrel_admin"
     And the app password is "T7!kq@9x%Zm"

@@ -25,6 +25,7 @@ import (
 	"embed"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -51,11 +52,28 @@ func newMigrator(privilegedDSN string) (*migrate.Migrate, error) {
 	if err != nil {
 		return nil, fmt.Errorf("loading embedded migrations: %w", err)
 	}
-	m, err := migrate.NewWithSourceInstance("iofs", source, privilegedDSN)
+	m, err := migrate.NewWithSourceInstance("iofs", source, singleStatementDSN(privilegedDSN))
 	if err != nil {
 		return nil, fmt.Errorf("opening migrator as the privileged role: %w", err)
 	}
 	return m, nil
+}
+
+// singleStatementDSN drops x-multi-statement, so golang-migrate sends each file
+// as one query: one implicit transaction, so a run killed mid-file leaves no
+// partial change.
+func singleStatementDSN(dsn string) string {
+	u, err := url.Parse(dsn)
+	if err != nil {
+		return dsn
+	}
+	q := u.Query()
+	if !q.Has("x-multi-statement") {
+		return dsn
+	}
+	q.Del("x-multi-statement")
+	u.RawQuery = q.Encode()
+	return u.String()
 }
 
 func closeMigrator(m *migrate.Migrate) {

@@ -1,6 +1,7 @@
 package postgres
 
 import (
+	"fmt"
 	"regexp"
 
 	"ledgerops/internal/support"
@@ -76,6 +77,7 @@ func PlanMigration(facts Facts, config MigrateConfig) Plan {
 type preflightCheck func(Facts) (Plan, bool)
 
 var preflightChecks = []preflightCheck{
+	requireNoUnfinishedMigration,
 	requireConnectRight,
 	requireCreateOnPublic,
 	requireCreateRoleWhenRoleAbsent,
@@ -87,6 +89,21 @@ func refuseMissing(privilege, because string) (Plan, bool) {
 	return Plan{
 		Refusal:   "the privileged role lacks " + privilege + ": " + because + noChangesSuffix,
 		Privilege: privilege,
+		NoChanges: true,
+	}, true
+}
+
+// requireNoUnfinishedMigration refuses a dirty schema_migrations row. A file
+// runs as one implicit transaction, so an interrupted file left no partial
+// change, but which side of it the operator wants is theirs to decide: there
+// is deliberately no force option (DDD-29).
+func requireNoUnfinishedMigration(facts Facts) (Plan, bool) {
+	if facts.DirtyVersion == nil {
+		return Plan{}, false
+	}
+	return Plan{
+		Refusal: fmt.Sprintf("migration %d is unfinished (dirty): a previous run was interrupted; "+
+			"restore from backup or repair schema_migrations by hand", *facts.DirtyVersion) + noChangesSuffix,
 		NoChanges: true,
 	}, true
 }

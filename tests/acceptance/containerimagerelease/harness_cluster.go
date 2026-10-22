@@ -426,3 +426,12 @@ func (cl *Cluster) HoldBeforeVersion(ctx context.Context, database string, versi
 		   END IF; END LOOP; END $$`,
 		`CREATE EVENT TRIGGER arm_hold ON ddl_command_end WHEN TAG IN ('CREATE TABLE') EXECUTE FUNCTION public.arm_hold()`)
 }
+
+// ReleaseHolds removes every injected hold, so a later run in the same
+// scenario is not stopped again.
+func (cl *Cluster) ReleaseHolds(ctx context.Context, database string) error {
+	return cl.Exec(ctx, database,
+		`DROP EVENT TRIGGER IF EXISTS arm_hold`,
+		`DROP EVENT TRIGGER IF EXISTS hold_ddl`,
+		`DROP FUNCTION IF EXISTS public.hold_version(), public.arm_hold(), public.hold_ddl() CASCADE`)
+}

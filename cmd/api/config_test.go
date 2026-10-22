@@ -11,6 +11,14 @@ func readsAs(content string) func(string) ([]byte, error) {
 	return func(string) ([]byte, error) { return []byte(content), nil }
 }
 
+func TestParseArgsRefusesTrailingArgumentsSoMigrateHasNoForceOption(t *testing.T) {
+	for _, args := range [][]string{{"migrate", "--force"}, {"migrate", "-force"}, {"migrate", "force"}, {"serve", "--addr"}} {
+		if _, err := ParseArgs(args); err == nil {
+			t.Errorf("ParseArgs(%v) accepted a trailing argument", args)
+		}
+	}
+}
+
 func TestParseArgsDefaultsToServeAndNamesTheSubcommand(t *testing.T) {
 	cases := map[string]Command{"": CommandServe, "serve": CommandServe, "migrate": CommandMigrate, "version": CommandVersion}
 	for arg, want := range cases {

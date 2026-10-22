@@ -32,6 +32,9 @@ func ParseArgs(args []string) (Command, error) {
 	}
 	switch command := Command(args[0]); command {
 	case CommandServe, CommandMigrate, CommandVersion:
+		if len(args) > 1 {
+			return "", fmt.Errorf("%s takes no arguments, got %q (configuration is by environment; migrate has no force option)", command, args[1])
+		}
 		return command, nil
 	}
 	return "", fmt.Errorf("unknown command %q: expected serve, migrate or version", args[0])
