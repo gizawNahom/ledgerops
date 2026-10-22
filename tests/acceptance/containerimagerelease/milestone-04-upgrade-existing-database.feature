@@ -89,7 +89,7 @@ Feature: Upgrade a demo database in place and set my own password
     When the operator prepares the database with migrate
     Then migrate succeeds and reports schema version 6
 
-  @pending @error @managed-pg-nonsuperuser @contract-shape:unbounded-preservation
+  @error @managed-pg-nonsuperuser @contract-shape:unbounded-preservation
   Scenario Outline: A privileged role missing one privilege fails clearly before any change
     Given a privileged role that <gap>
     And the app password is "Zr4#mV8$wQ1"

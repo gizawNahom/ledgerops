@@ -668,7 +668,10 @@ func (w *World) GivenPrivilegedRoleWithGap(ctx context.Context, gap PrivilegeGap
 	}
 	user, pw, err := w.cluster.ManagedRole(ctx, string(w.target), &gap, gap.NeedsExistingRole())
 	w.privUser, w.privPassword = user, pw
-	return err
+	if err != nil {
+		return err
+	}
+	return w.resnapshot(ctx)
 }
 
 func (w *World) GivenPrivilegedRoleWithMinimum(ctx context.Context) error {
@@ -677,7 +680,10 @@ func (w *World) GivenPrivilegedRoleWithMinimum(ctx context.Context) error {
 	}
 	user, pw, err := w.cluster.ManagedRole(ctx, string(w.target), nil, false)
 	w.privUser, w.privPassword = user, pw
-	return err
+	if err != nil {
+		return err
+	}
+	return w.resnapshot(ctx)
 }
 
 func (w *World) GivenPrivilegedRoleThatMayGrantConnectButDoesNotOwn(ctx context.Context) error {
@@ -693,7 +699,10 @@ func (w *World) GivenPrivilegedRoleThatMayGrantConnectButDoesNotOwn(ctx context.
 	if err := w.cluster.Exec(ctx, "postgres", fmt.Sprintf(`GRANT CONNECT ON DATABASE "%s" TO %s WITH GRANT OPTION`, w.target, user)); err != nil {
 		return err
 	}
-	return w.cluster.Exec(ctx, string(w.target), fmt.Sprintf(`GRANT CREATE ON SCHEMA public TO %s`, user))
+	if err := w.cluster.Exec(ctx, string(w.target), fmt.Sprintf(`GRANT CREATE ON SCHEMA public TO %s`, user)); err != nil {
+		return err
+	}
+	return w.resnapshot(ctx)
 }
 
 func (w *World) ThenMigrateRefusesNamingTheMissingPrivilege() error {
@@ -931,4 +940,13 @@ func (w *World) RunTwoMigratesForTheTrackedDatabases(ctx context.Context) error 
 		return fmt.Errorf("scenario error: expected two tracked databases, have %d", len(w.tracked))
 	}
 	return w.RunTwoMigratesTogether(ctx, w.tracked[0], w.tracked[1])
+}
+
+// resnapshot re-takes the "before" snapshot after a fixture changed the
+// cluster (managed role, database owner, ACLs), so "unchanged" compares the
+// run under test against the state it started from.
+func (w *World) resnapshot(ctx context.Context) error {
+	snap, err := w.cluster.Snapshot(ctx, w.tracked...)
+	w.before = snap
+	return err
 }
