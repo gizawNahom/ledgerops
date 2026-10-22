@@ -59,7 +59,8 @@ func serve() {
 	appDSN := os.Getenv("LEDGEROPS_APP_DSN")
 
 	if err := probeStartup(ctx, appDSN); err != nil {
-		logger.Error("health.startup.refused", "err", err)
+		refusal := ClassifyStartupError(err, dsnUser(appDSN))
+		logger.Error("health.startup.refused", "role", refusal.Role, "reason", refusal.Reason)
 		os.Exit(1)
 	}
 
@@ -131,6 +132,15 @@ func demoTenantResolver(demoTenantKey string, next ports.TenantKeyResolver) port
 // (DDD-26).
 func hashCredential(credential string) string {
 	return support.SHA256Hex(credential)
+}
+
+// dsnUser is the role a DSN connects as, or "" when it does not parse.
+func dsnUser(dsn string) string {
+	config, err := pgx.ParseConfig(dsn)
+	if err != nil {
+		return ""
+	}
+	return config.User
 }
 
 // probeStartup asserts the app-role connection can open a transaction and

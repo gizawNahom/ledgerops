@@ -55,7 +55,7 @@ Feature: Know immediately when ledgerops is misconfigured
     When ledgerops starts
     Then ledgerops refuses to start naming "LEDGEROPS_OPERATOR_KEY" and "LEDGEROPS_APP_DSN"
 
-  @pending @driving_port @contract-shape:bounded-change
+  @driving_port @contract-shape:bounded-change
   Scenario: A correctly configured ledgerops starts and answers health without credentials
     Given the database "kestrel_ledger" was migrated with the app password "T7!kq@9x%Zm"
     And the operator key is "op-9f3b71c2"

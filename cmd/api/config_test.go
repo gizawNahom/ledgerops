@@ -2,13 +2,29 @@ package main
 
 import (
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
+
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"pgregory.net/rapid"
 )
 
 func readsAs(content string) func(string) ([]byte, error) {
 	return func(string) ([]byte, error) { return []byte(content), nil }
+}
+
+func TestClassifyStartupErrorNamesTheRoleOnAPasswordMismatchWithoutAnyPassword(t *testing.T) {
+	err := fmt.Errorf("opening a probe connection: %w", &pgconn.PgError{Code: "28P01", Message: "password authentication failed"})
+	refusal := ClassifyStartupError(err, "ledgerops_app")
+	if refusal.Role != "ledgerops_app" || !strings.Contains(refusal.Reason, "ledgerops_app") || !strings.Contains(refusal.Reason, "authentication failed") {
+		t.Fatalf("refusal = %+v, want it to name ledgerops_app and authentication failed", refusal)
+	}
+	other := ClassifyStartupError(errors.New("connection refused"), "ledgerops_app")
+	if strings.Contains(other.Reason, "authentication failed") {
+		t.Errorf("a non-28P01 error was classified as a password mismatch: %+v", other)
+	}
 }
 
 func TestParseArgsRefusesTrailingArgumentsSoMigrateHasNoForceOption(t *testing.T) {

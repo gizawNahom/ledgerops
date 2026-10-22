@@ -1,8 +1,11 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"ledgerops/internal/support"
 )
@@ -127,8 +130,20 @@ type StartupRefusal struct {
 	Role   string
 }
 
-// ClassifyStartupError maps (error, DSN user) to a named refusal (SQLSTATE 28P01).
+// sqlstateInvalidPassword is PostgreSQL's invalid_password (28P01).
+const sqlstateInvalidPassword = "28P01"
+
+// ClassifyStartupError maps (error, DSN user) to a named refusal (SQLSTATE
+// 28P01). The reason names the role, never a password: a mismatch between the
+// app DSN and the password migrate set is caught here, at start (DDD-32).
 func ClassifyStartupError(err error, dsnUser string) StartupRefusal {
-	support.Scaffold("ClassifyStartupError")
-	return StartupRefusal{}
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == sqlstateInvalidPassword {
+		return StartupRefusal{
+			Reason: "password authentication failed for role " + dsnUser +
+				": LEDGEROPS_APP_DSN does not carry the password migrate set",
+			Role: dsnUser,
+		}
+	}
+	return StartupRefusal{Reason: err.Error(), Role: dsnUser}
 }

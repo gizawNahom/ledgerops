@@ -170,7 +170,7 @@ Feature: Migrate a fresh database with my own app password
 
   # --- wrong password at start ------------------------------------------------------
 
-  @pending @error @wrong-password-start @driving_port @US-2 @KPI-R9 @contract-shape:unbounded-preservation
+  @error @wrong-password-start @driving_port @US-2 @KPI-R9 @contract-shape:unbounded-preservation
   Scenario: A mismatched password is caught at app start, not at the first request
     Given the database "kestrel_ledger" was migrated with the app password "T7!kq@9x%Zm"
     And the app login uses the password "wrong-guess"
