@@ -19,6 +19,8 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - name: Install pact-go native library
+        run: go run github.com/pact-foundation/pact-go/v2 -l ERROR install -d /tmp
       - name: Test
         run: go test ./... -count=1
       - id: meta
