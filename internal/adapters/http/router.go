@@ -140,6 +140,11 @@ func NewRouter(deps Deps) http.Handler {
 	// an operator bearer key, and Prometheus never will.
 	router.Get("/metrics", metrics.Handler().ServeHTTP)
 
+	// GET /health (container-image-release, user-decided 2026-10-19): an
+	// unauthenticated liveness route like /metrics, fixed body, no ledger
+	// data and no database access (DDD-52).
+	router.Get("/health", healthHandler)
+
 	router.Group(func(protected chi.Router) {
 		protected.Use(requireOperatorKey(deps.OperatorKey))
 
@@ -497,14 +502,11 @@ func refuseTransferNotFound(w http.ResponseWriter, r *http.Request) {
 	writeRefusal(w, r, http.StatusNotFound, "transfer_not_found", nil)
 }
 
-func scaffold(operation string) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusNotImplemented, map[string]any{
-			"error":     "__SCAFFOLD__",
-			"operation": operation,
-			"detail":    operation + " not yet implemented -- RED scaffold",
-		})
-	}
+// healthBody is GET /health's fixed answer: the process is up and serving.
+var healthBody = map[string]string{"status": "ok"}
+
+func healthHandler(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, healthBody)
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {

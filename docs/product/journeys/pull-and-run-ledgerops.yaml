@@ -1,0 +1,177 @@
+id: pull-and-run-ledgerops
+name: Pull and run ledgerops
+persona: P1
+also_involves: [P2]
+jobs: [J11, J12, J13]
+depth: lightweight
+
+mental_model: >
+  Priya thinks "docker pull, point it at my database, go". She expects the image
+  to carry its own migrations and to complain loudly if she forgot something,
+  not to start and fail later. She does not expect to choose between a demo
+  password and nothing: she brings her own secret. Tomasz additionally asks
+  "is this really the project's image?" and "can I move my existing database
+  onto it without losing a row?".
+
+visual: |
+  [tag v0.2.0] -> S1 pull -> S2 migrate -> S3 start -> S4 first call -> S5 verify (P2) -> S6 upgrade (P2)
+   curious        cautious    wary->guided  reassured    confident        assured          careful->relieved
+   artifacts:     image_ref   privileged_dsn app_dsn      operator_key     signing identity existing db
+                  version     app_password   app_password tenant_key
+
+steps:
+  - id: S1
+    name: Pull a pinned release
+    action: docker pull ghcr.io/gizawnahom/ledgerops:0.2.0
+    output: Image downloaded; digest shown
+    emotion: curious, slightly cautious
+    confidence: 4
+    gherkin: |
+      Scenario: A pinned release can be pulled without a login
+        Given release 0.2.0 is published
+        When Priya runs docker pull for that tag
+        Then the image downloads without credentials
+  - id: S2
+    name: Migrate the database with my own password
+    action: docker run ... migrate (privileged DSN and app password supplied)
+    output: "schema at version 6; app role password set"
+    emotion: wary at the privileged DSN, relieved when it names exactly what it did
+    confidence: 6
+    note: >
+      A refusal here (no password) is a guided dip, not a failure. The message
+      names the variables so the next attempt succeeds.
+    gherkin: |
+      Scenario: A missing password stops migration before any change
+        Given no app password is supplied
+        When Priya runs migrate
+        Then it exits non-zero naming both variables and the database is unchanged
+  - id: S3
+    name: Start the service
+    action: docker run ... (app DSN and operator key required; demo tenant key optional)
+    output: "listening on :8080, or one message listing every missing required setting"
+    emotion: reassured when misconfiguration is named at once
+    confidence: 7
+    gherkin: |
+      Scenario: Every missing setting is listed together
+        Given the operator key and the app DSN are unset
+        When Priya starts the container
+        Then it exits 1 naming both
+  - id: S4
+    name: Make a first call
+    action: GET /health (new unauthenticated liveness route, fixed body, no ledger data; D16) ; POST /tenants with the operator key ; open /console
+    output: 200 health; tenant created; console loads
+    emotion: confident
+    confidence: 9
+    gherkin: |
+      Scenario: The published image serves health and the console
+        Given the service started
+        When Priya requests /health and /console
+        Then both return 200
+  - id: S5
+    name: Verify provenance
+    persona: P2
+    action: cosign verify ghcr.io/gizawnahom/ledgerops:0.2.0 --certificate-identity-regexp ... (exact-case owner gizawNahom in the regex; image reference stays lowercase) ; then resolve the platform digest and run cosign verify-attestation on it (SBOM is per platform)
+    output: Verification succeeded with the release workflow identity
+    emotion: assured
+    confidence: 9
+    gherkin: |
+      Scenario: A released image verifies and a look-alike does not
+        Given release 0.2.0 and a look-alike under the same name
+        When Tomasz verifies each
+        Then only the release verifies
+  - id: S6
+    name: Upgrade an existing database
+    persona: P2
+    action: docker run ... migrate against the demo-created database with a new password
+    output: "applied pending migrations; app role password updated; schema at version 6"
+    emotion: careful, then relieved when the trial balance is still zero
+    confidence: 8
+    gherkin: |
+      Scenario: History is untouched by the upgrade
+        Given a demo database with 1,240 entries and a zero trial balance
+        When Tomasz migrates with his own password
+        Then entries and balances are unchanged and app-secret is refused
+
+emotional_arc:
+  shape: cautious-to-confident, one guided dip
+  start: curious and cautious
+  middle: wary at S2, guided by explicit refusals
+  end: confident, with assurance of origin and a safe upgrade path
+
+shared_artifacts:
+  - name: image_ref
+    source: release workflow (tag, version without leading v)
+    consumed_by: [S1, S5, README, quickstart]
+    risk: HIGH -- a tag/label/version mismatch breaks trust
+  - name: version
+    source: git tag, stamped at build into binary and OCI label
+    consumed_by: [S1, S4, version command, GitHub Release, image labels]
+    risk: HIGH
+  - name: app_password
+    source: operator's secret store (env or mounted file)
+    consumed_by: [S2 migrate (sets it), S3 app DSN (uses it)]
+    risk: HIGH -- a mismatch makes the app refuse to start
+  - name: privileged_dsn
+    source: operator's secret store
+    consumed_by: [S2, S6]
+    note: Never given to the app container (OPS-10).
+  - name: operator_key
+    source: operator's secret store
+    consumed_by: [S3, S4 console and tenant provisioning]
+  - name: signing_identity
+    source: release workflow identity (repository, workflow path, tag)
+    consumed_by: [S5, quickstart verify command]
+    risk: MEDIUM
+
+error_paths:
+  - step: S2
+    failure: No app password supplied
+    response: migrate exits non-zero naming both variables; database untouched
+    recovery: Set the variable or mount the secret file and rerun.
+  - step: S2
+    failure: Privileged role cannot create or alter roles
+    response: Exit non-zero naming the missing privilege; old password intact
+    recovery: Grant the privilege or use a role that has it.
+  - step: S2
+    failure: Fresh migrate of a second empty database in a cluster where ledgerops_app already exists
+    response: Exit non-zero naming the conflict; role, password and both databases unchanged
+    recovery: >
+      Use a separate Postgres cluster, or migrate the database that already
+      owns the role; if that database no longer exists, run DROP ROLE
+      ledgerops_app as a privileged role. One ledgerops database per cluster.
+      Two simultaneous first migrations: exactly one succeeds, the other is refused.
+  - step: S2
+    failure: Run killed during a migration file (dirty version), or password file unreadable by the non-root image user
+    response: Re-run refuses naming the dirty version and changes nothing; unreadable file gives a named error
+    recovery: Inspect the named version before any further action; fix file permissions.
+  - step: S3
+    failure: LEDGEROPS_MIGRATE_DSN present in the serve environment
+    response: Exit 1 naming the variable, no database connection (the app never holds the migrate credential)
+    recovery: Remove it from the app container's environment.
+  - step: S3
+    failure: Operator key or app DSN unset (demo tenant key is optional)
+    response: Exit 1 listing every missing required variable together
+    recovery: Set them and restart.
+  - step: S3
+    failure: App DSN password differs from the migrated one
+    response: Startup refusal naming the role and that authentication failed; no secret printed
+    recovery: Fix the DSN or rerun migrate with the intended password.
+  - step: S5
+    failure: Image does not verify
+    response: cosign reports failure
+    recovery: Do not run it; pull again by digest from the documented reference.
+
+changelog:
+  - date: "2026-10-17"
+    feature: container-image-release
+    change: Journey created.
+  - date: "2026-10-17"
+    feature: container-image-release
+    change: S3 aligned with revised D9; demo tenant key is optional.
+  - date: "2026-10-17"
+    feature: container-image-release
+    change: >
+      Story US-1 split into US-1a (S2 happy path and password errors) and
+      US-1b (S2 cluster-rule error paths), slices 01a and 01b.
+      DESIGN back-propagation: S2/S3 error paths for dirty migration state,
+      unreadable password file and MIGRATE_DSN in the serve environment.

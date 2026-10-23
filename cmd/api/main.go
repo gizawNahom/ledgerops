@@ -35,6 +35,23 @@ import (
 )
 
 func main() {
+	command, err := ParseArgs(os.Args[1:])
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(exitConfigInvalid)
+	}
+	switch command {
+	case CommandMigrate:
+		os.Exit(runMigrate(context.Background(), environmentSnapshot(), os.Stdout, os.Stderr))
+	case CommandServe:
+		serve()
+	case CommandVersion:
+		fmt.Fprintf(os.Stderr, "%s: not available yet\n", command)
+		os.Exit(exitConfigInvalid)
+	}
+}
+
+func serve() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
 
@@ -42,7 +59,8 @@ func main() {
 	appDSN := os.Getenv("LEDGEROPS_APP_DSN")
 
 	if err := probeStartup(ctx, appDSN); err != nil {
-		logger.Error("health.startup.refused", "err", err)
+		refusal := ClassifyStartupError(err, dsnUser(appDSN))
+		logger.Error("health.startup.refused", "role", refusal.Role, "reason", refusal.Reason)
 		os.Exit(1)
 	}
 
@@ -114,6 +132,15 @@ func demoTenantResolver(demoTenantKey string, next ports.TenantKeyResolver) port
 // (DDD-26).
 func hashCredential(credential string) string {
 	return support.SHA256Hex(credential)
+}
+
+// dsnUser is the role a DSN connects as, or "" when it does not parse.
+func dsnUser(dsn string) string {
+	config, err := pgx.ParseConfig(dsn)
+	if err != nil {
+		return ""
+	}
+	return config.User
 }
 
 // probeStartup asserts the app-role connection can open a transaction and

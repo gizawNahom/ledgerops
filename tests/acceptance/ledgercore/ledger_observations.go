@@ -16,6 +16,7 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 
 	"ledgerops/internal/adapters/postgres"
+	"ledgerops/internal/support"
 )
 
 // NewLedger builds the composition root with the two fakes the infrastructure
@@ -121,7 +122,7 @@ func sharedPostgres(ctx context.Context) (string, error) {
 		}
 		sharedContainer = container
 
-		if err := postgres.Migrate(ctx, privilegedDSN); err != nil {
+		if err := postgres.Migrate(ctx, privilegedDSN, support.NewSecret("app-secret")); err != nil {
 			sharedErr = fmt.Errorf("migrating the template from zero: %w", err)
 			return
 		}

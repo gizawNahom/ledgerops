@@ -18,6 +18,7 @@ import (
 	"ledgerops/internal/adapters/postgres"
 	"ledgerops/internal/app/ports"
 	"ledgerops/internal/domain"
+	"ledgerops/internal/support"
 )
 
 // testTenantID is the tenant every repository test in this package seeds and
@@ -76,7 +77,7 @@ func migratedStoreWithDSN(t *testing.T) (ports.Store, string) {
 	if err != nil {
 		t.Fatalf("reading the privileged connection string: %v", err)
 	}
-	if err := postgres.Migrate(ctx, privilegedDSN); err != nil {
+	if err := postgres.Migrate(ctx, privilegedDSN, support.NewSecret("app-secret")); err != nil {
 		t.Fatalf("migrating from zero: %v", err)
 	}
 

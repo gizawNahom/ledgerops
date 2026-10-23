@@ -1,11 +1,9 @@
 # Clean-clone demo stack (step 05-01): one ledgerops binary, one Postgres 16.
 #
-# Two-role setup per OPS-2/OPS-10: `migrate` runs the SQL in
-# internal/adapters/postgres/migrations against the privileged
-# `ledgerops_migrate` role and exits before `app` starts. The roles
-# themselves (including `ledgerops_app`) are created BY that SQL
-# (0001_init.up.sql), not by this file — compose only supplies the
-# already-provisioned migrate role via the postgres image's bootstrap env.
+# Two-role setup per OPS-2/OPS-10: `migrate` runs the image's `ledgerops
+# migrate` as the privileged `ledgerops_migrate` role and exits before `app`
+# starts. It creates `ledgerops_app` and sets its password last (ADR-017);
+# compose only supplies the bootstrap migrate role via the postgres image env.
 # `app` then connects only as `ledgerops_app` (LEDGEROPS_APP_DSN), never as
 # the migrate role.
 services:
@@ -31,22 +29,24 @@ services:
       - "5432:5432"
 
   migrate:
-    image: migrate/migrate:v4.18.3
-    depends_on:
-      postgres:
-        condition: service_healthy
-    volumes:
-      - ./internal/adapters/postgres/migrations:/migrations:ro
-    command:
-      - "-path=/migrations"
-      - "-database=postgres://ledgerops_migrate:migrate-secret@postgres:5432/ledgerops?sslmode=disable"
-      - "up"
-    restart: "no"
-
-  app:
     build:
       context: .
       dockerfile: Dockerfile
+    image: ledgerops:demo
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["migrate"]
+    # The migration credential and the demo app password live here only; the
+    # app service never receives LEDGEROPS_MIGRATE_DSN (no shared env_file or
+    # anchor). app-secret is the demo password, set explicitly.
+    environment:
+      LEDGEROPS_MIGRATE_DSN: postgres://ledgerops_migrate:migrate-secret@postgres:5432/ledgerops?sslmode=disable
+      LEDGEROPS_APP_PASSWORD: app-secret
+    restart: "no"
+
+  app:
+    image: ledgerops:demo
     depends_on:
       migrate:
         condition: service_completed_successfully

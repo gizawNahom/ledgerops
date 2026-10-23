@@ -4,8 +4,9 @@
 # feature's own DISCUSS wave § Outcome KPIs table
 # (docs/feature/ledger-core/feature-delta.md:183 for KPI-1..6, KPI-C1..C3;
 # docs/feature/multitenancy/feature-delta.md § Wave: DISCUSS / Outcome KPIs
-# for KPI-M1..M4). This file adds the DEVOPS layer: where the number comes
-# from, what emits it, and what makes the build fail.
+# for KPI-M1..M4; docs/feature/container-image-release/feature-delta.md §
+# Wave: DISCUSS / Outcome KPIs for KPI-R1..R9). This file adds the DEVOPS layer:
+# where the number comes from, what emits it, and what makes the build fail.
 #
 # Character of this set: nearly all KPIs are CI assertions, not production
 # telemetry. There is no hosted environment for any feature in this project
@@ -121,6 +122,24 @@ kpis:
       the same thing — image pulls may be cached. Treat a CI regression as real
       and a CI pass as necessary-but-not-sufficient. The KPI's stated
       measurement ("timed on a clean machine") stays a periodic manual check.
+    rebaseline:
+      date: "2026-10-17"
+      feature: container-image-release
+      reason: >
+        The image build gains a Node stage that builds and embeds the console
+        (ADR-019, slice 05), so `make up` and the `demo` job build the SPA.
+      before:
+        value_seconds: [71, 70, 68]
+        evidence: "demo step of ci.yml on green main runs 38962444215, 38964268513, 38965301338 (2026-10-16), via the GitHub Actions jobs API"
+      expected_after:
+        value_seconds: 135
+        basis: "local cold measurement in node:22-slim: npm ci 61 s + vite build 3 s added to the ~70 s above. BuildKit npm cache mounts do not help a fresh CI runner (empty cache); the second compose service sharing the image tag is a layer-cache hit"
+        status: "estimate; replace with the measured value when slice 05 lands"
+      target_unchanged: "demo_first_green_seconds < 300 (assertion above)"
+      guardrail:
+        threshold_seconds: 200
+        action: "warn only, same pattern as KPI-1's elapsed_ms guardrail; revisit caching (BuildKit gha cache) if it trips"
+        emitted_by: "ci.yml demo job, step after the timing step: ::warning title=KPI-5 annotation when demo_first_green_seconds > 200; never fails the job"
 
   - id: KPI-C1
     name: Books-balance check without a terminal
@@ -335,6 +354,200 @@ kpis:
       result: "the 3 @console-compat scenarios (within the 18) passing, plus the pre-existing tests/acceptance/ledgercore suite restored to a full pass (296.8s) after OPS-13's fix - the regression proof that unscoped OperatorKey calls to all three named endpoints kept working throughout"
       evidence: "docs/feature/multitenancy/feature-delta.md § Wave: DELIVER / Demo Evidence"
       status: PASS
+
+  # ---- container-image-release (KPI-R1..R9) ---------------------------------
+  # Release-gate and acceptance assertions. No production telemetry exists
+  # (DEVOPS OPS-1); the "dashboard" for each is the release run's job summary
+  # (one table per run). `ci_job` names a job in .github/workflows/release.yml
+  # unless it says ci.yml. Targets: feature-delta.md § DISCUSS / Outcome KPIs
+  # (K1..K7 -> KPI-R1..R7; the US-1b cluster-refusal KPI -> KPI-R8; the US-2
+  # refuse-at-start KPI -> KPI-R9). Wired by DEVOPS 2026-10-17.
+
+  - id: KPI-R1
+    name: Pull to healthy service
+    feature: container-image-release
+    target: "From docker pull to a healthy service in at most 120 s on the CI runner; at most 10 min from pull to first posted transfer by the quickstart"
+    class: gate
+    collected_by:
+      surface: "scripts/smoke (per architecture) and scripts/quickstart, both timing their own run"
+      fields: ["smoke_pull_to_healthy_seconds", "quickstart_pull_to_first_transfer_seconds", "arch"]
+      environment: [image-amd64, image-arm64, fresh-pg16-cluster, ghcr-public-package]
+    assertion: "smoke_pull_to_healthy_seconds <= 120 for every arch AND quickstart_pull_to_first_transfer_seconds <= 600"
+    emitted_as:
+      ci_job: "smoke (per matrix arch); quickstart"
+      summary_line: "smoke_pull_to_healthy_seconds=<n> arch=<amd64|arm64>; quickstart_pull_to_first_transfer_seconds=<n>"
+    fails_build: true
+    acceptance_scenarios:   # DISTILL 2026-10-20; tag @kpi @KPI-R1 in tests/acceptance/containerimagerelease/
+      - "milestone-07-release-pipeline.feature \"The smoke check passes an image that migrates and serves\" (@kpi @KPI-R1)"
+    note: >
+      "Healthy" means the new unauthenticated GET /health answers 200 (a route
+      delivered by this feature, user decision 2026-10-19; it does not exist
+      in the code before the feature).
+      North star (K1). Failing smoke leaves an untagged digest and no version
+      tag (digest-first order, ADR-020). A failing quickstart after release is a
+      red run, not an unpublished release: the document or checker is fixed and
+      the job re-run. The 120 s bound is on a warm CI runner, a proxy for a
+      user's network; treat a regression as real, a pass as necessary only.
+
+  - id: KPI-R2
+    name: Only images that migrate and serve are promoted
+    feature: container-image-release
+    target: "100% of releases pass smoke (and signing and the anonymous-pull probe) before any version tag or latest moves"
+    class: gate
+    collected_by:
+      surface: "structure of release.yml (needs graph) asserted by a test in workflow-guards; promote job summary"
+      fields: ["promote_needs_smoke_and_probe", "all_jobs_need_ci", "if_clauses_complete", "resume_revision_matches", "latest_moved", "move_latest_planned"]
+      environment: [release-ci]
+    assertion: "if_clauses_complete == true (each downstream job's if: is !cancelled() plus an explicit success clause for every dependency) AND (resumed implies resume_revision_matches == true: the existing image's org.opencontainers.image.revision equals the released commit, else classify fails) AND all_jobs_need_ci == true (every job after classify, resume path included) AND promote_needs_smoke_and_probe == true (and sign from slice 07; anon-probe also needs sign) AND (latest_moved implies move_latest_planned)"
+    emitted_as:
+      ci_job: "ci.yml workflow-guards; release.yml promote"
+      summary_line: "needs_ci=<bool> if_clauses_complete=<bool> resume_revision_matches=<bool|n/a> promote_needs=smoke,anon-probe latest_moved=<bool> planned=<bool>"
+    fails_build: true
+    acceptance_scenarios:   # DISTILL 2026-10-20; tag @kpi @KPI-R2 in tests/acceptance/containerimagerelease/
+      - "milestone-07-release-pipeline.feature structural scenarios (needs graph, if clauses, promote needs smoke and anon-probe) and the registry promote scenarios (@KPI-R2)"
+    note: >
+      Added 2026-10-19 (user decision): on the resume path a moved git tag
+      fails the run red at classify via the revision-label comparison (DEVOPS
+      OPS-31).
+      Enforced by construction (job dependencies), then checked structurally so
+      a later edit cannot quietly reorder it. Without the structural test this
+      KPI would be an assertion about intent rather than about the workflow.
+
+  - id: KPI-R3
+    name: App role only accepts a password the operator supplied
+    feature: container-image-release
+    target: "100% refusal of app-secret and 100% login with the supplied password in fresh-database runs; plaintext never in the server log"
+    class: gate
+    collected_by:
+      surface: "acceptance suite in a dedicated cluster; release smoke fresh leg; ddl-logging-cluster run"
+      fields: ["app_secret_login_refused", "supplied_password_login_ok", "plaintext_in_server_log", "observations"]
+      environment: [fresh-pg16-cluster, ddl-logging-cluster, dirty-migration, scram-unicode, rule-b-interrupted]
+    assertion: "app_secret_login_refused == observations AND supplied_password_login_ok == true AND plaintext_in_server_log == false"
+    emitted_as:
+      ci_job: "ci.yml container-acceptance; release.yml smoke"
+      summary_line: "app_secret_login_refused=<n>/<n> supplied_password_login_ok=<bool> plaintext_in_server_log=<bool>"
+    fails_build: true
+    acceptance_scenarios:   # DISTILL 2026-10-20; tag @kpi @KPI-R3 in tests/acceptance/containerimagerelease/
+      - "milestone-01-migrate-with-own-password.feature (@KPI-R3: Rule A watched run, stopped between files, killed in a file, server log, wrong-password)"
+      - "milestone-04-upgrade-existing-database.feature (@KPI-R3: old password stops, Rule B)"
+    note: >
+      DISCUSS classes this a Guardrail; gated here. Rule A is observed after every schema step and after a kill, not only at
+      the end. `observations > 0` is implied by comparing against the count so
+      a harness that observed nothing cannot pass vacuously.
+
+  - id: KPI-R4
+    name: Upgrade in place without data change
+    feature: container-image-release
+    target: "100% of upgrade runs preserve every entry and balance, with a zero trial balance"
+    class: gate
+    collected_by:
+      surface: "upgrade acceptance seeded from the frozen pre-feature migrations; release smoke upgrade leg"
+      fields: ["entries_before", "entries_after", "imbalance_minor", "append_only_holds"]
+      environment: [legacy-demo-db]
+    assertion: "entries_after == entries_before AND imbalance_minor == 0 AND append_only_holds == true"
+    emitted_as:
+      ci_job: "ci.yml container-acceptance; release.yml smoke"
+      summary_line: "upgrade_entries_before=<n> after=<n> imbalance_minor=<n>"
+    fails_build: true
+    acceptance_scenarios:   # DISTILL 2026-10-20; tag @kpi @KPI-R4 in tests/acceptance/containerimagerelease/
+      - "milestone-04-upgrade-existing-database.feature \"An existing demo database is brought current without touching history\" (@KPI-R4)"
+
+  - id: KPI-R5
+    name: Provenance verifiable
+    feature: container-image-release
+    target: "100% of stable releases pass cosign verify and carry a per-platform SBOM attestation, verified anonymously"
+    class: gate
+    collected_by:
+      surface: "sign job verification steps; quickstart job (no registry login)"
+      fields: ["signatures_per_digest_min", "sbom_attestations_per_platform_min", "cert_identity", "signature_storage"]
+      environment: [release-ci, ghcr-public-package]
+    assertion: "signatures_per_digest_min >= 1 over the index digest and every platform digest AND sbom_attestations_per_platform_min >= 1 over every platform digest AND cert_identity matches the published exact-case regex"
+    emitted_as:
+      ci_job: "sign; quickstart (slice 07 onwards)"
+      summary_line: "signatures_per_digest_min=<n> sbom_attestations_per_platform_min=<n> signature_storage=<tag-fallback|referrers|both> identity=<san>"
+    fails_build: true
+    acceptance_scenarios:   # DISTILL 2026-10-20; tag @kpi @KPI-R5 in tests/acceptance/containerimagerelease/
+      - "milestone-08-verify-provenance.feature (@KPI-R5; real-registry scenarios are @requires_external, proven on v0.2.0-rc.1)"
+    note: >
+      User-decided (OPS-24): the published regex uses the exact case
+      gizawNahom. The first rc prints the real certificate identity and the
+      job asserts the regex matches it. `signature_storage` is expected to be
+      tag-fallback on GHCR (referrers endpoint answered 404 on 2026-10-17) and
+      is recorded, not gated, except that `none` fails.
+
+  - id: KPI-R6
+    name: Console served from the image
+    feature: container-image-release
+    target: "100% of published images answer 200 on /console"
+    class: gate
+    collected_by:
+      surface: "release smoke (slice 05 onwards)"
+      fields: ["console_http_status", "arch"]
+      environment: [image-amd64, image-arm64]
+    assertion: "console_http_status == 200 for every arch"
+    emitted_as:
+      ci_job: "smoke"
+      summary_line: "console_http_status=<code> arch=<arch>"
+    fails_build: true
+    acceptance_scenarios:   # DISTILL 2026-10-20; tag @kpi @KPI-R6 in tests/acceptance/containerimagerelease/
+      - "milestone-05-console-and-version.feature \"The console loads from the image with no files mounted\" (@kpi @KPI-R6, @image)"
+
+  - id: KPI-R7
+    name: Both architectures and correct labels
+    feature: container-image-release
+    target: "100% of releases list linux/amd64 and linux/arm64 and carry correct version, revision and source labels"
+    class: gate
+    collected_by:
+      surface: "promote job verification step reading the index and the image config (slice 06)"
+      fields: ["index_platforms", "label_version", "label_revision", "label_source"]
+      environment: [image-amd64, image-arm64, release-ci]
+    assertion: "index_platforms == [linux/amd64, linux/arm64] exactly AND label_version == plan version AND label_revision == tagged commit AND label_source == repository URL"
+    emitted_as:
+      ci_job: "promote"
+      summary_line: "index_platforms=<list> label_version=<v> label_revision=<sha7> label_source=<url>"
+    fails_build: true
+    acceptance_scenarios:   # DISTILL 2026-10-20; tag @kpi @KPI-R7 in tests/acceptance/containerimagerelease/
+      - "milestone-07-release-pipeline.feature \"The release builds both architectures and labels the image from the tag\" (structural) and \"The published index lists both architectures with correct labels\" (@requires_external)"
+    note: >
+      "Exactly" matters: provenance and BuildKit SBOM attestations are off so
+      the index holds no unknown/unknown manifests (DEVOPS OPS-14). Slice 03
+      ships amd64 only; this KPI starts asserting in slice 06.
+
+  - id: KPI-R8
+    name: Second ledgerops database refused, never shared
+    feature: container-image-release
+    target: "100% of second-database runs refuse with role, password and both databases unchanged; 0 concurrent first migrations both succeed"
+    class: gate
+    collected_by:
+      surface: "acceptance suite in a dedicated cluster (US-1b), including the two-simultaneous-runs scenario"
+      fields: ["second_db_attempts", "second_db_refusals", "concurrent_winners", "unchanged_universe"]
+      environment: [role-exists-other-db, same-db-concurrent]
+    assertion: "second_db_refusals == second_db_attempts AND concurrent_winners == 1 AND unchanged_universe == true"
+    emitted_as:
+      ci_job: "ci.yml container-acceptance"
+      summary_line: "second_db_attempts=<n> second_db_refusals=<n>/<n> concurrent_winners=<n> unchanged_universe=<bool>"
+    fails_build: true
+    acceptance_scenarios:   # DISTILL 2026-10-20; tag @kpi @KPI-R8 in tests/acceptance/containerimagerelease/
+      - "milestone-02-one-database-per-cluster.feature (@KPI-R8: second database refused, dropped owner, abandoned claim, two simultaneous migrations)"
+    note: "DISCUSS lists this under the K3 family. `unchanged_universe` is the before/after catalog snapshot diff named in DESIGN's contract shapes."
+
+  - id: KPI-R9
+    name: Misconfiguration refused at start
+    feature: container-image-release
+    target: "100% of missing-variable runs refuse at start; 0 start silently"
+    class: gate
+    collected_by:
+      surface: "acceptance suite (process exit status and message, no database connection made)"
+      fields: ["missing_var_runs", "refused_at_start", "secrets_in_output"]
+      environment: [serve-config, wrong-password-start]
+    assertion: "refused_at_start == missing_var_runs AND secrets_in_output == false"
+    emitted_as:
+      ci_job: "ci.yml container-acceptance"
+      summary_line: "missing_var_runs=<n> refused_at_start=<n> secrets_in_output=<bool>"
+    fails_build: true
+    acceptance_scenarios:   # DISTILL 2026-10-20; tag @kpi @KPI-R9 in tests/acceptance/containerimagerelease/
+      - "milestone-03-refuse-to-start-misconfigured.feature (@KPI-R9: required settings outline, migration credential, key never printed) and milestone-01 \"A mismatched password is caught at app start\""
+    note: "US-2's own KPI; not among K1-K7 but a stated story outcome, so wired rather than left implicit."
 
 runtime_instrumentation:
   # Secondary tier. No hosted environment exists, so these exist to be correct

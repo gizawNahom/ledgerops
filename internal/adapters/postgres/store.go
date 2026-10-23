@@ -25,6 +25,7 @@ import (
 	"embed"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -32,10 +33,12 @@ import (
 	_ "github.com/golang-migrate/migrate/v4/database/postgres"
 	"github.com/golang-migrate/migrate/v4/source/iofs"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"ledgerops/internal/app/ports"
 	"ledgerops/internal/domain"
+	"ledgerops/internal/support"
 )
 
 //go:embed migrations/*.sql
@@ -49,11 +52,28 @@ func newMigrator(privilegedDSN string) (*migrate.Migrate, error) {
 	if err != nil {
 		return nil, fmt.Errorf("loading embedded migrations: %w", err)
 	}
-	m, err := migrate.NewWithSourceInstance("iofs", source, privilegedDSN)
+	m, err := migrate.NewWithSourceInstance("iofs", source, singleStatementDSN(privilegedDSN))
 	if err != nil {
 		return nil, fmt.Errorf("opening migrator as the privileged role: %w", err)
 	}
 	return m, nil
+}
+
+// singleStatementDSN drops x-multi-statement, so golang-migrate sends each file
+// as one query: one implicit transaction, so a run killed mid-file leaves no
+// partial change.
+func singleStatementDSN(dsn string) string {
+	u, err := url.Parse(dsn)
+	if err != nil {
+		return dsn
+	}
+	q := u.Query()
+	if !q.Has("x-multi-statement") {
+		return dsn
+	}
+	q.Del("x-multi-statement")
+	u.RawQuery = q.Encode()
+	return u.String()
 }
 
 func closeMigrator(m *migrate.Migrate) {
@@ -62,49 +82,176 @@ func closeMigrator(m *migrate.Migrate) {
 	_ = dbErr
 }
 
-// Migrate applies the whole migration set as the privileged role. Migrations
-// are expand-only: no migration may DELETE from or drop the entry table, and
-// every schema change must leave the previous binary able to run against the
-// new schema (brief.md § Deployment shape).
-func Migrate(ctx context.Context, privilegedDSN string) error {
-	m, err := newMigrator(privilegedDSN)
+// scramIterations is PostgreSQL's default scram_iterations.
+const scramIterations = 4096
+
+// saltLength is the SCRAM salt size PostgreSQL itself generates.
+const saltLength = 16
+
+// Migrate applies the whole migration set as the privileged role, then sets
+// the app role's login and password last, from a client-built SCRAM verifier.
+// Migrations are expand-only: no migration may DELETE from or drop the entry
+// table, and every schema change must leave the previous binary able to run
+// against the new schema (brief.md § Deployment shape).
+func Migrate(ctx context.Context, privilegedDSN string, appPassword support.Secret) error {
+	return applyAndSetPassword(ctx, privilegedDSN, appPassword, "migrating from zero")
+}
+
+// MigrateStep brings the store to head over existing history, which is how a
+// scenario exercises a migration running over history it may not rewrite.
+//
+// This uses the same idempotent, expand-only m.Up() that Migrate uses, rather
+// than advancing exactly one version with m.Steps(1), which errors ("file does
+// not exist") when none is pending -- the case a scenario built from
+// MigrateFromZero already sits in. Re-running the full set over existing
+// history, proving nothing in it erases an entry, is the contract under test.
+// The password step runs every time, so a rotation applies on re-run.
+func MigrateStep(ctx context.Context, privilegedDSN string, appPassword support.Secret) error {
+	return applyAndSetPassword(ctx, privilegedDSN, appPassword, "applying the newest migration")
+}
+
+func applyAndSetPassword(ctx context.Context, privilegedDSN string, appPassword support.Secret, action string) error {
+	plan, err := preflight(ctx, privilegedDSN, appPassword)
 	if err != nil {
 		return err
+	}
+	if plan.Refused() {
+		return &RefusalError{Plan: plan}
+	}
+	return executePlan(ctx, plan, privilegedDSN, appPassword, action)
+}
+
+// SchemaVersion reports the migration version the database is at.
+func SchemaVersion(privilegedDSN string) (uint, error) {
+	m, err := newMigrator(privilegedDSN)
+	if err != nil {
+		return 0, redactedError(err, support.Secret{})
+	}
+	defer closeMigrator(m)
+
+	version, _, err := m.Version()
+	if err != nil {
+		return 0, redactedError(fmt.Errorf("reading the schema version: %w", err), support.Secret{})
+	}
+	return version, nil
+}
+
+func applySchema(privilegedDSN, action string) error {
+	m, err := newMigrator(privilegedDSN)
+	if err != nil {
+		return redactedError(err, support.Secret{})
 	}
 	defer closeMigrator(m)
 
 	if err := m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
-		return fmt.Errorf("migrating from zero: %w", err)
+		return redactedError(fmt.Errorf("%s: %w", action, err), support.Secret{})
 	}
 	return nil
 }
 
-// MigrateStep applies the newest schema change over existing history, which
-// is how a scenario exercises a migration running over history it may not
-// rewrite.
-//
-// This brings the store to head via the same idempotent, expand-only m.Up()
-// that Migrate uses, rather than advancing exactly one version with
-// m.Steps(1). golang-migrate's Steps(1) seeks a specific next version and
-// errors ("file does not exist") when none is pending, which is exactly the
-// case a scenario built from MigrateFromZero already sits in: the newest
-// schema change was already applied while building the populated history it
-// is now asked to run "over". Modeling this as "bring current" rather than
-// "advance exactly one version" makes re-running the full set over existing
-// history — proving nothing in it erases an entry — the actual contract
-// under test, and it stays correct if a genuinely pending migration exists
-// too: m.Up() applies every migration not yet applied, one included.
-func MigrateStep(ctx context.Context, privilegedDSN string) error {
-	m, err := newMigrator(privilegedDSN)
+// pgErrorDuplicateObject is SQLSTATE 42710: the role already exists.
+const pgErrorDuplicateObject = "42710"
+
+// pgErrorUniqueViolation is SQLSTATE 23505: a concurrent CREATE ROLE that
+// committed first, which the duplicate-name pre-check could not yet see.
+const pgErrorUniqueViolation = "23505"
+
+// claimAppRole creates ledgerops_app NOLOGIN, marked with the database that
+// owns it, before any schema file runs, so no instant exists at which the role
+// can log in. A role that already exists is left as it is.
+func claimAppRole(ctx context.Context, privilegedDSN string) error {
+	conn, err := pgx.Connect(ctx, privilegedDSN)
+	if err != nil {
+		return fmt.Errorf("connecting to claim the app role: %w", err)
+	}
+	defer func() { _ = conn.Close(ctx) }()
+
+	var database string
+	if err := conn.QueryRow(ctx, "SELECT current_database()").Scan(&database); err != nil {
+		return fmt.Errorf("reading the database name: %w", err)
+	}
+	created, err := createMarkedAppRole(ctx, conn, database)
+	if err != nil || created {
+		return err
+	}
+	// The role exists: another run claimed it first, or this database did
+	// earlier. As in the plan's cluster rule, a database already holding the
+	// ledger schema passes; otherwise only the marker decides (DDD-48).
+	marker, ownerExists, err := readRoleOwner(ctx, conn)
 	if err != nil {
 		return err
 	}
-	defer closeMigrator(m)
+	if markedOwner(marker) == database || hasLedgerSchema(ctx, conn) {
+		return nil
+	}
+	return &RefusalError{Plan: ClusterRuleRefusal(database, marker, ownerExists)}
+}
 
-	if err := m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
-		return fmt.Errorf("applying the newest migration: %w", err)
+// createMarkedAppRole creates ledgerops_app NOLOGIN and its owner marker in
+// one committed transaction. It reports false, without error, when the role
+// already exists, including when a concurrent run committed it first.
+func createMarkedAppRole(ctx context.Context, conn *pgx.Conn, database string) (bool, error) {
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		return false, fmt.Errorf("claiming the app role: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if _, err := tx.Exec(ctx, "CREATE ROLE ledgerops_app NOLOGIN"); err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && (pgErr.Code == pgErrorDuplicateObject || pgErr.Code == pgErrorUniqueViolation) {
+			return false, nil
+		}
+		return false, fmt.Errorf("creating the app role: %w", err)
+	}
+	if _, err := tx.Exec(ctx, "COMMENT ON ROLE ledgerops_app IS "+quoteLiteral(OwnerMarker(database))); err != nil {
+		return false, fmt.Errorf("marking the app role with its database: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("claiming the app role: %w", err)
+	}
+	return true, nil
+}
+
+func hasLedgerSchema(ctx context.Context, conn *pgx.Conn) bool {
+	var has bool
+	return conn.QueryRow(ctx, queryHasLedgerSchema).Scan(&has) == nil && has
+}
+
+// pgRolePasswordSetter is the RolePasswordSetter adapter: it sets LOGIN and
+// the finished verifier on ledgerops_app. It never sees the plaintext.
+type pgRolePasswordSetter struct {
+	ctx           context.Context
+	privilegedDSN string
+}
+
+var _ RolePasswordSetter = pgRolePasswordSetter{}
+
+func (s pgRolePasswordSetter) SetVerifier(verifier string) error {
+	conn, err := pgx.Connect(s.ctx, s.privilegedDSN)
+	if err != nil {
+		return fmt.Errorf("connecting to set the app role password: %w", err)
+	}
+	defer func() { _ = conn.Close(s.ctx) }()
+
+	statement := "ALTER ROLE ledgerops_app LOGIN PASSWORD " + quoteLiteral(verifier)
+	if _, err := conn.Exec(s.ctx, statement); err != nil {
+		return fmt.Errorf("setting the app role password: %w", err)
 	}
 	return nil
+}
+
+func quoteLiteral(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
+}
+
+// redactedError keeps DSN passwords and the app password out of error text.
+func redactedError(err error, appPassword support.Secret) error {
+	text := RedactDSN(err.Error())
+	if plaintext := appPassword.Reveal(); plaintext != "" {
+		text = strings.ReplaceAll(text, plaintext, support.RedactionMarker)
+	}
+	return errors.New(text)
 }
 
 // MigrationStatements returns every migration's up-direction SQL by file

@@ -1,0 +1,567 @@
+{
+  "roadmap": {
+    "project_id": "container-image-release",
+    "created_at": "2026-10-20T12:00:00Z",
+    "total_steps": 16,
+    "scope": "Slices 01a, 01b, 02, 03 only (walking skeleton to a usable v0.2.0-rc.1, amd64). Slices 04-08 out of this run by user decision.",
+    "paradigm": "functional (ADR-007): pure planners/parsers/classifier, effects in thin shells",
+    "scenario_files": {
+      "WS": "tests/acceptance/containerimagerelease/walking-skeleton.feature",
+      "M01": "tests/acceptance/containerimagerelease/milestone-01-migrate-with-own-password.feature",
+      "M04": "tests/acceptance/containerimagerelease/milestone-04-upgrade-existing-database.feature",
+      "M02": "tests/acceptance/containerimagerelease/milestone-02-one-database-per-cluster.feature",
+      "M03": "tests/acceptance/containerimagerelease/milestone-03-refuse-to-start-misconfigured.feature",
+      "M06": "tests/acceptance/containerimagerelease/milestone-06-release-classification.feature",
+      "M07": "tests/acceptance/containerimagerelease/milestone-07-release-pipeline.feature",
+      "PF": "internal/adapters/postgres/prefeature/prefeature_test.go",
+      "RP": "internal/release/release_property_test.go"
+    },
+    "in_scope_scenarios": {
+      "acceptance_expanded": 93,
+      "go_tests": 6,
+      "per_file": {
+        "WS": 1,
+        "M01": 27,
+        "M02": 9,
+        "M03": 18,
+        "M04": 5,
+        "M06": 10,
+        "M07": 23
+      }
+    },
+    "deferred_scenarios": {
+      "count": 38,
+      "milestone-04-upgrade-existing-database.feature": "12 remaining of 17 (slice 04); the 5-row privilege outline moved to 01-03",
+      "milestone-05-console-and-version.feature": "all 9 (slice 05)",
+      "milestone-08-verify-provenance.feature": "all 5 (slice 07)",
+      "milestone-09-published-image-docs.feature": "all 7 (slice 08)",
+      "milestone-07-release-pipeline.feature": [
+        "A signing failure fails the release and latest does not move (slice-07)",
+        "Nothing is promoted unless the image was signed and verified (slice-07)",
+        "The release builds both architectures and labels the image from the tag (slice-06)",
+        "Each release page names the image, its digest and how to verify it (slice-06)",
+        "The published index lists both architectures with correct labels (slice-06, external)"
+      ]
+    }
+  },
+  "phases": [
+    {
+      "id": "01",
+      "name": "Slice 01a - Migrate with my own app password (walking skeleton)",
+      "steps": [
+        {
+          "id": "01-01",
+          "name": "Password machinery: edited 0001, SCRAM setter, password-taking migrator",
+          "criteria": [
+            "Migration 0001 creates ledgerops_app with no login and no password, and grants CONNECT on the current database whatever its name",
+            "Migrate and MigrateStep take the app password; the role gains login and password only after the last migration file",
+            "The password reaches the server only as a client-built SCRAM-SHA-256 verifier, Unicode-normalised",
+            "Secret and DSN-derived text never render the password under any formatting or error wrap",
+            "Ledgercore, multitenancy, intertenanttransfer, postgres-adapter and http-adapter suites stay green passing app-secret explicitly"
+          ],
+          "test_file": "internal/adapters/postgres/prefeature/prefeature_test.go",
+          "scenario_name": "TestLiveZeroOneIsPinnedOnceEdited",
+          "scenarios": [
+            "PF :: TestLiveZeroOneIsPinnedOnceEdited"
+          ],
+          "files_to_modify": [
+            "internal/adapters/postgres/migrations/0001_init.up.sql",
+            "internal/adapters/postgres/migrations/0001_init.down.sql",
+            "internal/adapters/postgres/prefeature/prefeature_test.go",
+            "internal/adapters/postgres/store.go",
+            "internal/adapters/postgres/migrate_plan.go",
+            "internal/support/secret.go",
+            "go.mod",
+            "internal/adapters/http/trial_balance_tenant_scope_test.go",
+            "internal/adapters/postgres/testhelper_test.go",
+            "tests/acceptance/ledgercore/ledger_seeding.go",
+            "tests/acceptance/ledgercore/ledger_observations.go",
+            "tests/acceptance/multitenancy/world.go",
+            "tests/acceptance/intertenanttransfer/world.go"
+          ],
+          "implementation_notes": "ADR-017/022, DDD-27/28/47. Edit 0001 once in place; pin its new sha256 in editedZeroOneChecksum and delete the skip. Signature change is compiler-driven across 7 call sites in 6 files (steps_ledger_test.go reaches it via MigrateFromZero). x/text precis becomes a direct dependency. Contract shapes: verifier builder, Secret, redactor pure-function; role setter bounded-change and takes a verifier only, separate port from SchemaMigrator. Unit tests: deterministic vectors plus rapid properties (redactor output never contains the password).",
+          "deps": []
+        },
+        {
+          "id": "01-02",
+          "name": "migrate command sets the operator-supplied app password",
+          "criteria": [
+            "Empty database ends at schema version 6; app role logs in with the supplied password and is refused with app-secret",
+            "Password read from env or file; exactly one trailing line ending removed (line feed, CRLF, none)",
+            "Composed, decomposed and fullwidth forms of one password log in interchangeably",
+            "Demo password refused at every observed instant; server statement log never holds the plaintext",
+            "Cluster changes only by the new app role and ledger schema; no output contains the password"
+          ],
+          "test_file": "tests/acceptance/containerimagerelease/milestone-01-migrate-with-own-password.feature",
+          "scenario_name": "A fresh database is ready with the password the operator chose",
+          "tags": [
+            "@sizing-review-needed"
+          ],
+          "scenarios": [
+            "M01 :: A fresh database is ready with the password the operator chose",
+            "M01 :: A password from a mounted secret file loses only its trailing line ending (3 rows)",
+            "M01 :: A fresh database never accepts the demo password at any point during migrate",
+            "M01 :: The database server log never sees the plaintext password",
+            "M01 :: The same password typed in another Unicode form still logs in (4 rows)"
+          ],
+          "files_to_modify": [
+            "cmd/api/main.go",
+            "cmd/api/config.go",
+            "cmd/api/migrate.go",
+            "internal/adapters/postgres/store.go",
+            "internal/adapters/postgres/migrate_plan.go"
+          ],
+          "implementation_notes": "ADR-018, DDD-30/31. Subcommand dispatcher and ParseMigrateConfig are pure over an env snapshot; password-file reader pure over an injected ReadFile. Order: schema files, then password step last (Rule A by construction). LEDGEROPS_MIGRATE_DSN and LEDGEROPS_APP_PASSWORD[_FILE] read only in the migrate command file (AST test). 10 scenarios, one behaviour: the supplied password is applied and works. Contract shape: bounded-change, state-delta over the catalog universe.",
+          "deps": [
+            "01-01"
+          ]
+        },
+        {
+          "id": "01-03",
+          "name": "Migrate refuses unusable configuration before any change",
+          "criteria": [
+            "Missing, empty or whitespace password: non-zero exit naming both variables, database untouched, app-secret still refused",
+            "Both password sources set: refused naming 'only one', cluster unchanged",
+            "Insufficient privilege found by read-only facts plus rolled-back probes before any schema change, naming the privilege",
+            "Unreachable database reported with the DSN password redacted",
+            "No fallback to app-secret anywhere"
+          ],
+          "test_file": "tests/acceptance/containerimagerelease/milestone-01-migrate-with-own-password.feature",
+          "scenario_name": "Migrate refuses without a usable password",
+          "scenarios": [
+            "M01 :: Migrate refuses without a usable password (3 rows)",
+            "M01 :: Setting both password sources is refused as ambiguous (2 rows)",
+            "M04 :: A privileged role missing one privilege fails clearly before any change (5 rows)"
+          ],
+          "files_to_modify": [
+            "internal/adapters/postgres/migrate_plan.go",
+            "internal/adapters/postgres/migrate_exec.go",
+            "cmd/api/migrate.go",
+            "cmd/api/config.go"
+          ],
+          "implementation_notes": "ADR-022, DDD-39/42. PlanMigration is pure (facts + config in, refusal or ordered plan out); FactReader is SELECT-only, PreflightProber is write-capable and always rolled back, separate ports. The M04 privilege outline (5 gaps: cannot create roles, no admin option, no database ownership/grant, no CREATE on public, table owned by another role) is pulled into this slice; it uses a non-superuser fixture. Also table-test every refusal reason and add a probe per driven adapter (structural test).",
+          "deps": [
+            "01-02"
+          ]
+        },
+        {
+          "id": "01-04",
+          "name": "Interrupted migrations: no demo login, dirty state refused",
+          "criteria": [
+            "Run killed between two files: schema at version 3, nothing unfinished, app-secret refused",
+            "Re-run after a between-files kill completes and the supplied password works",
+            "Run killed during a file: migration flagged unfinished, no partial change, app-secret refused",
+            "Re-run on a dirty version refuses naming it and changes nothing; no force option exists"
+          ],
+          "test_file": "tests/acceptance/containerimagerelease/milestone-01-migrate-with-own-password.feature",
+          "scenario_name": "A run killed between two migration files leaves no demo password behind",
+          "scenarios": [
+            "M01 :: A run killed between two migration files leaves no demo password behind",
+            "M01 :: A run killed between two migration files completes when migrate is run again",
+            "M01 :: A run killed during a migration file leaves an unfinished migration and no partial change",
+            "M01 :: Migrate refuses to continue from an interrupted migration"
+          ],
+          "files_to_modify": [
+            "internal/adapters/postgres/migrate_plan.go",
+            "internal/adapters/postgres/migrate_exec.go",
+            "cmd/api/migrate.go"
+          ],
+          "implementation_notes": "ADR-017, DDD-29. Dirty-state detector is pure: (version, dirty) in, refusal naming the version out. Premise guarded by the kill-mid-file scenario (one implicit transaction per file). The DSN given to golang-migrate never carries x-multi-statement (test). Unit-level coverage only (no acceptance scenario): dirty detector table tests and the no-force-option check.",
+          "deps": [
+            "01-03"
+          ]
+        },
+        {
+          "id": "01-05",
+          "name": "Image ships migrate; demo stack migrates through it",
+          "criteria": [
+            "Non-root image runs migrate from a world-readable secret file and prepares the database",
+            "A secret file unreadable by the image user gives a named error and leaves the cluster unchanged",
+            "Dockerfile pins every base by digest, cross-compiles on the build platform, runs as 65532 with no step after the final FROM",
+            "Demo compose runs the image's migrate with app-secret and the migrate DSN; app never receives the migrate DSN",
+            "make up and the demo CI job still pass"
+          ],
+          "test_file": "tests/acceptance/containerimagerelease/milestone-01-migrate-with-own-password.feature",
+          "scenario_name": "The published image prepares a database from a world-readable secret file",
+          "scenarios": [
+            "M01 :: The published image prepares a database from a world-readable secret file",
+            "M01 :: A secret file the image user cannot read gives a named error",
+            "M07 :: The image is built from pinned bases, cross-compiled, non-root and without a step in the final stage",
+            "M03 :: The demo stack gives the migration credential to migrate only"
+          ],
+          "files_to_modify": [
+            "Dockerfile",
+            "docker-compose.yml",
+            "docker-compose.loadtest.yml"
+          ],
+          "implementation_notes": "DDD-34/44, DEVOPS compose consequences. Compose migrate becomes build: . with command [migrate], env LEDGEROPS_MIGRATE_DSN (bootstrap superuser) and LEDGEROPS_APP_PASSWORD=app-secret on migrate only; same image tag for migrate and app; no env_file or YAML anchor shared with app; remove migrate/migrate image and bind mount. Dockerfile: alpine:3.24 digest-pinned, golang stage FROM --platform=$BUILDPLATFORM, GOOS/GOARCH from TARGETOS/TARGETARCH, CA bundle copied from build stage. go build carries -tags console_embed (asserted by M07; inert until slice 05 adds the embed pair).",
+          "deps": [
+            "01-03"
+          ]
+        },
+        {
+          "id": "01-06",
+          "name": "Serve path: health liveness, wrong-password refusal, walking skeleton",
+          "criteria": [
+            "GET /health needs no credentials, answers 200 with a fixed body, no ledger data, no database access",
+            "Priya's first transfer posts on her own database and password; app-secret is refused",
+            "Wrong app password at start exits non-zero naming ledgerops_app and 'authentication failed' without echoing any password",
+            "Operator key accepted for provisioning on a healthy start"
+          ],
+          "test_file": "tests/acceptance/containerimagerelease/walking-skeleton.feature",
+          "scenario_name": "Priya posts a first transfer on ledgerops running against her own database and password",
+          "scenarios": [
+            "WS :: Priya posts a first transfer on ledgerops running against her own database and password",
+            "M03 :: A correctly configured ledgerops starts and answers health without credentials",
+            "M01 :: A mismatched password is caught at app start, not at the first request"
+          ],
+          "files_to_modify": [
+            "internal/adapters/http/router.go",
+            "internal/adapters/http/handlers.go",
+            "cmd/api/main.go",
+            "cmd/api/config.go"
+          ],
+          "implementation_notes": "DDD-52 (D16), DDD-32. /health mounted beside /metrics outside requireOperatorKey; contract shape pure-function; remove its scaffold. Startup classifier pure: (error, DSN user) to named refusal on SQLSTATE 28P01, emitted as health.startup.refused. Pulled forward from slice 02 because the walking skeleton asserts /health. Serve dispatch keeps today's env behaviour; validation arrives in 03-01.",
+          "deps": [
+            "01-02"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "02",
+      "name": "Slice 01b - One ledgerops database per cluster",
+      "steps": [
+        {
+          "id": "02-01",
+          "name": "Cluster rule: refuse a second ledgerops database",
+          "criteria": [
+            "First ledgerops database in a cluster accepts any name",
+            "Fresh migrate refused when ledgerops_app exists; role, password and both databases unchanged",
+            "Refusal names the remedies, including privileged DROP ROLE when the owning database no longer exists",
+            "Migrate against the owning or demo-created database is not refused",
+            "Output never contains the password in any of five failure situations"
+          ],
+          "test_file": "tests/acceptance/containerimagerelease/milestone-02-one-database-per-cluster.feature",
+          "scenario_name": "A second ledgerops database in the same cluster is refused",
+          "tags": [
+            "@sizing-review-needed"
+          ],
+          "scenarios": [
+            "M02 :: The first ledgerops database in a cluster can have any name",
+            "M02 :: A second ledgerops database in the same cluster is refused",
+            "M02 :: Running migrate again against the owning database is not refused",
+            "M02 :: The refusal names the privileged remedy when the owning database no longer exists",
+            "M02 :: A second database is refused even when the first was created by the demo stack",
+            "M01 :: Migrate output never contains the password, whatever goes wrong (5 rows)"
+          ],
+          "files_to_modify": [
+            "internal/adapters/postgres/migrate_plan.go",
+            "internal/adapters/postgres/migrate_exec.go"
+          ],
+          "implementation_notes": "DDD-41/48, ADR-017. Role claim: create ledgerops_app NOLOGIN with owner-database marker (COMMENT ON ROLE) in its own committed transaction; PlanMigration gains the cluster-rule refusal. The M01 outline is mapped here because its fifth row (cluster already holds another ledgerops database) only turns green with this rule. Contract shape: role claim bounded-change. Unit-level coverage only (no acceptance scenario): every cluster-rule refusal reason and remedy text in PlanMigration table tests.",
+          "deps": [
+            "01-04"
+          ]
+        },
+        {
+          "id": "02-02",
+          "name": "Atomic role claim survives abandoned and concurrent runs",
+          "criteria": [
+            "Two simultaneous first migrations in one cluster: exactly one succeeds, loser refuses with the cluster-rule message, neither dirty",
+            "Two simultaneous migrations of the same database end consistent",
+            "Abandoned claim refuses a different database",
+            "Abandoned claim resumes against its own database"
+          ],
+          "test_file": "tests/acceptance/containerimagerelease/milestone-02-one-database-per-cluster.feature",
+          "scenario_name": "Two simultaneous first migrations in one cluster cannot both claim the role",
+          "scenarios": [
+            "M02 :: A first run abandoned after claiming the role refuses a different database",
+            "M02 :: A first run abandoned after claiming the role resumes against its own database",
+            "M02 :: Two simultaneous first migrations in one cluster cannot both claim the role",
+            "M02 :: Two simultaneous migrations of the same database end consistent"
+          ],
+          "files_to_modify": [
+            "internal/adapters/postgres/migrate_exec.go",
+            "internal/adapters/postgres/migrate_plan.go"
+          ],
+          "implementation_notes": "DDD-48. No advisory lock (keys are per-database). Loser of the race gets duplicate-object 42710, re-reads the marker and refuses; a re-run against the marked database resumes. Learning hypothesis: a Go-side check cannot be raced; if two runs both pass, move the claim into a single atomic statement.",
+          "deps": [
+            "02-01"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "03",
+      "name": "Slice 02 - Know immediately when the image is misconfigured",
+      "steps": [
+        {
+          "id": "03-01",
+          "name": "Serve refuses missing or blank required settings, all at once",
+          "criteria": [
+            "Each missing, empty or whitespace-only required variable exits 1 naming it, with no database connection attempted",
+            "All missing required variables reported together under one 'config invalid' message",
+            "The image started with no settings lists what is missing",
+            "Unknown subcommand refused naming serve, migrate and version",
+            "No DSN or key value in any output"
+          ],
+          "test_file": "tests/acceptance/containerimagerelease/milestone-03-refuse-to-start-misconfigured.feature",
+          "scenario_name": "A missing or blank required setting is refused at start",
+          "tags": [
+            "@sizing-review-needed"
+          ],
+          "scenarios": [
+            "M03 :: A missing or blank required setting is refused at start (6 rows)",
+            "M03 :: All missing settings are reported together",
+            "M03 :: The published image started with no settings lists what is missing",
+            "M03 :: An unknown subcommand is refused with the list of commands"
+          ],
+          "files_to_modify": [
+            "cmd/api/config.go",
+            "cmd/api/main.go"
+          ],
+          "implementation_notes": "ADR-018, DDD-31. LoadServeConfig and ParseArgs are pure (env snapshot in, config plus every issue out); blank equals unset. Required: LEDGEROPS_APP_DSN, LEDGEROPS_OPERATOR_KEY. Fully configured start behaves exactly as before (demo and acceptance harnesses that start serve with partial env are the learning hypothesis).",
+          "deps": [
+            "01-06"
+          ]
+        },
+        {
+          "id": "03-02",
+          "name": "Serve env contract: no migrate credential, demo key optional",
+          "criteria": [
+            "LEDGEROPS_MIGRATE_DSN present in serve's environment exits 1 naming it, no connection attempted, host and image",
+            "Presence only is checked; the value is never read, logged or forwarded",
+            "Unset or empty demo tenant key starts healthy with the demo mapping off",
+            "A set demo tenant key still resolves to the pre-existing demo tenant",
+            "No key or connection value printed on any refusal"
+          ],
+          "test_file": "tests/acceptance/containerimagerelease/milestone-03-refuse-to-start-misconfigured.feature",
+          "scenario_name": "The serving process refuses to hold the migration credential",
+          "scenarios": [
+            "M03 :: The serving process refuses to hold the migration credential",
+            "M03 :: The published image refuses to start with the migration credential in its environment",
+            "M03 :: The demo tenant key is optional and its mapping stays off when unset (2 rows)",
+            "M03 :: A set demo tenant key still works for the demo stack",
+            "M03 :: Key and connection values are never printed when ledgerops refuses (2 rows)"
+          ],
+          "files_to_modify": [
+            "cmd/api/config.go",
+            "cmd/api/main.go"
+          ],
+          "implementation_notes": "DDD-31, ADR-018 item 4. refuseIfMigrateDSNPresent is pure over a lookup function; the sole allowed non-migrate-file mention of LEDGEROPS_MIGRATE_DSN (AST test names this site). Serve path must not import the migrator.",
+          "deps": [
+            "03-01"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "04",
+      "name": "Slice 03 - Pull a pinned release from GHCR (amd64)",
+      "steps": [
+        {
+          "id": "04-01",
+          "name": "Release classifier and releaseplan program",
+          "criteria": [
+            "First stable release plans exact, minor and latest; prerelease plans the exact tag only and never moves latest",
+            "Patch moves the minor tag; backport moves its minor tag but not latest",
+            "Signature and attestation tags in the package are not versions; re-running a published version resumes",
+            "Non-strict tags (v1.2, 1.2.3, v1.2.3.4, nightly-*) rejected as not a version tag",
+            "Five classifier properties hold; scaffold skip removed"
+          ],
+          "test_file": "tests/acceptance/containerimagerelease/milestone-06-release-classification.feature",
+          "scenario_name": "The first stable release gets exact, minor and latest tags",
+          "tags": [
+            "@sizing-review-needed"
+          ],
+          "scenarios": [
+            "M06 :: The first stable release gets exact, minor and latest tags",
+            "M06 :: A prerelease never moves latest or the minor tag",
+            "M06 :: A patch moves the minor tag but keeps the old exact tag",
+            "M06 :: A backport moves its minor tag but not latest",
+            "M06 :: Signature and attestation tags in the package are not versions",
+            "M06 :: Re-running a published version resumes it",
+            "M06 :: Only strict version tags are release tags (4 rows: v1.2, 1.2.3, v1.2.3.4, nightly-2026-10-17)",
+            "RP :: TestLatestMovesOnlyForTheHighestStable",
+            "RP :: TestPrereleaseNeverMovesLatestOrMinor",
+            "RP :: TestNonVersionTagsNeverChangeThePlan",
+            "RP :: TestMinorTagNeverMovesToALowerPatch",
+            "RP :: TestRerunPlansTheSameTagsAndResumes"
+          ],
+          "files_to_modify": [
+            "internal/release/release.go",
+            "internal/release/release_property_test.go",
+            "scripts/releaseplan/main.go"
+          ],
+          "implementation_notes": "ADR-020, DDD-36/50. Classify is pure: (tag, existing registry tags) to ReleasePlan. Output contract: key=value lines version, tags, prerelease, move_latest, highest_stable, resumed. Only strict semver and latest count as existing versions. All 10 acceptance examples drive the real releaseplan subprocess; the 5 properties are layer-1 rapid tests. Classifier is complete (minor/latest tags) because the plan is data; slice 06 only wires extra tags. Delete the LEDGEROPS_RUN_PENDING skip.",
+          "deps": []
+        },
+        {
+          "id": "04-02",
+          "name": "Resume path compares image revision label to commit",
+          "criteria": [
+            "Resumed tag whose image revision label differs from the commit being released exits non-zero naming both commits",
+            "Missing label on the resumed image also fails",
+            "Matching label proceeds and plan reports resumed with the existing digest",
+            "A moved tag never changes the published image (external, skips unless opted in)"
+          ],
+          "test_file": "tests/acceptance/containerimagerelease/milestone-07-release-pipeline.feature",
+          "scenario_name": "A resumed release whose published image came from another commit is refused",
+          "scenarios": [
+            "M07 :: A resumed release whose published image came from another commit is refused",
+            "M07 :: A version tag moved to another commit never changes the published image (requires_external)"
+          ],
+          "files_to_modify": [
+            "scripts/releaseplan/main.go",
+            "internal/release/release.go"
+          ],
+          "implementation_notes": "DDD-45, OPS-31 (user decision 2026-10-19). Flags --image-repo and --commit; registry read is a thin shell over a pure comparison of two commit strings. Contract shape: unbounded-preservation (refusal changes nothing, no tag created). The external scenario is green only with LEDGEROPS_EXTERNAL set (otherwise it skips); the step's local gate is the @registry scenario. It is proven on the real v0.2.0-rc.1.",
+          "deps": [
+            "04-01"
+          ]
+        },
+        {
+          "id": "04-03",
+          "name": "Smoke harness and published-image example",
+          "criteria": [
+            "Smoke pulls an image by digest, migrates a fresh Postgres with a generated password, starts it with generated keys and requires /health 200",
+            "Smoke prints smoke_pull_to_healthy_seconds and the architecture",
+            "An image that cannot migrate fails smoke at the migrate step and no version tag exists",
+            "Published-image example compose carries no demo credential and pins the image by digest"
+          ],
+          "test_file": "tests/acceptance/containerimagerelease/milestone-07-release-pipeline.feature",
+          "scenario_name": "The smoke check passes an image that migrates and serves",
+          "scenarios": [
+            "M07 :: The smoke check passes an image that migrates and serves",
+            "M07 :: The smoke check fails an image that cannot migrate a fresh database",
+            "M07 :: The published-image example uses no demo credential"
+          ],
+          "files_to_modify": [
+            "scripts/smoke/main.go",
+            "examples/published-image/docker-compose.yml",
+            "internal/support/scaffold.go"
+          ],
+          "implementation_notes": "DDD-46, DEVOPS smoke inputs. Fresh leg only; upgrade leg is slice 04 (deferred). Postgres via Testcontainers, image ref read from the example compose, pinned postgres:16 digest. Contract shape: bounded-change over ephemeral containers; registry access pull-only. Last scaffold consumer: remove scaffold.go and confirm no SCAFFOLD marker remains under internal, cmd, scripts.",
+          "deps": [
+            "01-05",
+            "03-01"
+          ]
+        },
+        {
+          "id": "04-04",
+          "name": "release.yml: gated, serial, digest-first build",
+          "criteria": [
+            "Trigger is strict version-tag push only; permissions default read-only; release group serialised, never cancels",
+            "ci is in the needs of every job after classify, and every if starts with not-cancelled and names a success clause per dependency",
+            "build pushes one untagged index by digest, provenance and SBOM off, skipped on resume (unit-level coverage); every run prints image_digest and source",
+            "Only build, sign and promote may write packages; no run script interpolates workflow expressions",
+            "Classify job runs releaseplan once, tolerating the first-run registry 404 as the empty set (unit-level coverage only)"
+          ],
+          "test_file": "tests/acceptance/containerimagerelease/milestone-07-release-pipeline.feature",
+          "scenario_name": "Every release job waits for the full test suite, resumed runs included",
+          "scenarios": [
+            "M07 :: Only strict version tag pushes start a release",
+            "M07 :: Every release job waits for the full test suite, resumed runs included",
+            "M07 :: Every job names each of its dependencies in its condition",
+            "M07 :: The build pushes one untagged index by digest, and runs report their digest",
+            "M07 :: Releases are serialised and never cancel one another",
+            "M07 :: Release scripts never interpolate the tag into shell",
+            "M07 :: Permissions are the least each job needs"
+          ],
+          "files_to_modify": [
+            ".github/workflows/release.yml",
+            ".github/workflows/ci.yml"
+          ],
+          "implementation_notes": "ADR-020, DDD-35/37/49, DEVOPS outline jobs 1-3. Path .github/workflows/release.yml is a public interface. Every uses: by full SHA (pins section), checkout persist-credentials false, tag read through env TAG only. build is amd64 only in this run. These seven structural properties are mapped to the earliest step where release.yml can satisfy them; 04-05 and 04-06 must keep them green. The 'only strict tags' scenario also asserts ci.yml has workflow_call, branches-only push, and workflow-guards and container-acceptance jobs (needs integration), so this step makes those ci.yml edits (the called ci job needs workflow_call anyway); 04-06 completes the rest of ci.yml. Criteria 3 (build skipped on resume) and 5 (classify tolerating the first-run 404) have no acceptance scenario: unit-level coverage only (releaseplan/classifier tests).",
+          "deps": [
+            "04-02",
+            "01-05"
+          ]
+        },
+        {
+          "id": "04-05",
+          "name": "Smoke, anonymous probe, idempotent promote, release page",
+          "criteria": [
+            "smoke, anon-probe and promote need ci, and promote needs smoke and anon-probe; github-release needs promote and ci",
+            "Promote tags the built digest with every planned tag and resolves each to that digest",
+            "An existing version tag on another image is never overwritten; no other tag is created",
+            "Stale plan refused with 'plan stale, re-run all jobs' before any tag moves; partial promotion completes on re-run",
+            "Anonymous probe requests the digest manifest with no token and fails with the OQ-7 runbook message on 401 or 404 (unit-level coverage only)"
+          ],
+          "test_file": "tests/acceptance/containerimagerelease/milestone-07-release-pipeline.feature",
+          "scenario_name": "A stable release promotes exact, minor and latest on the built digest",
+          "scenarios": [
+            "M07 :: Nothing is promoted unless the smoke check and the anonymous pull probe passed",
+            "M07 :: No release page is created unless promotion completed",
+            "M07 :: A stable release promotes exact, minor and latest on the built digest",
+            "M07 :: A published version is never silently overwritten",
+            "M07 :: A stale plan is refused before any tag moves",
+            "M07 :: A partially promoted release is completed on re-run"
+          ],
+          "files_to_modify": [
+            ".github/workflows/release.yml"
+          ],
+          "implementation_notes": "DEVOPS jobs 4, 6, 7 (+8 minimal). smoke matrix amd64 only, packages: read. promote: no checkout, packages: write, imagetools with sha256-checked plugin, env contract IMAGE_REPO, IMAGE_DIGEST, PLAN_VERSION, PLAN_TAGS, PLAN_MOVE_LATEST, PLAN_HIGHEST_STABLE; digest-preservation and stale-plan guards. Acceptance runs the promote run-steps against a local registry:2. github-release is a minimal job (needs/if only plus prerelease-aware gh release create); notes template is slice 06.",
+          "deps": [
+            "04-03",
+            "04-04"
+          ]
+        },
+        {
+          "id": "04-06",
+          "name": "ci.yml as release gate; pinned workflows; guard jobs",
+          "criteria": [
+            "ci.yml runs on branch pushes and pull requests and is callable; tag pushes no longer trigger it",
+            "Every uses: in release, ci, nightly and load-test workflows is pinned to a full commit SHA",
+            "workflow-guards job runs the structural checks and container-acceptance job needs integration; both required",
+            "unit job also covers cmd, internal/support and internal/release"
+          ],
+          "test_file": "tests/acceptance/containerimagerelease/milestone-07-release-pipeline.feature",
+          "scenario_name": "Every action in every workflow is pinned to a full commit",
+          "scenarios": [
+            "M07 :: Every action in every workflow is pinned to a full commit (4 rows)"
+          ],
+          "files_to_modify": [
+            ".github/workflows/ci.yml",
+            ".github/workflows/nightly.yml",
+            ".github/workflows/load-test.yml",
+            ".github/zizmor.yml"
+          ],
+          "implementation_notes": "DEVOPS ci.yml changes table, DDD-44/51, OPS-8/16/28 (Node 22 console change is slice 05). Strict-tags scenario moved to 04-04. push branches ['**'], top-level permissions contents read, persist-credentials false. workflow-guards: zizmor hash-pin policy, Dockerfile FROM digests and topology, console_embed tag, prefeature import guard, release.yml needs/if checks. Arm64, console embed run and KPI-5 emitter parts of the table belong to later slices. First rc tag is the real end-to-end proof; owner makes GHCR package public (OQ-7) before anon-probe passes.",
+          "deps": [
+            "04-05"
+          ]
+        }
+      ]
+    }
+  ],
+  "implementation_scope": {
+    "source_directories": [
+      "cmd/api/",
+      "internal/adapters/postgres/",
+      "internal/adapters/http/",
+      "internal/support/",
+      "internal/release/",
+      "scripts/releaseplan/",
+      "scripts/smoke/",
+      "examples/published-image/",
+      ".github/workflows/"
+    ],
+    "test_directories": [
+      "tests/acceptance/containerimagerelease/",
+      "internal/adapters/postgres/prefeature/",
+      "internal/release/"
+    ],
+    "excluded_patterns": [
+      "*.pb.go",
+      "vendor/**",
+      "internal/adapters/postgres/prefeature/*.sql"
+    ]
+  },
+  "validation": {
+    "status": "approved",
+    "reviewer": "nw-acceptance-designer-reviewer",
+    "approved_at": "2026-10-20"
+  }
+}

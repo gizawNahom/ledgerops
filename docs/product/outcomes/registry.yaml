@@ -300,3 +300,272 @@ outcomes:
   related:
   - OUT-11
   superseded_by: null
+- id: OUT-15
+  kind: operation
+  summary: '`ledgerops migrate` prepares a database: applies the migration set and sets the app role password
+    the operator supplied (DDD-28, ADR-017).'
+  feature: container-image-release
+  inputs:
+  - shape: env LEDGEROPS_MIGRATE_DSN (privileged) plus exactly one of LEDGEROPS_APP_PASSWORD / LEDGEROPS_APP_PASSWORD_FILE
+  output:
+    shape: exit 0 reporting "schema at version <n>" and "app role password set|updated" / "no pending
+      migrations"; non-zero naming every cause otherwise; never prints a secret
+  keywords:
+  - migrate
+  - password
+  - schema
+  - idempotent
+  - rotation
+  artifact: cmd/api (migrate command), internal/adapters/postgres (SchemaMigrator, RolePasswordSetter);
+    RED scaffold today (cmd/api/config.go, internal/adapters/postgres/migrate_plan.go)
+  related:
+  - OUT-20
+  - OUT-21
+  - OUT-22
+  - OUT-23
+  superseded_by: null
+- id: OUT-16
+  kind: operation
+  summary: '`ledgerops serve` refuses to start on a misconfigured environment and names every problem
+    (DDD-31, D9 revised).'
+  feature: container-image-release
+  inputs:
+  - shape: env LEDGEROPS_APP_DSN, LEDGEROPS_OPERATOR_KEY (required), LEDGEROPS_DEMO_TENANT_KEY (optional),
+      LEDGEROPS_MIGRATE_DSN (must be absent)
+  output:
+    shape: exit 1 with one "config invalid" message listing every missing variable, before any database
+      connection; blank and whitespace count as unset; wrong app password at start is a named refusal
+      (SQLSTATE 28P01)
+  keywords:
+  - serve
+  - config
+  - fail-fast
+  - startup
+  - refusal
+  artifact: cmd/api (LoadServeConfig, refuseIfMigrateDSNPresent, ClassifyStartupError); RED scaffold today
+    (cmd/api/config.go)
+  related:
+  - OUT-27
+  - OUT-28
+  superseded_by: null
+- id: OUT-17
+  kind: operation
+  summary: '`ledgerops version` prints the release and commit stamped at build time (ADR-018, ADR-019).'
+  feature: container-image-release
+  inputs:
+  - shape: argv "version" with an empty environment
+  output:
+    shape: '"ledgerops <version> (commit <short>)" or "dev (commit unknown)" for an unstamped build, exit
+      0'
+  keywords:
+  - version
+  - ldflags
+  - build
+  artifact: cmd/api (version command, main.version / main.commit); not built
+  related: []
+  superseded_by: null
+- id: OUT-18
+  kind: operation
+  summary: '`release.Classify` maps (pushed tag, tags in the registry package) to a ReleasePlan (DDD-36,
+    DDD-50).'
+  feature: container-image-release
+  inputs:
+  - shape: a git tag and the raw tag list of the registry package (404 for an unknown package is the empty
+      list)
+  output:
+    shape: ReleasePlan{version, tags, prerelease, moveLatest, highestStable, resumed} or ErrNotAVersionTag;
+      signature and non-version tags are ignored
+  keywords:
+  - release
+  - semver
+  - latest
+  - backport
+  - classifier
+  artifact: internal/release; RED scaffold today (internal/release/release.go)
+  related:
+  - OUT-26
+  superseded_by: null
+- id: OUT-19
+  kind: invariant
+  summary: 'One ledgerops database per Postgres cluster: a fresh migrate refuses when ledgerops_app already
+    exists in the cluster; the role claim is atomic (DDD-41, DDD-48).'
+  feature: container-image-release
+  inputs:
+  - shape: migrate against an empty database in a cluster that already has ledgerops_app, or two simultaneous
+      first migrations
+  output:
+    shape: refusal naming the conflict and the remedies (migrate the owning database, use a separate cluster,
+      DROP ROLE ledgerops_app when the owner no longer exists); exactly one concurrent winner; role, password
+      and both databases unchanged
+  keywords:
+  - cluster
+  - role-claim
+  - pg_authid
+  - concurrency
+  artifact: internal/adapters/postgres (role claim, PlanMigration); RED scaffold today (migrate_plan.go)
+  related:
+  - OUT-15
+  superseded_by: null
+- id: OUT-20
+  kind: invariant
+  summary: 'Rule A: on a database a migrate run created, ledgerops_app accepts no password the operator
+    did not supply, at any instant, including after a crash (ADR-017).'
+  feature: container-image-release
+  inputs:
+  - shape: any observation during or after a fresh migrate, killed or not
+  output:
+    shape: login with app-secret refused at every observation; role is NOLOGIN until the password step;
+      plaintext never reaches the server log
+  keywords:
+  - rule-a
+  - nologin
+  - scram
+  - demo-password
+  artifact: internal/adapters/postgres (0001 edited, claim-first, SCRAM verifier); not built
+  related:
+  - OUT-15
+  - OUT-25
+  superseded_by: null
+- id: OUT-21
+  kind: invariant
+  summary: 'Rule B: a pre-feature database keeps accepting app-secret until a migrate run completes the
+    password step; a failed or interrupted run says so (ADR-017).'
+  feature: container-image-release
+  inputs:
+  - shape: migrate with a new password fails or is killed before the password step on a legacy database
+  output:
+    shape: app-secret still works, output states the password was not changed, history untouched
+  keywords:
+  - rule-b
+  - upgrade
+  - legacy
+  - append-only
+  artifact: 'internal/adapters/postgres (Plan ordering: password step last); not built'
+  related:
+  - OUT-15
+  superseded_by: null
+- id: OUT-22
+  kind: specification
+  summary: Supported minimum privilege set for the migrate role, checked before any change (ADR-022).
+  feature: container-image-release
+  inputs:
+  - shape: migrate run by a non-superuser role missing one privilege
+  output:
+    shape: non-zero exit naming the missing privilege and "no changes applied"; catalog snapshot identical
+  keywords:
+  - privilege
+  - preflight
+  - createrole
+  - admin-option
+  artifact: internal/adapters/postgres (PlanMigration, FactReader, PreflightProber); RED scaffold today
+  related:
+  - OUT-15
+  superseded_by: null
+- id: OUT-23
+  kind: specification
+  summary: 'Password sources: exactly one of LEDGEROPS_APP_PASSWORD / _FILE, blank is unset, one trailing
+    newline stripped (DDD-31).'
+  feature: container-image-release
+  inputs:
+  - shape: env snapshot and an injected file reader
+  output:
+    shape: a Secret or an issue list; both set refuses even if equal; unreadable file is a named error
+  keywords:
+  - password-file
+  - secret
+  - config
+  artifact: cmd/api (ParseMigrateConfig); RED scaffold today
+  related:
+  - OUT-15
+  superseded_by: null
+- id: OUT-24
+  kind: operation
+  summary: '`GET /health` is an unauthenticated liveness route with a fixed body and no ledger data (user-decided
+    2026-10-19).'
+  feature: container-image-release
+  inputs:
+  - shape: GET /health with no credentials
+  output:
+    shape: 200 with a fixed body; never carries entries, balances, tenants or keys
+  keywords:
+  - health
+  - liveness
+  - unauthenticated
+  artifact: internal/adapters/http/router.go (scaffold("health")); RED scaffold today
+  related: []
+  superseded_by: null
+- id: OUT-25
+  kind: specification
+  summary: SCRAM-SHA-256 verifier builder with SASLprep normalisation and injected salt and iterations
+    (DDD-47).
+  feature: container-image-release
+  inputs:
+  - shape: password Secret, salt, iteration count
+  output:
+    shape: a PostgreSQL-acceptable verifier; composed, decomposed and fullwidth forms of one password
+      all log in with a real client
+  keywords:
+  - scram
+  - saslprep
+  - unicode
+  - verifier
+  artifact: internal/adapters/postgres (BuildSCRAMVerifier); RED scaffold today
+  related:
+  - OUT-20
+  superseded_by: null
+- id: OUT-26
+  kind: invariant
+  summary: Only images that migrate, serve, verify and are publicly pullable are promoted; ci gates every
+    path; tags are never overwritten (ADR-020, OPS-14, OPS-29).
+  feature: container-image-release
+  inputs:
+  - shape: release.yml job graph and promote inputs
+  output:
+    shape: every job after classify needs ci; promote needs smoke, anon-probe (and sign); a different
+      digest or a stale plan is refused before any tag moves
+  keywords:
+  - release
+  - needs-graph
+  - promote
+  - immutability
+  artifact: .github/workflows/release.yml (not built); structural tests in tests/acceptance/containerimagerelease
+  related:
+  - OUT-18
+  superseded_by: null
+- id: OUT-27
+  kind: invariant
+  summary: The serving process never holds the migration credential and refuses to start if LEDGEROPS_MIGRATE_DSN
+    is present (ADR-018 item 4, OPS-10).
+  feature: container-image-release
+  inputs:
+  - shape: serve with LEDGEROPS_MIGRATE_DSN in the environment, or a compose app service sharing an env
+      file
+  output:
+    shape: exit 1 naming the variable before any database connection; the demo compose app service never
+      receives it
+  keywords:
+  - migrate-dsn
+  - ops-10
+  - env-file
+  artifact: cmd/api (refuseIfMigrateDSNPresent); docker-compose.yml
+  related:
+  - OUT-16
+  superseded_by: null
+- id: OUT-28
+  kind: invariant
+  summary: No password, key or DSN value appears in any output, on any path (ADR-018 item 6).
+  feature: container-image-release
+  inputs:
+  - shape: sentinel secrets in every environment variable across success and every failure path
+  output:
+    shape: stdout, stderr and the database server log contain none of them
+  keywords:
+  - secret
+  - redaction
+  - sentinel
+  - logging
+  artifact: internal/support (Secret), internal/adapters/postgres (RedactDSN); RED scaffold today
+  related:
+  - OUT-15
+  - OUT-16
+  superseded_by: null

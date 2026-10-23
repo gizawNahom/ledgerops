@@ -60,9 +60,14 @@ graph TB
 
 ### Deployment shape
 
-Single Go binary plus a static asset bundle for the SPA, plus one PostgreSQL
-instance. `docker-compose` for local development so `make demo-01` runs on a
-clean clone.
+Single Go binary (`ledgerops`, with `serve`, `migrate` and `version`
+subcommands) with the SPA bundle embedded in image builds, plus one PostgreSQL
+instance. Shipped as a signed, multi-arch container image on GHCR
+(`container-image-release`, ADR-017..ADR-023). `docker-compose` for local
+development builds the same Dockerfile so `make demo-01` runs on a clean clone.
+*Updated 2026-10-17: the binary is renamed from `ledgerops-api`, the console
+is embedded (dev builds without the build tag still read `web/console/dist`),
+and the Postgres cluster hosts one ledgerops database (ADR-017).*
 
 Deployment target, settled by DEVOPS (OPS-1): **there is no hosted environment**.
 `clean` (developer machine) and `ci` (GitHub Actions, PostgreSQL 16 via
@@ -77,7 +82,14 @@ Two database roles (OPS-10), not one:
 | Role | Privileges | Used by |
 |---|---|---|
 | `ledgerops_app` | `SELECT`, `INSERT` on entries; `UPDATE`/`DELETE` **revoked** | The running service, and every test |
-| `ledgerops_migrate` | DDL | `golang-migrate`, and the `corrupt-04` harness |
+| `ledgerops_migrate` (name free; any role meeting the minimum privilege set in § Container image release) | DDL | `ledgerops migrate` (embedded golang-migrate), and the `corrupt-04` harness |
+
+*Corrected 2026-10-17 by `nw-solution-architect` (`container-image-release`):
+migrations are applied by the `ledgerops migrate` subcommand of the shipped
+image, not by the `migrate/migrate` container; `ledgerops_app` is created
+NOLOGIN by migration 0001 and given its operator-supplied password by `migrate`
+(ADR-017). Rollback by "redeploying the previous image tag" now refers to
+published, signed tags (ADR-020).*
 
 The service never connects as the migrate role. This is what makes D7
 enforcement structural: a role that can `ALTER TABLE … DISABLE TRIGGER` can
@@ -88,7 +100,9 @@ table, and every schema change must leave the previous binary able to run
 against the new schema — new columns nullable or defaulted, renames done as
 add-backfill-retire across two releases. Rolling back code is therefore always
 safe and never requires rolling back schema, which is the only rollback story
-compatible with a ledger that cannot forget.
+compatible with a ledger that cannot forget. (One documented exception:
+migration 0001 was edited in place once, 2026-10-17, ADR-017; 0002-0006 and the
+edited 0001 are now checksum-guarded.)
 
 Infrastructure detail: `docs/feature/ledger-core/feature-delta.md` § Wave: DEVOPS.
 Environment matrix: `docs/feature/ledger-core/devops/environments.yaml`.
@@ -1212,6 +1226,7 @@ spawning a new package). Full detail: § Inter-tenant transfer below.
 | `GET /accounts/{id}` | HTTP | 01 |
 | `GET /accounts/{id}/entries` | HTTP | 05 |
 | `GET /health/trial-balance` | HTTP | 04 |
+| `GET /health` | HTTP, unauthenticated, fixed 200 body, no ledger data (new, `container-image-release` DDD-52, 2026-10-19) | `container-image-release` |
 | `GET /console`, `GET /console/*` | HTTP, static (unauthenticated) | `ledger-core-console` DEVOPS |
 | Console SPA | Browser | 04, 05 |
 | `POST /tenants` | HTTP (new) | `multitenancy` slice 01 |
@@ -1713,6 +1728,119 @@ The concurrency tests for I4 and I7 must run against real PostgreSQL. A fake
 would model the very behaviour under test, which is why WS strategy C was
 selected in DISCUSS. PostgreSQL 16 is supplied per test package by
 Testcontainers (OPS-11), so local and CI runs take the same code path.
+
+---
+
+## Container image release (`container-image-release`, 2026-10-17)
+
+*Owner: nw-solution-architect (application scope). Decisions DDD-27..DDD-47;
+ADR-017..ADR-023 (revised in review cycle 1). Full narrative:
+`docs/feature/container-image-release/feature-delta.md` § Wave: DESIGN.*
+
+**Pattern unchanged**: modular monolith, ports-and-adapters, functional core /
+effect shell. No new deployable. The shipped artifact is one image holding one
+binary, `ledgerops`, with three subcommands: `serve` (default with no argument),
+`migrate`, `version`. The domain core and every API behaviour are untouched.
+
+### C4 — System Context
+
+```mermaid
+graph TB
+    Dev["Integrating developer<br/><i>P1 Priya</i>"]
+    Op["Platform operator<br/><i>P2 Tomasz</i>"]
+    Maint["Release maintainer<br/><i>pushes version tags</i>"]
+    Sys["ledgerops image<br/><i>serve, migrate, version</i>"]
+    DB[("Customer PostgreSQL 16<br/><i>own or managed instance</i>")]
+    GHCR["GHCR<br/><i>ghcr.io/gizawnahom/ledgerops</i>"]
+    GH["GitHub Actions and Releases<br/><i>release.yml, ci.yml</i>"]
+    Sig["Sigstore<br/><i>Fulcio, Rekor</i>"]
+
+    Dev -->|"pulls image from"| GHCR
+    Op -->|"verifies signature and SBOM via"| Sig
+    Op -->|"runs migrate then serve"| Sys
+    Dev -->|"posts transfers to"| Sys
+    Sys -->|"reads and writes ledger in"| DB
+    Maint -->|"pushes v-tag to"| GH
+    GH -->|"publishes and promotes tags in"| GHCR
+    GH -->|"requests signing certificate from"| Sig
+```
+
+### C4 — Container
+
+```mermaid
+graph TB
+    subgraph pipeline["GitHub Actions: release.yml (frozen identity)"]
+        CLS["classify<br/><i>internal/release, pure ReleasePlan</i>"]
+        CI["ci.yml via workflow_call<br/><i>full existing suite</i>"]
+        BLD["build and push by digest<br/><i>buildx, amd64 + arm64, no tag</i>"]
+        SMK["smoke by digest, per arch<br/><i>scripts/smoke, incl. upgrade leg</i>"]
+        SGN["sign, SBOM attest, verify<br/><i>cosign, syft, SPDX-JSON per platform</i>"]
+        ANO["anonymous-pull probe<br/><i>by digest, before any tag</i>"]
+        PRM["promote tags, GitHub Release, quickstart check<br/><i>exact, minor, latest</i>"]
+    end
+
+    subgraph img["ledgerops image (alpine, non-root)"]
+        BIN["ledgerops binary<br/><i>Go, cmd/api</i><br/>serve | migrate | version"]
+        SPA["Console bundle<br/><i>embedded, console_embed tag</i>"]
+    end
+
+    GHCR["GHCR"]
+    DB[("Customer PostgreSQL 16")]
+    Sig["Sigstore"]
+
+    CLS -->|"gates"| CI
+    CI -->|"unblocks"| BLD
+    BLD -->|"pushes untagged digest to"| GHCR
+    SMK -->|"pulls digest from"| GHCR
+    SMK -->|"exercises"| BIN
+    BLD -->|"hands digest to"| SMK
+    SMK -->|"unblocks"| SGN
+    SGN -->|"signs and attests in"| GHCR
+    SGN -->|"obtains certificate from"| Sig
+    SGN -->|"unblocks"| ANO
+    ANO -->|"unblocks"| PRM
+    PRM -->|"adds version tags in"| GHCR
+    BIN -->|"serves from"| SPA
+    BIN -->|"migrate: schema + app password as privileged role"| DB
+    BIN -->|"serve: SQL as ledgerops_app only"| DB
+```
+
+### Components (Container image release)
+
+| Component | Path | Change | Role |
+|---|---|---|---|
+| Subcommand dispatcher, `LoadServeConfig`, `ParseMigrateConfig`, startup refusal classifier | `cmd/api/` | EXTEND | Pure config parsing over an env snapshot; effect shell exits |
+| `PlanMigration` (pure), `GatherFacts`, `SchemaMigrator`, `RolePasswordSetter` (verifier only), SCRAM builder, dirty detection | `internal/adapters/postgres/store.go` and siblings | EXTEND | Facts -> pure plan -> shell executes: schema to head, then verifier `ALTER ROLE` |
+| `Secret` redacting type, DSN redactor | `internal/support/` | EXTEND | `slog.LogValuer`, safe `String`/`GoString` |
+| Console assets seam + `console_embed` file pair + gitignored `console_dist/` | `internal/adapters/http/` | EXTEND | `fs.FS`; no new package |
+| Release classifier | `internal/release/`, `scripts/releaseplan/` | CREATE NEW | Pure: tag + existing stable versions -> `ReleasePlan` |
+| Smoke harness, quickstart checker | `scripts/smoke/`, `scripts/quickstart/` | CREATE NEW | Go programs per the `scripts/race` convention; CI and local |
+| Quickstart, example compose, README edits | `docs/quickstart-published-image.md`, `examples/published-image/`, `README.md` | CREATE NEW / EXTEND | The quickstart's fenced blocks are executed by the checker |
+| `release.yml` | `.github/workflows/` | CREATE NEW | Name is a public interface (signing identity) |
+
+### Constraints this feature adds to the architecture
+- The app process never reads `LEDGEROPS_MIGRATE_DSN`; `serve` refuses to start if it is present (ADR-018).
+- `ledgerops_app` cannot log in at any instant on a database `migrate` created (NOLOGIN until the password step; ADR-017).
+- **One ledgerops database per Postgres cluster**: the role is cluster-global, so a fresh `migrate` refuses when `ledgerops_app` already exists (ADR-017, DDD-41). The check is atomic because `migrate` claims the role (NOLOGIN plus an owner-database marker, own committed transaction) before any schema step; concurrent fresh migrates have exactly one winner (DDD-48). An abandoned or orphaned role is released by the privileged `DROP ROLE ledgerops_app`, never automatically.
+- All GitHub Actions are pinned by commit SHA and all base images by digest (ADR-020).
+- *Amended 2026-10-19 from DEVOPS:* runtime base `alpine:3.24`, console stage `node:22-slim`; one multi-platform build (no per-platform merge job); cosign identity regex uses the exact case `gizawNahom`; the first image release is `v0.2.0`; `promote` fails on a stale plan and `ci` gates every path including resume (ADR-019, ADR-020, ADR-021 amendments; DDD-49..51).
+- Applied migrations are immutable after the 0001 exception; a checksum test guards 0001-0006.
+- Published version tags are immutable by workflow policy; the registry cannot enforce it, so consumers should pin by digest (ADR-020).
+- `release.yml` must keep its path and must contain the signing steps itself (ADR-020, ADR-021).
+- No secret value (password, DSN, key) appears in any log or output (ADR-018).
+
+### Privileged-role minimum (OQ-8, ADR-022)
+Owner of (or CONNECT-with-grant-option on) the target database; CREATE on schema `public`; `CREATEROLE` when `ledgerops_app` does not exist; on PostgreSQL 16, `ADMIN OPTION` on `ledgerops_app` (or superuser) to alter an existing role; membership in the owner of every existing ledgerops table that pending migrations alter. The role name is free. Verified by read-only catalog facts plus always-rolled-back empirical probes feeding a pure `PlanMigration`; any gap refuses with "no changes applied".
+
+### Architecture Enforcement
+Style: modular monolith, ports-and-adapters. Language: Go. Tools: golangci-lint (`depguard`, already hosting `exhaustive`) and a small AST/grep test.
+- `internal/domain` and `internal/app` import no adapter package.
+- `LEDGEROPS_MIGRATE_DSN` and `LEDGEROPS_APP_PASSWORD[_FILE]` are read only in the migrate command file; the one allowed exception is serve's presence-only `LookupEnv` guard. The serve path does not import the migrator.
+- `SchemaMigrator` and `RolePasswordSetter` are separate interfaces; the setter accepts a verifier only.
+- `Secret` never renders through `%v`, `%+v`, `%#v` or slog JSON (test).
+- Migration checksum guard on 0001-0006; the golang-migrate DSN never carries `x-multi-statement`.
+- Dockerfile builds with `-tags console_embed`; every `uses:` pinned by SHA and every `FROM` by digest.
+- Probes: behavioural fault-injection tests (role lacking CREATEROLE, lacking ADMIN OPTION, not database owner, no CREATE on `public`, second database in a cluster with the role; embedded bundle without `index.html`).
 
 ---
 

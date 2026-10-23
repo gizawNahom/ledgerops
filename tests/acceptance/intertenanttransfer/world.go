@@ -66,6 +66,7 @@ import (
 	apphttp "ledgerops/internal/adapters/http"
 	"ledgerops/internal/adapters/postgres"
 	"ledgerops/internal/app/ports"
+	"ledgerops/internal/support"
 )
 
 type tenantRecord struct {
@@ -301,7 +302,7 @@ func sharedPostgres(ctx context.Context) (string, error) {
 			sharedErr = fmt.Errorf("reading the privileged connection string: %w", err)
 			return
 		}
-		if err := postgres.Migrate(ctx, templateDSN); err != nil {
+		if err := postgres.Migrate(ctx, templateDSN, support.NewSecret("app-secret")); err != nil {
 			sharedErr = fmt.Errorf("migrating the template from zero: %w", err)
 			return
 		}
