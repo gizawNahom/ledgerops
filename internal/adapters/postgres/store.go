@@ -152,6 +152,10 @@ func applySchema(privilegedDSN, action string) error {
 // pgErrorDuplicateObject is SQLSTATE 42710: the role already exists.
 const pgErrorDuplicateObject = "42710"
 
+// pgErrorUniqueViolation is SQLSTATE 23505: a concurrent CREATE ROLE that
+// committed first, which the duplicate-name pre-check could not yet see.
+const pgErrorUniqueViolation = "23505"
+
 // claimAppRole creates ledgerops_app NOLOGIN, marked with the database that
 // owns it, before any schema file runs, so no instant exists at which the role
 // can log in. A role that already exists is left as it is.
@@ -166,23 +170,52 @@ func claimAppRole(ctx context.Context, privilegedDSN string) error {
 	if err := conn.QueryRow(ctx, "SELECT current_database()").Scan(&database); err != nil {
 		return fmt.Errorf("reading the database name: %w", err)
 	}
+	created, err := createMarkedAppRole(ctx, conn, database)
+	if err != nil || created {
+		return err
+	}
+	// The role exists: another run claimed it first, or this database did
+	// earlier. As in the plan's cluster rule, a database already holding the
+	// ledger schema passes; otherwise only the marker decides (DDD-48).
+	marker, ownerExists, err := readRoleOwner(ctx, conn)
+	if err != nil {
+		return err
+	}
+	if markedOwner(marker) == database || hasLedgerSchema(ctx, conn) {
+		return nil
+	}
+	return &RefusalError{Plan: ClusterRuleRefusal(database, marker, ownerExists)}
+}
+
+// createMarkedAppRole creates ledgerops_app NOLOGIN and its owner marker in
+// one committed transaction. It reports false, without error, when the role
+// already exists, including when a concurrent run committed it first.
+func createMarkedAppRole(ctx context.Context, conn *pgx.Conn, database string) (bool, error) {
 	tx, err := conn.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("claiming the app role: %w", err)
+		return false, fmt.Errorf("claiming the app role: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	if _, err := tx.Exec(ctx, "CREATE ROLE ledgerops_app NOLOGIN"); err != nil {
 		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == pgErrorDuplicateObject {
-			return nil
+		if errors.As(err, &pgErr) && (pgErr.Code == pgErrorDuplicateObject || pgErr.Code == pgErrorUniqueViolation) {
+			return false, nil
 		}
-		return fmt.Errorf("creating the app role: %w", err)
+		return false, fmt.Errorf("creating the app role: %w", err)
 	}
-	if _, err := tx.Exec(ctx, "COMMENT ON ROLE ledgerops_app IS "+quoteLiteral(database)); err != nil {
-		return fmt.Errorf("marking the app role with its database: %w", err)
+	if _, err := tx.Exec(ctx, "COMMENT ON ROLE ledgerops_app IS "+quoteLiteral(OwnerMarker(database))); err != nil {
+		return false, fmt.Errorf("marking the app role with its database: %w", err)
 	}
-	return tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("claiming the app role: %w", err)
+	}
+	return true, nil
+}
+
+func hasLedgerSchema(ctx context.Context, conn *pgx.Conn) bool {
+	var has bool
+	return conn.QueryRow(ctx, queryHasLedgerSchema).Scan(&has) == nil && has
 }
 
 // pgRolePasswordSetter is the RolePasswordSetter adapter: it sets LOGIN and

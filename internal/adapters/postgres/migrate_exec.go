@@ -44,11 +44,14 @@ const (
 		WHERE n.nspname = 'public' AND c.relkind = 'r' AND NOT pg_has_role(current_user, c.relowner, 'USAGE'))`
 	queryCanReadVersion = `SELECT has_table_privilege(current_user, 'public.schema_migrations', 'SELECT')`
 	queryCurrentVersion = `SELECT version, dirty FROM public.schema_migrations LIMIT 1`
+	queryRoleOwner      = `SELECT coalesce(shobj_description(r.oid, 'pg_authid'), ''),
+		EXISTS (SELECT 1 FROM pg_database d WHERE d.datname = substring(coalesce(shobj_description(r.oid, 'pg_authid'), '') FROM length($1) + 1))
+		FROM pg_roles r WHERE r.rolname = 'ledgerops_app'`
 )
 
 var factQueries = []string{
 	queryDatabaseName, queryCanCreateRole, queryRoleExists, queryAdminOption,
-	queryOwnsDatabase, queryCreateOnPublic, queryHasLedgerSchema, queryOwnsTables, queryCanReadVersion, queryCurrentVersion,
+	queryOwnsDatabase, queryCreateOnPublic, queryHasLedgerSchema, queryOwnsTables, queryCanReadVersion, queryCurrentVersion, queryRoleOwner,
 }
 
 // pgFactReader is the FactReader adapter: SELECT-only catalog queries.
@@ -89,6 +92,13 @@ func (r pgFactReader) ReadFacts(target string) (Facts, error) {
 			return Facts{}, fmt.Errorf("reading the database name: %w", err)
 		}
 	}
+	if facts.RoleExists {
+		marker, ownerExists, err := readRoleOwner(r.ctx, conn)
+		if err != nil {
+			return Facts{}, err
+		}
+		facts.RoleOwnerMarker, facts.OwnerDatabaseExists = marker, ownerExists
+	}
 	current, dirty, err := readCurrentVersion(r.ctx, conn, facts.HasLedgerSchema)
 	if err != nil {
 		return Facts{}, err
@@ -98,6 +108,17 @@ func (r pgFactReader) ReadFacts(target string) (Facts, error) {
 	}
 	facts.PendingVersions = pendingVersionsAfter(current)
 	return facts, nil
+}
+
+// readRoleOwner reads ledgerops_app's owner marker and whether the database
+// it names still exists.
+func readRoleOwner(ctx context.Context, conn *pgx.Conn) (string, bool, error) {
+	var marker string
+	var ownerExists bool
+	if err := conn.QueryRow(ctx, queryRoleOwner, ownerMarkerPrefix).Scan(&marker, &ownerExists); err != nil {
+		return "", false, fmt.Errorf("reading the app role's owner marker: %w", err)
+	}
+	return marker, ownerExists, nil
 }
 
 func readCurrentVersion(ctx context.Context, conn *pgx.Conn, hasSchema bool) (uint, bool, error) {

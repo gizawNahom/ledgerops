@@ -78,6 +78,7 @@ type preflightCheck func(Facts) (Plan, bool)
 
 var preflightChecks = []preflightCheck{
 	requireNoUnfinishedMigration,
+	requireOneLedgeropsDatabasePerCluster,
 	requireConnectRight,
 	requireCreateOnPublic,
 	requireCreateRoleWhenRoleAbsent,
@@ -106,6 +107,54 @@ func requireNoUnfinishedMigration(facts Facts) (Plan, bool) {
 			"restore from backup or repair schema_migrations by hand", *facts.DirtyVersion) + noChangesSuffix,
 		NoChanges: true,
 	}, true
+}
+
+// ownerMarkerPrefix opens the COMMENT ON ROLE ledgerops_app marker naming
+// the database that claimed the role (DDD-48).
+const ownerMarkerPrefix = "ledgerops-owner-database="
+
+// OwnerMarker is the role comment that records database as the owner.
+func OwnerMarker(database string) string { return ownerMarkerPrefix + database }
+
+// markedOwner is the database a marker names, or "" for no marker (a role
+// created by the demo stack before markers existed).
+func markedOwner(marker string) string {
+	if len(marker) <= len(ownerMarkerPrefix) || marker[:len(ownerMarkerPrefix)] != ownerMarkerPrefix {
+		return ""
+	}
+	return marker[len(ownerMarkerPrefix):]
+}
+
+// requireOneLedgeropsDatabasePerCluster enforces DDD-41: ledgerops_app is
+// cluster-global, so an existing role belongs to one database. The target
+// passes if it already holds the ledger schema (the owning or demo database)
+// or if the marker names it (a claim abandoned before the schema landed).
+func requireOneLedgeropsDatabasePerCluster(facts Facts) (Plan, bool) {
+	if !facts.RoleExists || facts.HasLedgerSchema || markedOwner(facts.RoleOwnerMarker) == facts.TargetDatabase {
+		return Plan{}, false
+	}
+	return ClusterRuleRefusal(facts.TargetDatabase, facts.RoleOwnerMarker, facts.OwnerDatabaseExists), true
+}
+
+// ClusterRuleRefusal says the role already belongs to another database and
+// names the remedies, privileged DROP ROLE among them.
+func ClusterRuleRefusal(target, marker string, ownerExists bool) Plan {
+	owner := markedOwner(marker)
+	var belongs string
+	switch {
+	case owner == "":
+		belongs = "another ledgerops database in this cluster"
+	case ownerExists:
+		belongs = "database " + owner + " in this cluster"
+	default:
+		belongs = "database " + owner + ", which no longer exists"
+	}
+	return Plan{
+		Refusal: fmt.Sprintf("role ledgerops_app already belongs to %s; ledgerops allows one database per Postgres cluster. "+
+			"Migrate that database instead, put %s on a separate cluster, or, if that database is gone or unwanted, "+
+			"have a privileged user run DROP ROLE ledgerops_app", belongs, target) + noChangesSuffix,
+		NoChanges: true,
+	}
 }
 
 func requireConnectRight(facts Facts) (Plan, bool) {

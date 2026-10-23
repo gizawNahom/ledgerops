@@ -128,7 +128,7 @@ Feature: Migrate a fresh database with my own app password
 
   # --- secrets never leak ---------------------------------------------------------
 
-  @pending @error @driving_port @contract-shape:unbounded-preservation
+  @error @driving_port @contract-shape:unbounded-preservation
   Scenario Outline: Migrate output never contains the password, whatever goes wrong
     Given the operator has an empty database "kestrel_ledger" and a privileged role "kestrel_admin"
     And the app password is "T7!kq@9x%Zm"
