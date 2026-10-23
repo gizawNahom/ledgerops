@@ -45,7 +45,7 @@ func main() {
 		os.Exit(runMigrate(context.Background(), environmentSnapshot(), os.Stdout, os.Stderr))
 	case CommandServe:
 		serve()
-	default:
+	case CommandVersion:
 		fmt.Fprintf(os.Stderr, "%s: not available yet\n", command)
 		os.Exit(exitConfigInvalid)
 	}
