@@ -1,0 +1,7 @@
+{/* Light is the default. Only an explicit "dark" choice, saved by the toggle, switches it. There is no auto mode. Inlined to avoid a flash. */}
+<script is:inline>
+	(() => {
+		const stored = typeof localStorage !== 'undefined' && localStorage.getItem('starlight-theme');
+		document.documentElement.dataset.theme = stored === 'dark' ? 'dark' : 'light';
+	})();
+</script>

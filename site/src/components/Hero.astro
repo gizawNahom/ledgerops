@@ -1,0 +1,107 @@
+---
+// Landing-page hero for the home page only (Starlight renders this for pages
+// with `hero` frontmatter). The headline, sub line and buttons come from the
+// page's frontmatter; the command and the two real request/response
+// panels are fixed here because they belong to this layout.
+const { data } = Astro.locals.starlightRoute.entry;
+const { title = data.title, tagline, actions = [] } = data.hero || {};
+const [primary, ...secondary] = actions;
+
+const refusalRequest = '{"from":"alice-01","to":"bob-01","amount":"500.00"}';
+const refusalResponse =
+  '{"account_id":"alice-01","available":"50.00",\n "error":"insufficient_funds","requested":"500.00"}';
+const verdictResponse = '{"verdict":"Books balance: YES",\n "imbalance_minor":0,"entry_count":4,…}';
+---
+
+<div class="lo-hero">
+  <h1 id="_top" data-page-title set:html={title} />
+  {tagline && <p class="lo-sub" set:html={tagline} />}
+  <div class="lo-row">
+    <code class="lo-cmd"><span>$</span> make up &amp;&amp; make demo-01</code>
+    {primary && <a class="lo-btn" href={primary.link}>{primary.text}</a>}
+    {secondary.map((a) => <a class="lo-lnk" href={a.link}>{a.text}</a>)}
+  </div>
+  <div class="lo-block">
+    <div class="lo-panel">
+      <div class="lo-bar"><b>POST /transfers</b> overdraft <span class="lo-badge">422</span></div>
+      <pre>{refusalRequest}
+
+{refusalResponse}</pre>
+    </div>
+    <div class="lo-panel">
+      <div class="lo-bar"><b>GET /health/trial-balance</b> operator key <span class="lo-badge">200</span></div>
+      <pre>{verdictResponse}</pre>
+    </div>
+  </div>
+</div>
+
+<style>
+  .lo-hero { display: flex; flex-direction: column; gap: 1.4rem; padding-block: 1.5rem 0.5rem; }
+  h1 {
+    margin: 0;
+    max-width: 14ch;
+    font-size: clamp(2.6rem, 7.2vw, 5.4rem);
+    font-weight: 800;
+    letter-spacing: -0.045em;
+    word-spacing: 0.04em;
+    line-height: 0.96;
+    color: var(--sl-color-white);
+  }
+  .lo-sub { margin: 0; max-width: 56ch; font-size: 1.125rem; color: var(--sl-color-gray-2); }
+  .lo-row { display: flex; flex-wrap: wrap; gap: 0.9rem 1.4rem; align-items: center; }
+  .lo-cmd {
+    font-family: var(--sl-font-mono);
+    font-size: 0.875rem;
+    background: #0a0a0a;
+    color: #fff;
+    padding: 0.6rem 0.9rem;
+    border-radius: 0;
+  }
+  :global(:root:not([data-theme='light'])) .lo-cmd { background: #1c1c1c; }
+  .lo-cmd span { color: #8fa2ff; margin-right: 0.5rem; }
+  .lo-btn {
+    background: var(--cobalt);
+    color: #fff;
+    font-weight: 700;
+    padding: 0.6rem 1.3rem;
+    text-decoration: none;
+    border-radius: 0;
+  }
+  .lo-btn:hover { background: #0f2bd0; }
+  .lo-lnk { color: var(--sl-color-white); font-weight: 700; text-underline-offset: 4px; }
+  .lo-block {
+    background: var(--cobalt);
+    padding: 1.6rem;
+    margin-top: 1.2rem;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 1.1rem;
+  }
+  .lo-panel { background: #0a0a0a; color: #fff; min-width: 0; overflow: hidden; }
+  .lo-bar {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    padding: 0.5rem 0.9rem;
+    font-family: var(--sl-font-mono);
+    font-size: 0.75rem;
+    color: #9aa4ff;
+    border-bottom: 1px solid #333;
+  }
+  .lo-bar b { color: #fff; font-weight: 500; }
+  .lo-badge { margin-left: auto; background: #fff; color: #0a0a0a; padding: 0 0.5rem; font-weight: 500; }
+  .lo-panel pre {
+    margin: 0;
+    padding: 0.8rem 0.9rem 0.9rem;
+    font-family: var(--sl-font-mono);
+    font-size: 0.78rem;
+    line-height: 1.6;
+    color: #e8e8e8;
+    overflow-x: auto;
+    white-space: pre;
+    background: none;
+  }
+  @media (max-width: 50rem) {
+    .lo-block { grid-template-columns: minmax(0, 1fr); padding: 1rem; }
+  }
+</style>

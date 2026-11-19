@@ -1,0 +1,51 @@
+---
+// Two-state theme switch: Light or Dark. Replaces Starlight's three-way select,
+// which includes "Auto". The choice is saved under the same key that
+// ThemeProvider reads.
+---
+
+<div class="lo-theme" role="group" aria-label="Color theme">
+  <button type="button" data-theme-set="light" aria-pressed="true">Light</button>
+  <button type="button" data-theme-set="dark" aria-pressed="false">Dark</button>
+</div>
+
+<style>
+  .lo-theme { display: inline-flex; border: 1px solid var(--rule); }
+  .lo-theme button {
+    font-family: var(--sl-font-mono);
+    font-size: 0.75rem;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    padding: 0.3rem 0.7rem;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    color: var(--sl-color-white);
+    cursor: pointer;
+  }
+  .lo-theme button + button { border-inline-start: 1px solid var(--rule); }
+  .lo-theme button[aria-pressed='true'] { background: var(--sl-color-white); color: var(--sl-color-black); }
+  .lo-theme button:focus-visible { outline: 2px solid var(--cobalt); outline-offset: 2px; }
+</style>
+
+<script>
+  const key = 'starlight-theme';
+
+  function apply(theme: 'light' | 'dark') {
+    document.documentElement.dataset.theme = theme;
+    try {
+      localStorage.setItem(key, theme);
+    } catch {
+      /* storage can be blocked; the choice then lasts for this page only */
+    }
+    document.querySelectorAll<HTMLButtonElement>('[data-theme-set]').forEach((b) => {
+      b.setAttribute('aria-pressed', String(b.dataset.themeSet === theme));
+    });
+  }
+
+  const current = document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light';
+  document.querySelectorAll<HTMLButtonElement>('[data-theme-set]').forEach((b) => {
+    b.setAttribute('aria-pressed', String(b.dataset.themeSet === current));
+    b.addEventListener('click', () => apply(b.dataset.themeSet === 'dark' ? 'dark' : 'light'));
+  });
+</script>

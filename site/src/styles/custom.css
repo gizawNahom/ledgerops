@@ -1,0 +1,202 @@
+/*
+ * ledgerops site: "type as the image".
+ * Archivo 800 does the visual work; everything else recedes. Flat cobalt,
+ * 1px rules, zero radius, no shadows, no gradients, no decorative imagery.
+ * Starlight's own variables are remapped here so its layout, search and
+ * navigation keep working unchanged.
+ */
+
+:root {
+  --cobalt: #1e3fff;
+  --sl-font: 'Archivo', 'Helvetica Neue', Arial, sans-serif;
+  --sl-font-mono: 'IBM Plex Mono', ui-monospace, 'SFMono-Regular', Menlo, monospace;
+
+  /* Dark theme (Starlight's default root) */
+  --rule: #3a3a3a;
+  --soft: #a3a3a3;
+  --sl-color-white: #ffffff;
+  --sl-color-gray-1: #f0f0f0;
+  --sl-color-gray-2: #d4d4d4;
+  --sl-color-gray-3: #a3a3a3;
+  --sl-color-gray-4: #6e6e6e;
+  --sl-color-gray-5: #333333;
+  --sl-color-gray-6: #1a1a1a;
+  --sl-color-gray-7: #111111;
+  --sl-color-black: #0a0a0a;
+  --sl-color-accent-low: #0f1640;
+  --sl-color-accent: var(--cobalt);
+  --sl-color-accent-high: #9fb0ff;
+  --sl-color-text-accent: #9fb0ff;
+  --sl-color-hairline: var(--rule);
+  --sl-color-hairline-light: var(--rule);
+}
+
+:root[data-theme='light'] {
+  --rule: #0a0a0a;
+  --soft: #4a4a4a;
+  --sl-color-white: #0a0a0a;
+  --sl-color-gray-1: #1a1a1a;
+  --sl-color-gray-2: #2b2b2b;
+  --sl-color-gray-3: #4a4a4a;
+  --sl-color-gray-4: #767676;
+  --sl-color-gray-5: #d0d0d0;
+  --sl-color-gray-6: #ececec;
+  --sl-color-gray-7: #f6f6f6;
+  --sl-color-black: #ffffff;
+  --sl-color-accent-low: #e6eaff;
+  --sl-color-accent: var(--cobalt);
+  --sl-color-accent-high: #0f2bd0;
+  --sl-color-text-accent: var(--cobalt);
+  --sl-color-hairline: var(--rule);
+  --sl-color-hairline-light: var(--rule);
+}
+
+/* ---------- Typography ---------- */
+
+html { font-feature-settings: 'tnum' 1, 'lnum' 1; }
+
+/* Archivo's default word space is narrow; open it slightly for reading. */
+.sl-markdown-content :is(p, li, td) { word-spacing: 0.08em; }
+.lo-sub { word-spacing: 0.08em; }
+
+.sl-markdown-content h1,
+.sl-markdown-content h2,
+.sl-markdown-content h3,
+.sl-markdown-content h4,
+h1#_top {
+  font-family: var(--sl-font);
+  font-weight: 800;
+  letter-spacing: -0.035em;
+  color: var(--sl-color-white);
+}
+
+:root:not([data-has-hero]) h1#_top {
+  font-size: clamp(2.4rem, 6vw, 4rem);
+  line-height: 0.98;
+  letter-spacing: -0.045em;
+}
+
+.sl-markdown-content h2 {
+  font-size: 1.6rem;
+  line-height: 1.1;
+  border-top: 1px solid var(--rule);
+  padding-top: 0.9rem;
+  margin-top: 2.4rem;
+}
+
+.sl-markdown-content h3 { font-size: 1.15rem; font-weight: 700; letter-spacing: -0.02em; }
+
+.sl-markdown-content a:not(.sl-link-button) {
+  color: var(--sl-color-text-accent);
+  text-underline-offset: 3px;
+}
+
+.sl-markdown-content :not(pre) > code {
+  background: var(--sl-color-bg-inline-code);
+  border: 0;
+  border-radius: 0;
+  font-size: 0.875em;
+}
+
+/* ---------- Header, sidebar, search ---------- */
+
+.header { border-bottom: 1px solid var(--rule); }
+.site-title {
+  color: var(--sl-color-white);
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  font-size: 1.15rem;
+  text-transform: lowercase;
+}
+.sidebar-pane { border-inline-end: 1px solid var(--rule); }
+.sidebar-content a { border-radius: 0; }
+.sidebar-content a[aria-current='page'] {
+  background-color: var(--cobalt);
+  color: #fff;
+  font-weight: 700;
+}
+site-search button, .pagefind-ui__search-input { border-radius: 0; }
+
+/* ---------- Tables ---------- */
+
+.sl-markdown-content table { border-collapse: collapse; }
+.sl-markdown-content :is(th, td) { border: 0; border-bottom: 1px solid var(--rule); padding: 0.5rem 0.9rem 0.5rem 0; }
+.sl-markdown-content th {
+  font-family: var(--sl-font-mono);
+  font-size: 0.6875rem;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  border-bottom: 2px solid var(--rule);
+  background: none;
+}
+.sl-markdown-content tr:nth-child(2n) { background: none; }
+
+/* ---------- Asides: flat black block, no accent bar ---------- */
+
+.starlight-aside {
+  background: #0a0a0a;
+  color: #fff;
+  border: 0;
+  border-radius: 0;
+  padding: 1rem 1.1rem;
+}
+:root:not([data-theme='light']) .starlight-aside { background: #1a1a1a; }
+.starlight-aside__title {
+  display: inline-block;
+  font-family: var(--sl-font-mono);
+  font-size: 0.75rem;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  background: #fff;
+  color: #0a0a0a;
+  padding: 1px 8px;
+}
+.starlight-aside__title svg { display: none; }
+.starlight-aside a { color: #9fb0ff; }
+
+/* ---------- Home page: wide hero, constrained prose ---------- */
+
+[data-has-hero] { --sl-content-width: 72rem; }
+[data-has-hero] .sl-markdown-content > :is(p, ul, ol, h2, h3, pre, img, picture, .starlight-aside, .expressive-code) { max-width: 46rem; }
+[data-has-hero] .sl-markdown-content > :is(img, picture) { border: 1px solid var(--rule); }
+[data-has-hero] .sl-markdown-content > p:first-child {
+  font-family: var(--sl-font-mono);
+  font-size: 0.8125rem;
+  color: var(--soft);
+}
+
+.guarantees ul {
+  list-style: none;
+  padding: 0;
+  margin: 1.2rem 0 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  border-top: 1px solid var(--rule);
+}
+.guarantees li {
+  margin: 0;
+  padding: 1.1rem 1.5rem 1.1rem 0;
+  border-bottom: 1px solid var(--rule);
+  font-size: 0.9375rem;
+  color: var(--soft);
+}
+.guarantees li:nth-child(odd) { border-right: 1px solid var(--rule); padding-right: 1.5rem; }
+.guarantees li:nth-child(even) { padding-left: 1.5rem; }
+.guarantees li strong {
+  display: block;
+  color: var(--sl-color-white);
+  font-weight: 800;
+  font-size: 1.3rem;
+  letter-spacing: -0.02em;
+  line-height: 1.15;
+  margin-bottom: 0.3rem;
+}
+@media (max-width: 50rem) {
+  .guarantees ul { grid-template-columns: minmax(0, 1fr); }
+  .guarantees li:nth-child(odd) { border-right: 0; padding-right: 0; }
+  .guarantees li:nth-child(even) { padding-left: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; transition: none !important; } }
