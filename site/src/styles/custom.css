@@ -200,3 +200,11 @@ site-search button, .pagefind-ui__search-input { border-radius: 0; }
 }
 
 @media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; transition: none !important; } }
+
+/* On pages without a sidebar (the home page), Starlight has no mobile menu to hold
+   the theme switch, so show it in the header on small screens. The GitHub icon is
+   hidden there to keep the header on one line. */
+@media (max-width: 49.99rem) {
+  :root:not([data-has-sidebar]) .right-group { display: flex; }
+  :root:not([data-has-sidebar]) .right-group .social-icons { display: none; }
+}
