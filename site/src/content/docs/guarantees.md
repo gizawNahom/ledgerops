@@ -18,15 +18,22 @@ with ports and adapters: a pure domain core decides, and the shell around it
 performs the effects.
 
 ```text
-Integrating service (tenant key)  ─┐
-Operator or console (operator key) ─┴─> HTTP API ─> Application ─> Domain core
-                                                    (use cases)    (pure, no I/O)
-                                                         │
-                       ledgerops_app role: no UPDATE or DELETE on entries
-                                                         ▼
-                                                  PostgreSQL 16
-                                                         ▲
-                       ledgerops_migrate role: schema changes only
+  Integrating service        Operator or console
+  (tenant key)               (operator key)
+        │                           │
+        └─────────────┬─────────────┘
+                      ▼
+                  HTTP API
+                      │
+           Application (use cases)
+                      │
+        Domain core (pure, no I/O)
+                      │
+  ledgerops_app role: no UPDATE or DELETE on entries
+                      ▼
+                PostgreSQL 16
+                      ▲
+  ledgerops_migrate role: schema changes only
 ```
 
 - **The domain core is pure.** It takes a request and a snapshot of the
