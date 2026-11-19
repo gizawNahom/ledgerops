@@ -7,7 +7,10 @@ import react from "@vitejs/plugin-react";
 // over Jest to avoid a second bundler config (Jest would need its own
 // transform pipeline duplicating what Vite already does) -- recorded here,
 // not silently assumed. See feature-delta.md Wave: DISTILL / [REF] Toolchain.
-export default defineConfig({
+export default defineConfig(({ command }) => ({
+  // The service serves the built bundle under /console, so the production
+  // build must reference its assets there; the dev server stays at "/".
+  base: command === "build" ? "/console/" : "/",
   plugins: [react()],
   server: {
     // Mirrors docs/product/architecture/brief.md Console SPA -- Dev-time
@@ -28,4 +31,4 @@ export default defineConfig({
     globals: false,
     css: false,
   },
-});
+}));
