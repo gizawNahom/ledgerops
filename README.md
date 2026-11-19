@@ -5,6 +5,10 @@
 A double-entry ledger service that moves value between accounts correctly, and
 lets you check that it did. Go · PostgreSQL 16 · TypeScript operator console.
 
+**Docs:** <https://gizawnahom.github.io/ledgerops/> — quickstart, how each
+guarantee works and how to check it, a comparison with other open-source
+ledgers, and what isn't built yet.
+
 > **Status:** the core is complete and covered by property-based, race and
 > crash tests, but it isn't production-ready yet. See
 > [Status and limitations](#status-and-limitations) and the
