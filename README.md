@@ -184,8 +184,8 @@ first.
 - **No webhooks or event stream** — integrations have to poll
 - **No OpenAPI spec, client SDKs or stable release** — a signed
   release-candidate image is published
-  (`ghcr.io/gizawnahom/ledgerops:0.2.0-rc.1`), but the quickstart below builds
-  from source
+  (`ghcr.io/gizawnahom/ledgerops:0.2.0-rc.2`), and the
+  [docs-site quickstart](https://gizawnahom.github.io/ledgerops/quickstart/) runs it
 - **No tenant key rotation** or tenant offboarding
 - **No TLS in the service itself** — run it behind a TLS-terminating proxy
 - **Not yet run in production**, and not tested with more than one app
