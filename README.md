@@ -3,7 +3,7 @@
 [![CI](https://github.com/gizawNahom/ledgerops/actions/workflows/ci.yml/badge.svg)](https://github.com/gizawNahom/ledgerops/actions/workflows/ci.yml)
 
 A double-entry ledger service that moves value between accounts correctly, and
-can prove it did. Go · PostgreSQL 16 · TypeScript operator console.
+lets you check that it did. Go · PostgreSQL 16 · TypeScript operator console.
 
 > **Status:** the core is complete and covered by property-based, race and
 > crash tests, but it isn't production-ready yet. See
@@ -131,7 +131,7 @@ fund them — follow [`docs/quickstart.md`](docs/quickstart.md).
 database passwords in `docker-compose.yml` are local demo values — don't reuse
 them anywhere real.
 
-## Proof
+## Check it yourself
 
 | Command | What it shows | Needs |
 |---|---|---|
@@ -165,7 +165,7 @@ first.
   overdraft protection, idempotent retries and append-only history
 - Multiple tenants with isolated data and their own API keys, plus
   dual-authorized transfers between tenants
-- On-demand proof that the books balance, with per-account drift detection
+- On-demand check that the books balance, with per-account drift detection
 - Prometheus metrics, structured JSON request logs, and an operator console
 - Expand-only database migrations, so rolling back the service never needs a
   schema rollback
@@ -178,8 +178,10 @@ first.
   platform fee atomically takes two transfers today
 - **No metadata on transfers** — no field for your own order or reference ids
 - **No webhooks or event stream** — integrations have to poll
-- **No OpenAPI spec, client SDKs or versioned releases**, and no published
-  container image; you build from source
+- **No OpenAPI spec, client SDKs or stable release** — a signed
+  release-candidate image is published
+  (`ghcr.io/gizawnahom/ledgerops:0.2.0-rc.1`), but the quickstart below builds
+  from source
 - **No tenant key rotation** or tenant offboarding
 - **No TLS in the service itself** — run it behind a TLS-terminating proxy
 - **Not yet run in production**, and not tested with more than one app
