@@ -1,0 +1,124 @@
+---
+title: ledgerops
+description: A double-entry ledger service with no overdrafts, safe retries, append-only history and a one-call check that the books balance.
+template: splash
+hero:
+  title: A double-entry ledger for your wallet or credits system.
+  tagline: No overdrafts, safe retries, append-only history, and a one-call check that the books balance. An HTTP service you run yourself.
+  actions:
+    - text: Run it
+      link: quickstart/
+      icon: right-arrow
+    - text: Read the guarantees
+      link: guarantees/
+      variant: minimal
+    - text: Compare with other ledgers
+      link: compare/
+      variant: minimal
+---
+
+import { Image } from 'astro:assets';
+import drift from '../../assets/console-drift.png';
+
+Apache-2.0 · Go and PostgreSQL 16 · pre-1.0, not yet run in production
+
+## An overdraft, and a check on the books
+
+Move more than an account holds and the request is refused. The response says
+which account, what it has, and what you asked for. After `make demo-01`,
+`alice-01` holds 50.00. Headers are left out here; real calls send an
+`Authorization` header and an `Idempotency-Key`.
+
+```text
+POST /transfers
+{"from":"alice-01","to":"bob-01","amount":"500.00"}
+
+422 {"account_id":"alice-01","available":"50.00","error":"insufficient_funds","requested":"500.00"}
+```
+
+Then ask whether the books balance. One request checks every entry in the
+ledger.
+
+```text
+GET /health/trial-balance
+
+200 {"verdict":"Books balance: YES","imbalance_minor":0,"entry_count":4,…}
+```
+
+The service runs this check on itself. An independent verifier is on the
+roadmap.
+
+If an account's stored balance doesn't match its entries, the check says so
+and names the account. The operator console shows it:
+
+<Image
+  src={drift}
+  alt='Operator console showing "Books balance: NO", one drifted account (alice-01, stored 174.26, computed 74.26) and the entry trace behind it.'
+/>
+
+## A balance column works until it doesn't
+
+Most teams that need balances start with a `balance` column and two `UPDATE`
+statements. It holds up until a request times out and is retried, two requests
+spend the same money, or a write fails halfway. Then value is created or
+destroyed, and nobody can reconstruct what happened.
+
+Three things that go wrong:
+
+- **A double charge** after a timeout and a retry.
+- **A negative balance** shipped under load.
+- **A retrofit.** Putting a real ledger under production data that is already
+  wrong is much harder than starting with one.
+
+ledgerops does the bookkeeping part from day one, for wallets, credits and
+loyalty points. It cares only that units are conserved, not what a unit means.
+
+## What it guarantees
+
+- **Conservation.** Every transaction's legs sum to zero, in integer minor
+  units.
+- **No overdrafts on wallet accounts, even under concurrency.** Funds are
+  checked under row locks taken in a fixed order.
+- **Append-only entries.** `UPDATE` and `DELETE` on entries are revoked from
+  the service's database role, and a trigger refuses them too. Someone who
+  holds the migration role or database admin access isn't covered by this.
+  Hash-chained tamper evidence is on the roadmap.
+- **Safe retries.** The same `Idempotency-Key` returns the original
+  transaction instead of posting twice.
+- **Tenant isolation.** A tenant is a separate set of accounts with its own
+  API key. Each tenant's key sees only its own accounts and entries.
+- **Cross-tenant transfers need both tenants to agree.** An operator-authorized
+  link between the two tenants, plus a registered counterparty.
+
+[How each one works →](guarantees/)
+
+## What isn't there yet
+
+ledgerops is pre-1.0. The core is complete and covered by property-based,
+race and crash tests, but it isn't ready for production yet.
+
+- One currency (USD).
+- Two-leg transfers only. No holds, no webhooks, no metadata on transfers.
+- No TLS in the service itself (run it behind a proxy), no OpenAPI spec, no
+  tenant key rotation.
+- The books check is run by the service itself. An independent verifier is on
+  the roadmap.
+- One very busy account is the first limit you'll hit. In the last load test,
+  p95 latency was 923 ms against a 500 ms target, because concurrent transfers
+  on the same account queue behind each other.
+- Not yet run in production.
+
+[The full list, and what running it takes →](status/)
+
+## Run it
+
+```bash
+make up
+make demo-01
+```
+
+Docker, `make` and curl. The target is under five minutes from a clean
+checkout. CI times the demo run and reports it; it doesn't fail the build if it
+runs over.
+
+[Run it →](quickstart/)
