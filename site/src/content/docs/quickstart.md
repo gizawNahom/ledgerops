@@ -1,106 +1,172 @@
 ---
 title: Quickstart
-description: Run ledgerops locally, move value between two accounts, and check the books.
+description: Run ledgerops from its Docker image, move value between two accounts, and check the books.
 ---
 
-Run ledgerops locally, move value between two accounts, and check the books.
+Run ledgerops from its Docker image, move value between two accounts, and check the books.
 
 ## Before you start
 
-You need Git, `make`, Docker with Compose, and `curl`. `make up` publishes
-ports 8080, 5432, 9090 and 3000, so free them first. Go 1.25 is only needed for
-`race-02` and `race-03` and for developing ledgerops; Node is only needed for
-developing the console.
+You need Docker and `curl`. Port 8080 must be free. This guide runs PostgreSQL
+16 in a container to keep it self-contained. In real use, point ledgerops at
+your own PostgreSQL 16.
 
-## 1. Get the code, build and start it
-
-```bash
-git clone https://github.com/gizawNahom/ledgerops
-cd ledgerops
-make up
-```
-
-This builds the service from source and starts PostgreSQL, the migrations, the
-API on `:8080`, Prometheus and Grafana. The first build takes a while.
-
-## 2. Run the first demo
+## 1. Pull the image and start PostgreSQL
 
 ```bash
-make demo-01
+export LEDGEROPS_IMAGE=ghcr.io/gizawnahom/ledgerops:0.2.0-rc.2
+docker pull $LEDGEROPS_IMAGE
+
+docker network create lo
+docker run -d --name pg --network lo \
+  -e POSTGRES_PASSWORD=admin -e POSTGRES_DB=ledgerops postgres:16
+
+# wait until PostgreSQL accepts connections
+until docker exec pg pg_isready -h 127.0.0.1 -U postgres -d ledgerops; do sleep 1; done
 ```
 
-Opens a `treasury` system account (the source of value), `alice-01` and
-`bob-01`. Funds `alice-01` with 100.00 from `treasury`, then moves 50.00 to
-`bob-01`. Each transfer is recorded as two legs, one per account, that sum to
-zero.
+The image is a release candidate published with a cosign signature. There is
+no `latest` tag, so you always name a version. The passwords and keys in this guide are throwaway
+values. Choose your own for anything real.
 
-## 3. Try the guarantees
+## 2. Migrate the database
 
-The demo stack comes with two local keys. Set them once:
+```bash
+docker run --rm --network lo \
+  -e LEDGEROPS_MIGRATE_DSN='postgres://postgres:admin@pg:5432/ledgerops?sslmode=disable' \
+  -e LEDGEROPS_APP_PASSWORD=apppw \
+  $LEDGEROPS_IMAGE migrate
+```
+
+Expect `schema at version 6` and `app role password set`. The privileged DSN
+is only for this step. The service never holds it. Without a password,
+`migrate` exits non-zero and names `LEDGEROPS_APP_PASSWORD` and
+`LEDGEROPS_APP_PASSWORD_FILE`.
+
+## 3. Start the service
+
+```bash
+docker run -d --name lo --network lo -p 8080:8080 \
+  -e LEDGEROPS_APP_DSN='postgres://ledgerops_app:apppw@pg:5432/ledgerops?sslmode=disable' \
+  -e LEDGEROPS_OPERATOR_KEY=opkey \
+  $LEDGEROPS_IMAGE
+
+until curl -sf localhost:8080/health; do sleep 1; done
+# {"status":"ok"}
+```
+
+The app password in the DSN must match the one you gave `migrate`. If it
+doesn't, the service refuses to start and says authentication failed.
+
+## 4. Provision a tenant and move value
+
+Set the keys once. Provisioning takes the operator key and returns the new
+tenant's own key. Every account and transfer call after that uses the tenant
+key.
 
 ```bash
 API=http://localhost:8080
-TENANT="Authorization: Bearer demo-tenant-key"
-OP="Authorization: Bearer demo-operator-key"
+OP="Authorization: Bearer opkey"
+
+RESP=$(curl -s -X POST $API/tenants -H "$OP" \
+  -H 'Content-Type: application/json' -d '{"name":"acme"}')
+TENANT_ID=$(echo "$RESP" | grep -o '"tenant_id":"[^"]*"' | cut -d'"' -f4)
+TENANT="Authorization: Bearer $(echo "$RESP" | grep -o '"tenant_key":"[^"]*"' | cut -d'"' -f4)"
 ```
 
-**Retry the transfer demo-01 posted.** Sending the same `Idempotency-Key`
-again returns the original transaction instead of posting twice:
+Value enters the ledger through a `system` account, which may go negative.
+`wallet` accounts never can. Open one of each, fund `alice`, then pay `bob`:
 
 ```bash
-curl -s -w '\nHTTP %{http_code}\n' -X POST $API/transfers -H "$TENANT" -H 'Idempotency-Key: demo-01-transfer' \
-  -H 'Content-Type: application/json' -d '{"from":"alice-01","to":"bob-01","amount":"50.00"}'
+for acct in '"treasury","type":"system"' '"alice","type":"wallet"' '"bob","type":"wallet"'; do
+  curl -s -X POST $API/accounts -H "$TENANT" \
+    -H 'Content-Type: application/json' -d "{\"account_id\":$acct}"; echo
+done
+
+curl -s -X POST $API/transfers -H "$TENANT" -H 'Idempotency-Key: fund-alice' \
+  -H 'Content-Type: application/json' -d '{"from":"treasury","to":"alice","amount":"100.00"}'
+curl -s -w '\nHTTP %{http_code}\n' -X POST $API/transfers -H "$TENANT" -H 'Idempotency-Key: alice-pays-bob' \
+  -H 'Content-Type: application/json' -d '{"from":"alice","to":"bob","amount":"30.00"}'
+# {"legs":[{"account":"alice","amount":"-30.00"},{"account":"bob","amount":"30.00"}],"transaction_id":"txn_…"}
+# HTTP 201
 ```
 
-Expect `HTTP 200` and the `transaction_id` that demo-01 printed.
+Every transfer needs an `Idempotency-Key`. Amounts are decimal strings.
+
+## 5. Try the guarantees
+
+**Retry the transfer.** Sending the same `Idempotency-Key` again returns the
+original transaction instead of posting twice:
+
+```bash
+curl -s -w '\nHTTP %{http_code}\n' -X POST $API/transfers -H "$TENANT" -H 'Idempotency-Key: alice-pays-bob' \
+  -H 'Content-Type: application/json' -d '{"from":"alice","to":"bob","amount":"30.00"}'
+```
+
+Expect `HTTP 200` and the same `transaction_id`.
 
 **Overdraw an account.** The refusal names the shortfall:
 
 ```bash
 curl -s -X POST $API/transfers -H "$TENANT" -H 'Idempotency-Key: alice-overdraws' \
-  -H 'Content-Type: application/json' -d '{"from":"alice-01","to":"bob-01","amount":"500.00"}'
-# 422 {"account_id":"alice-01","available":"50.00","error":"insufficient_funds","requested":"500.00"}
+  -H 'Content-Type: application/json' -d '{"from":"alice","to":"bob","amount":"500.00"}'
+# 422 {"account_id":"alice","available":"70.00","error":"insufficient_funds","requested":"500.00"}
 ```
 
 **Read a balance and the entries behind it:**
 
 ```bash
-curl -s $API/accounts/alice-01 -H "$TENANT"
-# {"account_id":"alice-01","balance":"50.00","type":"wallet"}
-curl -s $API/accounts/alice-01/entries -H "$TENANT"
+curl -s $API/accounts/alice -H "$TENANT"
+# {"account_id":"alice","balance":"70.00","type":"wallet"}
+curl -s $API/accounts/alice/entries -H "$TENANT"
 ```
 
 Each entry comes with a running balance.
 
-## 4. Check the books
+## 6. Check the books
 
 The books check takes the operator key:
 
 ```bash
-curl -s $API/health/trial-balance -H "$OP"
+curl -s "$API/health/trial-balance?tenant_id=$TENANT_ID" -H "$OP"
 # {"verdict":"Books balance: YES","imbalance_minor":0,…}
 ```
 
-With `?tenant_id=` it checks one tenant. Without it, it checks every tenant.
+With `tenant_id` it checks one tenant. Without it, it checks every tenant.
+The operator console is at `http://localhost:8080/console`.
 
-## 5. Stop it
+## 7. Stop it
 
 ```bash
+docker rm -f lo pg && docker network rm lo
+```
+
+This deletes the database with the container. Tenant names are unique, so
+running step 4 twice without cleaning up fails with `tenant_already_exists`.
+
+## Build from source and run the demos
+
+The demos use a stack that includes Prometheus and Grafana. It needs Git,
+`make`, Docker with Compose, and `curl`, and it publishes ports 8080, 5432,
+9090 and 3000. Go 1.25 is only needed for `race-02` and `race-03` and for
+developing ledgerops. Node is only needed for developing the console.
+
+```bash
+git clone https://github.com/gizawNahom/ledgerops
+cd ledgerops
+make up
+make demo-01
 make down
 ```
 
-`make down` stops the stack **and deletes its data volume**. The keys and
-passwords in `docker-compose.yml` are local demo values. Don't reuse them
-anywhere real.
-
-## Start from nothing instead
-
-The steps above use the demo tenant. To provision your own tenant, open
-accounts, fund them and move value, follow the
-[tenant-from-scratch guide](https://github.com/gizawNahom/ledgerops/blob/main/docs/quickstart.md).
-Run `make up` first.
+`make up` builds the service from source and starts PostgreSQL, the
+migrations, the API, Prometheus and Grafana. `make down` stops the stack
+**and deletes its data volume**. The keys and passwords in
+`docker-compose.yml` are local demo values. Don't reuse them anywhere real.
 
 ## More demos
+
+These run against the source stack above, so run `make up` first.
 
 | Command | What it shows |
 |---|---|
@@ -133,10 +199,3 @@ Credentials are sent as `Authorization: Bearer <key>`. The operator key is
 refused on the routes that open accounts, read an account, post transfers and
 register counterparties. A wrong or missing key gets
 `401 {"error":"unidentified_caller"}`. There is no OpenAPI spec yet.
-
-## Pull the image
-
-A signed release-candidate image is published
-(`ghcr.io/gizawnahom/ledgerops:0.2.0-rc.1`). A pull-and-run guide will be
-added once it has been run end to end on a clean machine. Until then, build
-from source as above.

@@ -88,8 +88,9 @@ all hold. CI runs them at 1,000 cases each:
 go test ./internal/domain/... ./internal/app/... -race -rapid.checks=1000
 ```
 
-To check a running ledger, ask for the trial balance. This uses the demo
-stack's operator key; see the [quickstart](../quickstart/):
+To check a running ledger, ask for the trial balance. This uses the operator
+key you set when starting the service (the demo stack's is `demo-operator-key`);
+see the [quickstart](../quickstart/):
 
 ```bash
 API=http://localhost:8080

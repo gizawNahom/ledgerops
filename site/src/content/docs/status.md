@@ -28,8 +28,8 @@ production.
   reference ids.
 - **No webhooks or event stream.** Integrations have to poll.
 - **No OpenAPI spec, client SDKs or stable release.** A signed release-candidate
-  image is published (`ghcr.io/gizawnahom/ledgerops:0.2.0-rc.1`), but the
-  [quickstart](../quickstart/) builds from source.
+  image is published (`ghcr.io/gizawnahom/ledgerops:0.2.0-rc.2`), and the
+  [quickstart](../quickstart/) runs it.
 - **No tenant key rotation** or tenant offboarding.
 - **No TLS in the service itself.** Run it behind a TLS-terminating proxy.
 - **Not tested with more than one app instance.**
